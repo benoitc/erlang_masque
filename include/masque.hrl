@@ -1,0 +1,52 @@
+%%% -*- erlang -*-
+%%%
+%%% MASQUE protocol constants (RFC 9298 - Proxying UDP in HTTP).
+%%%
+%%% Layered on top of HTTP Datagrams (RFC 9297) and HTTP/3 (RFC 9114),
+%%% exposed through `erlang_quic's `quic_h3' API.
+
+-ifndef(MASQUE_HRL).
+-define(MASQUE_HRL, true).
+
+%%====================================================================
+%% Extended CONNECT (RFC 9220 / RFC 8441)
+%%====================================================================
+
+%% The value of the `:protocol' pseudo-header for RFC 9298 requests.
+-define(MASQUE_CONNECT_UDP_PROTOCOL, <<"connect-udp">>).
+
+%% Default request URI template per RFC 9298 §3.
+%% Variables: `target_host' (IP literal, reg-name, or percent-encoded)
+%%            `target_port' (1..65535)
+-define(MASQUE_DEFAULT_URI_TEMPLATE,
+        <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
+
+%%====================================================================
+%% Inner datagram framing (RFC 9298 §5)
+%%====================================================================
+
+%% Context ID 0 carries raw UDP payloads. Non-zero contexts are reserved
+%% for extensions (e.g. compression, ICMP, QUIC-aware proxying).
+-define(MASQUE_CONTEXT_ID_UDP, 0).
+
+%%====================================================================
+%% Capsule types (RFC 9298 §7)
+%%====================================================================
+
+%% No capsule types are mandatory at the base spec. Unknown capsules
+%% MUST be silently ignored per RFC 9297 §3.3. Extension capsules are
+%% registered here as they are added to the IANA registry.
+
+%%====================================================================
+%% Error mapping (RFC 9298 §3)
+%%====================================================================
+
+-define(MASQUE_STATUS_BAD_REQUEST,       400). %% malformed request or path
+-define(MASQUE_STATUS_NOT_FOUND,         404). %% template did not match
+-define(MASQUE_STATUS_METHOD_NOT_ALLOWED,405). %% :method != CONNECT
+-define(MASQUE_STATUS_BAD_GATEWAY,       502). %% resolution / upstream failure
+-define(MASQUE_STATUS_GATEWAY_TIMEOUT,   504). %% upstream did not respond
+-define(MASQUE_STATUS_LOOP_DETECTED,     508). %% policy: self-loop
+-define(MASQUE_STATUS_NOT_IMPLEMENTED,   501). %% :protocol is not connect-udp
+
+-endif.

@@ -1,0 +1,262 @@
+%%% @doc MASQUE CONNECT-UDP proxy listener.
+%%%
+%%% Two public entry points:
+%%%
+%%% <ul>
+%%%   <li>{@link start_listener/2} starts a dedicated `quic_h3' server
+%%%       that handles MASQUE end-to-end; the usual case for a pure
+%%%       MASQUE proxy.</li>
+%%%   <li>{@link h3_handlers/1} returns the `handler' and
+%%%       `connection_handler' functions that a caller can splat into
+%%%       their own `quic_h3:start_server/3' opts. This lets users who
+%%%       already run an HTTP/3 service add CONNECT-UDP support without
+%%%       giving up ownership of the listener; non-MASQUE requests can
+%%%       be routed to a `fallback' fun.</li>
+%%% </ul>
+%%%
+%%% For each inbound request the handler validates the Extended
+%%% CONNECT envelope per RFC 9298, matches the `:path' against the
+%%% configured URI template, and either accepts the tunnel (2xx
+%%% response, stream left open for subsequent datagrams) or rejects
+%%% with the HTTP status selected by `masque_errors:handshake_status/1'
+%%% (or defers to the caller's `fallback' fun when provided).
+-module(masque_server).
+
+-export([
+    start_listener/2,
+    stop_listener/1,
+    h3_handlers/1
+]).
+
+-include("masque.hrl").
+
+-type listener_name() :: atom().
+-type listener_opts() :: masque:listener_opts().
+
+-type h3_handler_fun() ::
+    fun((Conn :: pid(), StreamId :: non_neg_integer(),
+         Method :: binary(), Path :: binary(),
+         Headers :: [{binary(), binary()}]) -> any()).
+
+-type connection_handler_fun() :: fun((pid()) -> map()).
+
+-export_type([listener_name/0, listener_opts/0,
+              h3_handler_fun/0, connection_handler_fun/0]).
+
+%%====================================================================
+%% API
+%%====================================================================
+
+%% @doc Start a MASQUE listener as a dedicated `quic_h3' server.
+%%
+%% Required keys: `port', `cert', `key' (DER-encoded, same shape as
+%% `quic_h3:start_server/3' expects). Optional `uri_template' defaults
+%% to RFC 9298's well-known path; optional `handler' defaults to
+%% `masque_udp_proxy_handler'; optional `fallback' is invoked for
+%% requests that are not CONNECT-UDP tunnels (see `h3_handlers/1').
+-spec start_listener(listener_name(), listener_opts()) ->
+    {ok, pid()} | {error, term()}.
+start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
+    Opts = defaults(Opts0),
+    Port = maps:get(port, Opts),
+    #{handler := Handler,
+      connection_handler := ConnectionHandler} = h3_handlers(Opts),
+    ServerOpts = #{
+        cert => maps:get(cert, Opts),
+        key => maps:get(key, Opts),
+        settings => merged_settings(Opts),
+        %% `alpn' and `max_datagram_frame_size' are not declared keys
+        %% on `quic_h3:server_opts()' - they belong in `quic_opts'.
+        quic_opts => #{
+            alpn => maps:get(alpn, Opts, [<<"h3">>]),
+            max_datagram_frame_size =>
+                maps:get(max_datagram_frame_size, Opts, 65535)
+        },
+        handler => Handler,
+        connection_handler => ConnectionHandler
+    },
+    quic_h3:start_server(Name, Port, ServerOpts).
+
+%% @doc Stop a MASQUE listener.
+-spec stop_listener(listener_name()) -> ok | {error, term()}.
+stop_listener(Name) ->
+    quic_h3:stop_server(Name).
+
+%% @doc Return the `handler' and `connection_handler' functions for a
+%% MASQUE proxy, in a shape that can be dropped into a user-owned
+%% `quic_h3:start_server/3' call.
+%%
+%% Accepted keys (all optional unless noted):
+%% <ul>
+%%   <li>`uri_template' - RFC 6570 template, default
+%%       {@link masque:connect_udp_template/0}.</li>
+%%   <li>`handler' - module implementing the {@link masque_handler}
+%%       behaviour, default `masque_udp_proxy_handler'.</li>
+%%   <li>`handler_opts' - arbitrary term passed to the handler module's
+%%       `init/2' callback.</li>
+%%   <li>`fallback' - `fun(Conn, StreamId, Method, Path, Headers) -> any()'
+%%       invoked when the request is not a CONNECT-UDP tunnel. Absent
+%%       → non-MASQUE requests are rejected with 405/501/404 as
+%%       appropriate.</li>
+%% </ul>
+%%
+%% Caveat: MASQUE must be the H3 connection's `owner' (HTTP Datagrams
+%% are delivered to that pid), so the returned `connection_handler'
+%% overrides the listener-wide owner. Sharing a single `quic_h3'
+%% connection with another extension that also needs the `owner' slot
+%% (e.g. WebTransport) is not supported in v0.1; run those on separate
+%% listeners.
+-spec h3_handlers(map()) ->
+    #{handler := h3_handler_fun(),
+      connection_handler := connection_handler_fun()}.
+h3_handlers(Opts0) ->
+    Opts = defaults(Opts0),
+    Template    = maps:get(uri_template, Opts),
+    HandlerMod  = maps:get(handler, Opts),
+    HandlerOpts = maps:get(handler_opts, Opts, #{}),
+    Fallback    = maps:get(fallback, Opts, undefined),
+    ConnectionHandler = fun(_ConnPid) ->
+        {ok, Router} = masque_server_connection:start_link(),
+        #{
+            owner   => Router,
+            handler => make_handler_fun(Template, HandlerMod,
+                                        HandlerOpts, Fallback, Router),
+            h3_datagram_enabled => true
+        }
+    end,
+    #{
+        handler => make_handler_fun(Template, HandlerMod,
+                                    HandlerOpts, Fallback, undefined),
+        connection_handler => ConnectionHandler
+    }.
+
+%%====================================================================
+%% Internal
+%%====================================================================
+
+defaults(Opts) ->
+    D = #{
+        uri_template => ?MASQUE_DEFAULT_URI_TEMPLATE,
+        handler      => masque_udp_proxy_handler
+    },
+    maps:merge(D, Opts).
+
+%% MASQUE requires `SETTINGS_ENABLE_CONNECT_PROTOCOL = 1' and
+%% `SETTINGS_H3_DATAGRAM = 1'. Merge these on top of any user-supplied
+%% settings rather than clobbering them.
+merged_settings(Opts) ->
+    User = maps:get(settings, Opts, #{}),
+    maps:merge(User, #{
+        enable_connect_protocol => 1,
+        h3_datagram => 1
+    }).
+
+make_handler_fun(Template, HandlerMod, HandlerOpts, Fallback, Router) ->
+    fun(Conn, StreamId, Method, Path, Headers) ->
+        handle_request(Conn, StreamId, Method, Path, Headers,
+                       Template, HandlerMod, HandlerOpts, Fallback, Router)
+    end.
+
+handle_request(Conn, StreamId, Method, Path, Headers,
+               Template, HandlerMod, HandlerOpts, Fallback, Router) ->
+    case validate(Method, Path, Headers, Template) of
+        {ok, Req0} ->
+            Req = Req0#{handler_opts => HandlerOpts},
+            case accept_request(HandlerMod, Req) of
+                accept ->
+                    ok = quic_h3:send_response(Conn, StreamId, 200,
+                                               response_headers()),
+                    spawn_session(Conn, StreamId, Router,
+                                  HandlerMod, HandlerOpts, Req);
+                {reject, Reason} ->
+                    reject(Conn, StreamId, Reason)
+            end;
+        {error, Reason} ->
+            %% Not a MASQUE request - delegate to the caller's
+            %% `fallback' if they provided one, otherwise reject.
+            case Fallback of
+                undefined ->
+                    reject(Conn, StreamId, Reason);
+                Fun when is_function(Fun, 5) ->
+                    Fun(Conn, StreamId, Method, Path, Headers)
+            end
+    end.
+
+spawn_session(_Conn, _StreamId, undefined, _Handler, _HOpts, _Req) ->
+    %% No router attached - this path is only hit by the listener-wide
+    %% default handler (connection_handler override should always be
+    %% in effect). Nothing to route without it.
+    ok;
+spawn_session(Conn, StreamId, Router, Handler, HOpts, Req) ->
+    Args = #{conn => Conn, stream_id => StreamId, router => Router,
+             handler => Handler, handler_opts => HOpts, req => Req},
+    {ok, _Pid} = masque_server_connection:start_session(Router, Args),
+    ok.
+
+validate(Method, Path, Headers, Template) ->
+    case Method of
+        <<"CONNECT">> ->
+            Protocol = header(<<":protocol">>, Headers),
+            case Protocol of
+                ?MASQUE_CONNECT_UDP_PROTOCOL ->
+                    match_path(Path, Headers, Template);
+                _ ->
+                    {error, bad_protocol}
+            end;
+        _ ->
+            {error, bad_method}
+    end.
+
+match_path(Path, Headers, Template) ->
+    case masque_uri:match(Template, Path) of
+        {ok, #{target_host := Host, target_port := Port}} ->
+            {ok, #{
+                method => <<"CONNECT">>,
+                path => Path,
+                authority => header(<<":authority">>, Headers, <<>>),
+                scheme => header(<<":scheme">>, Headers, <<"https">>),
+                target_host => Host,
+                target_port => Port,
+                headers => Headers
+            }};
+        {error, bad_port} ->
+            {error, bad_port};
+        {error, bad_host} ->
+            {error, bad_host};
+        {error, _} ->
+            {error, bad_path}
+    end.
+
+accept_request(HandlerMod, Req) ->
+    _ = code:ensure_loaded(HandlerMod),
+    case erlang:function_exported(HandlerMod, accept, 1) of
+        true  -> HandlerMod:accept(Req);
+        false -> masque_handler:default_accept(Req)
+    end.
+
+reject(Conn, StreamId, Reason) ->
+    Status = masque_errors:handshake_status(Reason),
+    Phrase = masque_errors:status_reason(Reason),
+    Body = <<Phrase/binary, "\n">>,
+    Headers = [
+        {<<"content-type">>, <<"text/plain; charset=utf-8">>},
+        {<<"content-length">>, integer_to_binary(byte_size(Body))}
+    ],
+    ok = quic_h3:send_response(Conn, StreamId, Status, Headers),
+    ok = quic_h3:send_data(Conn, StreamId, Body, true).
+
+response_headers() ->
+    [
+        %% Capsule-Protocol header per RFC 9297 §3.4 - signals that
+        %% the proxy supports capsule framing on the request body.
+        {<<"capsule-protocol">>, <<"?1">>}
+    ].
+
+header(Name, Headers) ->
+    header(Name, Headers, undefined).
+
+header(Name, Headers, Default) ->
+    case lists:keyfind(Name, 1, Headers) of
+        {_, V} -> V;
+        false  -> Default
+    end.
