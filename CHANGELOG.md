@@ -4,6 +4,25 @@ All notable changes to `masque` are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-04-17
+
+### Added
+
+- HTTP/2 transport (`masque_h2_client_session`, `masque_h2_server`,
+  `masque_h2_server_session`) using Extended CONNECT (RFC 8441) and
+  DATAGRAM capsules (RFC 9297 S3.2) on the request-body stream.
+- Apple-style transport racing: `masque:connect/3` accepts
+  `transports => [h3, h2]` (default) and gives h3 a 250 ms head
+  start before launching h2 in parallel. First 2xx wins; the loser
+  is cancelled. Tunable via `prefer_timeout_ms`.
+- `masque:start_listener_h2/2` and `masque:h2_handlers/1` for
+  dedicated h2 listeners and integration into user-owned h2 servers.
+- `masque_h2_session_sup` (simple_one_for_one under `masque_sup`)
+  for proper OTP supervision of h2 server sessions.
+- `set_owner/2` gen_statem call on both session modules so the
+  transport racer can transfer ownership after a winning handshake.
+- `erlang_h2` 0.4.0 as a required dependency (tag-pinned).
+
 ## [0.1.0] - 2026-04-16
 
 First release. RFC 9298 CONNECT-UDP over HTTP/3, client + server.

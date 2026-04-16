@@ -7,18 +7,82 @@ and the server-side handler module lifecycle.
 
 ## Contents
 
-1. [Client delivery modes](#1-client-delivery-modes)
-2. [Multiple tunnels from one client](#2-multiple-tunnels-from-one-client)
-3. [Multiple tunnels on one listener](#3-multiple-tunnels-on-one-listener)
-4. [Integrating MASQUE with an existing `quic_h3` server](#4-integrating-masque-with-an-existing-quic_h3-server)
-5. [Handler behaviour lifecycle](#5-handler-behaviour-lifecycle)
-6. [Capsule protocol](#6-capsule-protocol)
-7. [Error mapping](#7-error-mapping)
-8. [Known limitations](#8-known-limitations)
+1. [Transport selection (h3/h2 racing)](#1-transport-selection)
+2. [Client delivery modes](#2-client-delivery-modes)
+3. [Multiple tunnels from one client](#3-multiple-tunnels-from-one-client)
+4. [Multiple tunnels on one listener](#4-multiple-tunnels-on-one-listener)
+5. [Integrating MASQUE with an existing server](#5-integrating-masque-with-an-existing-server)
+6. [Handler behaviour lifecycle](#6-handler-behaviour-lifecycle)
+7. [Capsule protocol](#7-capsule-protocol)
+8. [Error mapping](#8-error-mapping)
+9. [Known limitations](#9-known-limitations)
 
 ---
 
-## 1. Client delivery modes
+## 1. Transport selection
+
+By default `masque:connect/3` races HTTP/3 and HTTP/2 in parallel,
+following the pattern Apple uses in Network.framework and iCloud
+Private Relay:
+
+1. Start an h3 (QUIC) connection attempt immediately.
+2. After `prefer_timeout_ms` (default 250 ms), start an h2
+   (TCP+TLS) attempt in parallel.
+3. Whichever handshake produces a 2xx first wins. The loser is
+   cancelled.
+
+This gives h3 a head start on networks where QUIC works, while
+falling back to h2 in ~250 ms on networks that block UDP.
+
+```erlang
+%% Default: race both (recommended for production)
+{ok, Sess} = masque:connect(ProxyURI, Target, #{verify => verify_none}).
+
+%% Force h3 only (tests, known-QUIC environments)
+{ok, Sess} = masque:connect(ProxyURI, Target,
+                            #{transports => [h3],
+                              verify => verify_none}).
+
+%% Force h2 only (UDP-blocked networks, firewall policy)
+{ok, Sess} = masque:connect(ProxyURI, Target,
+                            #{transports => [h2],
+                              verify => verify_none}).
+
+%% Tune the head-start window (e.g. 500 ms for high-latency links)
+{ok, Sess} = masque:connect(ProxyURI, Target,
+                            #{prefer_timeout_ms => 500,
+                              verify => verify_none}).
+```
+
+### Server-side transport listeners
+
+HTTP/3 and HTTP/2 need separate listeners (QUIC is UDP, h2 is TCP):
+
+```erlang
+%% h3 listener (existing API, DER cert/key)
+masque:start_listener(my_h3, #{port => 4433, cert => CertDer, key => KeyDer}).
+
+%% h2 listener (PEM file paths, matching erlang_h2 convention)
+masque:start_listener_h2(my_h2, #{port => 4434,
+                                   cert => "cert.pem",
+                                   key => "key.pem"}).
+```
+
+Both listeners share the same `masque_handler` behaviour, so the
+same handler module works on either transport.
+
+### How it works under the hood
+
+On HTTP/3, UDP payloads travel as native HTTP Datagrams (RFC 9297).
+On HTTP/2, there is no datagram channel, so every UDP payload is
+wrapped in a DATAGRAM capsule (RFC 9297 S3.2) and sent as stream
+body data. The `masque` API hides this difference: `send_packet`,
+`recv_packet`, and `{masque_packet, _, _}` messages look the same
+regardless of transport.
+
+---
+
+## 2. Client delivery modes
 
 `masque:connect/3` returns a `session()` pid. A session has two
 delivery modes for inbound UDP payloads:
@@ -51,7 +115,7 @@ Both modes also surface closure:
 
 ---
 
-## 2. Multiple tunnels from one client
+## 3. Multiple tunnels from one client
 
 Every call to `masque:connect/3` returns an independent session with
 its own QUIC connection. Open as many as you need concurrently.
@@ -84,7 +148,7 @@ Notes:
 
 ---
 
-## 3. Multiple tunnels on one listener
+## 4. Multiple tunnels on one listener
 
 The server side already scales: every accepted HTTP/3 connection gets
 its own router (`masque_server_connection`) that demultiplexes inbound
@@ -104,7 +168,7 @@ authentication headers you care about.
 
 ---
 
-## 4. Integrating MASQUE with an existing `quic_h3` server
+## 5. Integrating MASQUE with an existing server
 
 `masque:start_listener/2` is the one-call path: it spins up a
 dedicated `quic_h3` listener that handles nothing but CONNECT-UDP.
@@ -183,7 +247,7 @@ two separate listeners on different ports.
 
 ---
 
-## 5. Handler behaviour lifecycle
+## 6. Handler behaviour lifecycle
 
 Custom server-side logic is a module implementing the
 [`masque_handler`](../src/masque_handler.erl) behaviour. All callbacks
@@ -248,7 +312,7 @@ See [`masque_errors`](../src/masque_errors.erl) for the full
 
 ---
 
-## 6. Capsule protocol
+## 7. Capsule protocol
 
 RFC 9297 capsules travel reliably on the CONNECT-UDP request stream
 body. They're how future extensions will negotiate context IDs,
@@ -279,7 +343,7 @@ don't understand.
 
 ---
 
-## 7. Error mapping
+## 8. Error mapping
 
 RFC 9298 failure modes are rendered as HTTP status codes by
 [`masque_errors:handshake_status/1`](../src/masque_errors.erl):
@@ -302,7 +366,7 @@ RFC 9298 failure modes are rendered as HTTP status codes by
 
 ---
 
-## 8. Known limitations
+## 9. Known limitations
 
 - **One owner per QUIC connection.** MASQUE takes the `owner` slot;
   running it alongside another extension that also needs `owner`
@@ -312,9 +376,13 @@ RFC 9298 failure modes are rendered as HTTP status codes by
   same proxy today mean multiple QUIC handshakes. Tunnel multiplexing
   over a single client connection is on the roadmap (phase 2).
 - **No proxy chaining / authorization hooks yet.** The design is
-  sketched for v0.2; track
+  sketched for v0.3; track
   [`docs/features.md`](features.md#deferred-to-follow-up-releases).
-- **HTTP/2 transport not supported.** RFC 9298 is targeted at HTTP/3
-  in this library; HTTP/2 datagrams (RFC 9297 §2.2) are out of scope.
+- **HTTP/2 datagrams are reliable.** On h2, UDP payloads travel as
+  capsules on a TCP stream, so they gain ordering and reliability
+  that raw UDP lacks. Applications depending on packet loss or
+  reordering semantics should force `transports => [h3]`.
+- **HTTP/1.1 Upgrade not supported.** RFC 9298 also defines an
+  HTTP/1.1 path; this library covers h3 and h2 only.
 - **RFC 9484 (Proxying IP)** lives in a separate library on top of
   `masque`, not here.

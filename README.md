@@ -1,9 +1,12 @@
 # masque
 
 An Erlang implementation of [RFC 9298 - Proxying UDP in HTTP][rfc9298]
-(MASQUE CONNECT-UDP) over **HTTP/3**, built on
-[`erlang_quic`][quic]'s `quic_h3` stack. HTTP/1.1 Upgrade and
-HTTP/2 transports are not supported.
+(MASQUE CONNECT-UDP) over **HTTP/3** and **HTTP/2**, built on
+[`erlang_quic`][quic] (`quic_h3`) and [`erlang_h2`][h2].
+
+The client races both transports Apple-style (h3 first, h2 after
+250 ms, first 2xx wins) so tunnels connect quickly even on networks
+that block QUIC.
 
 `masque` lets you tunnel arbitrary UDP flows (DNS, QUIC, WireGuard,
 game traffic, …) through an authenticated HTTPS endpoint. Both proxy
@@ -23,9 +26,12 @@ game traffic, …) through an authenticated HTTPS endpoint. Both proxy
   delivery modes
 - End-to-end compliance CT suite (17 cases) + eunit codecs (29 tests)
   + PropEr properties (3) + skippable external-peer interop suite
+- HTTP/2 fallback with Apple-style head-start racing (`transports`
+  option; default `[h3, h2]`)
 
 - **[Usage guide](docs/usage.md)** - client modes, multiple tunnels,
-  integration with an existing `quic_h3` server, handler lifecycle.
+  integration with an existing `quic_h3` or `h2` server, handler
+  lifecycle, transport selection.
 - **[Feature matrix](docs/features.md)** - RFC coverage and
   intentional non-goals.
 
@@ -150,3 +156,4 @@ Apache License 2.0. See [`LICENSE`](LICENSE).
 
 [rfc9298]: https://www.rfc-editor.org/rfc/rfc9298
 [quic]:    https://github.com/benoitc/erlang_quic
+[h2]:      https://github.com/benoitc/erlang_h2

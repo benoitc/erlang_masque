@@ -11,7 +11,20 @@ Current coverage of the `masque` library against the relevant RFCs.
 | 9298 §5 - Context-ID framing | Context 0 for UDP payloads; extension contexts pass through | Implemented (`masque_datagram`) |
 | 9298 §7 - Capsules | Stream-body capsule dispatch with `handle_capsule/3` callback | Implemented (`masque_capsule`) |
 | 9297 - HTTP Datagrams | Quarter-stream-id encoding and settings | Delegated to `quic_h3` |
+| 9297 §3.2 - DATAGRAM capsule on HTTP/2 | UDP payloads as capsules on the request body stream | Implemented (`masque_h2_*`) |
 | 9220 - Extended CONNECT in HTTP/3 | `:protocol` negotiation and `SETTINGS_ENABLE_CONNECT_PROTOCOL` | Delegated to `quic_h3` |
+| 8441 - Extended CONNECT in HTTP/2 | `:protocol` negotiation | Delegated to `erlang_h2` |
+
+## Delivered in v0.2
+
+- HTTP/2 transport: client session (`masque_h2_client_session`),
+  server + per-tunnel session (`masque_h2_server`,
+  `masque_h2_server_session`), supervised under
+  `masque_h2_session_sup`.
+- Apple-style transport racing (`masque_racer`): h3 head-start,
+  h2 fallback, first 2xx wins.
+- `masque:start_listener_h2/2` and `masque:h2_handlers/1` for h2
+  listeners and integration with user-owned h2 servers.
 
 ## Delivered in v0.1
 
@@ -51,8 +64,12 @@ Current coverage of the `masque` library against the relevant RFCs.
 
 - **Proxy chaining + authorization hooks** - client option to dial one
   proxy through another; per-tunnel auth callback. Pencilled in for
-  v0.2.
+  v0.3.
+- **CONNECT-TCP** (draft-ietf-masque-connect-tcp) - TCP tunneling
+  alongside UDP. Required for a Private Relay-style deployment.
 - **RFC 9484 (Proxying IP in HTTP)** - distinct protocol, separate
   library on top of `masque`.
+- **Private Relay-style relay** - separate application on top of
+  `masque` with two-hop chaining, Privacy Pass auth, policy engine.
 - **HTTP/2 fallback** - RFC 9298 targets HTTP/3 here; HTTP/2 datagram
   support (RFC 9297 §2.2) is not planned.
