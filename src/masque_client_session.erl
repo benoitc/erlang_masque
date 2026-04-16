@@ -27,7 +27,8 @@
 %% used by the code but omitted from `quic_h3:connect_opts()'). The
 %% suppression is scoped to the single call site so every other
 %% type-check in this module remains strict.
--dialyzer({nowarn_function, [do_connect/2, request_headers/1]}).
+-dialyzer({nowarn_function, [do_connect/2, request_headers/1,
+                              build_authority/2, is_ipv6_literal/1]}).
 
 -record(data, {
     owner         :: pid(),
@@ -50,7 +51,9 @@
     rx_buf = queue:new() :: queue:queue(binary()),
     rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
     %% Incoming capsule bytes buffered from stream body data.
-    cap_buf = <<>> :: binary()
+    cap_buf = <<>> :: binary(),
+    %% Ceiling on `cap_buf' (resets the stream with H3_MESSAGE_ERROR).
+    max_cap :: pos_integer()
 }).
 
 %%====================================================================
@@ -93,6 +96,8 @@ init({Target, Opts, Owner}) ->
     {TargetHost, TargetPort} = Target,
     MRef = erlang:monitor(process, Owner),
     Mode = maps:get(mode, Opts, message),
+    MaxCap = maps:get(max_capsule_size, Opts,
+                      ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE),
     Data = #data{
         owner = Owner,
         owner_ref = MRef,
@@ -103,7 +108,8 @@ init({Target, Opts, Owner}) ->
         uri_template = maps:get(uri_template, Opts,
                                 ?MASQUE_DEFAULT_URI_TEMPLATE),
         capsule_proto = maps:get(capsule_protocol, Opts, true),
-        mode = Mode
+        mode = Mode,
+        max_cap = MaxCap
     },
     {ok, connecting, Data,
      [{next_event, internal, {do_handshake, Opts}}]}.
@@ -125,14 +131,21 @@ connecting(internal, {do_handshake, Opts}, Data) ->
     end;
 connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
-connecting(info, {quic_h3, _Conn, {response, StreamId, Status, _Headers}},
+connecting(info, {quic_h3, _Conn, {response, StreamId, Status, Headers}},
            #data{stream_id = StreamId} = Data) ->
     cancel_timer(Data#data.timeout_ref),
     case Status of
         S when S >= 200, S < 300 ->
-            reply_handshake(Data, ok),
-            {next_state, open, Data#data{timeout_ref = undefined,
-                                         handshake_from = undefined}};
+            case validate_response(Headers, Data) of
+                ok ->
+                    reply_handshake(Data, ok),
+                    {next_state, open,
+                     Data#data{timeout_ref = undefined,
+                               handshake_from = undefined}};
+                {error, _} = Err ->
+                    reply_handshake(Data, Err),
+                    {stop, element(2, Err)}
+            end;
         _ ->
             reply_handshake(Data,
                             {error, {handshake_rejected, Status}}),
@@ -173,14 +186,19 @@ open({call, From}, stop, Data) ->
 open(info, {quic_h3, _Conn, {datagram, StreamId, Payload}},
      #data{stream_id = StreamId} = Data) ->
     case masque_datagram:decode(Payload) of
-        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} ->
+        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}}
+          when byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD ->
             {keep_state, deliver_packet(UdpBytes, Data)};
         _ ->
             {keep_state, Data}
     end;
-open(info, {quic_h3, _Conn, {data, StreamId, Bytes, _Fin}},
-     #data{stream_id = StreamId, cap_buf = Buf} = Data) ->
-    drain_client_capsules(<<Buf/binary, Bytes/binary>>, Data);
+open(info, {quic_h3, _Conn, {data, StreamId, Bytes, Fin}},
+     #data{stream_id = StreamId, cap_buf = Buf, max_cap = Max} = Data) ->
+    New = <<Buf/binary, Bytes/binary>>,
+    case byte_size(New) > Max of
+        true  -> client_stream_abort(capsule_buffer_overflow, Data);
+        false -> drain_client_capsules(New, Fin, Data)
+    end;
 open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
 open(info, {quic_h3, _Conn, {stream_reset, StreamId, _ErrorCode}},
@@ -196,12 +214,21 @@ open(info, _Msg, Data) ->
 send_packet_out(#data{conn = Conn, stream_id = StreamId}, Ctx, Payload)
   when is_integer(Ctx), Ctx >= 0 ->
     PayloadSize = iolist_size(Payload),
+    %% RFC 9298 §5: UDP payloads capped at 65527 regardless of the
+    %% QUIC datagram budget.
+    UDPLimit = Ctx =:= ?MASQUE_CONTEXT_ID_UDP
+               andalso PayloadSize > ?MASQUE_MAX_UDP_PAYLOAD,
     Max = quic_h3:max_datagram_size(Conn, StreamId),
     CtxOverhead = quic_varint_size(Ctx),
-    case Max > 0 andalso (PayloadSize + CtxOverhead) > Max of
+    QUICLimit = Max > 0 andalso (PayloadSize + CtxOverhead) > Max,
+    if
+        UDPLimit ->
+            {error, {payload_too_large, PayloadSize,
+                     ?MASQUE_MAX_UDP_PAYLOAD}};
+        QUICLimit ->
+            {error, {datagram_too_large, PayloadSize,
+                     Max - CtxOverhead}};
         true ->
-            {error, {datagram_too_large, PayloadSize, Max - CtxOverhead}};
-        false ->
             Enc = masque_datagram:encode(Ctx, Payload),
             quic_h3:send_datagram(Conn, StreamId, Enc)
     end.
@@ -211,6 +238,38 @@ quic_varint_size(V) when V < 64        -> 1;
 quic_varint_size(V) when V < 16384     -> 2;
 quic_varint_size(V) when V < 1073741824 -> 4;
 quic_varint_size(_)                    -> 8.
+
+%% RFC 9297 §3.4: responses carrying the Capsule Protocol must not
+%% also carry `content-length' / `content-type' indicating a regular
+%% body. We also reject a response that drops the `capsule-protocol'
+%% header when we advertised it on the request, since that signals a
+%% peer that did not actually opt in.
+validate_response(Headers, #data{capsule_proto = CapsuleRequested}) ->
+    HasContentLength = header_present(<<"content-length">>, Headers),
+    HasContentType   = header_present(<<"content-type">>, Headers),
+    CapsuleAck = case header_value(<<"capsule-protocol">>, Headers) of
+                     <<"?1">> -> true;
+                     _        -> false
+                 end,
+    if
+        HasContentLength ->
+            {error, malformed_response};
+        HasContentType ->
+            {error, malformed_response};
+        CapsuleRequested andalso not CapsuleAck ->
+            {error, capsule_protocol_not_acknowledged};
+        true ->
+            ok
+    end.
+
+header_present(Name, Headers) ->
+    lists:keyfind(Name, 1, Headers) =/= false.
+
+header_value(Name, Headers) ->
+    case lists:keyfind(Name, 1, Headers) of
+        {_, V} -> V;
+        false  -> undefined
+    end.
 
 notify_owner_closed(Reason, #data{owner = Owner, mode = message}) ->
     Owner ! {masque_closed, self(), Reason};
@@ -242,17 +301,24 @@ deliver_packet(UdpBytes, #data{mode = queue,
             Data#data{rx_buf = queue:in(UdpBytes, Buf)}
     end.
 
-drain_client_capsules(Buf, #data{owner = Owner} = Data) ->
+drain_client_capsules(Buf, Fin, #data{owner = Owner} = Data) ->
     case masque_capsule:decode(Buf) of
         {ok, {Type, Value, Rest}} ->
             Owner ! {masque_capsule, self(), Type, Value},
-            drain_client_capsules(Rest, Data#data{cap_buf = <<>>});
+            drain_client_capsules(Rest, Fin, Data#data{cap_buf = <<>>});
+        {more, _} when Fin, Buf =/= <<>> ->
+            %% Stream closed mid-capsule.
+            client_stream_abort(truncated_capsule, Data);
         {more, _} ->
             {keep_state, Data#data{cap_buf = Buf}};
         {error, _} ->
-            %% Malformed capsule - close the session.
-            {next_state, closing, Data, [{next_event, internal, do_close}]}
+            client_stream_abort(malformed_capsule, Data)
     end.
+
+client_stream_abort(Reason, #data{conn = Conn, stream_id = StreamId} = Data) ->
+    _ = (catch quic_h3:cancel(Conn, StreamId, ?MASQUE_H3_MESSAGE_ERROR)),
+    _ = notify_owner_closed(Reason, Data),
+    {stop, Reason, Data}.
 
 drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->
     %% The timer fired; if the waiter is still in the queue, reply with
@@ -325,8 +391,7 @@ request_headers(#data{proxy_host = ProxyHost, proxy_port = ProxyPort,
         target_host => TargetHost,
         target_port => TargetPort
     }),
-    Authority = iolist_to_binary([
-        ProxyHost, ":", integer_to_binary(ProxyPort)]),
+    Authority = build_authority(ProxyHost, ProxyPort),
     Base = [
         {<<":method">>, <<"CONNECT">>},
         {<<":protocol">>, ?MASQUE_CONNECT_UDP_PROTOCOL},
@@ -360,3 +425,18 @@ cancel_timer(Ref) ->
 to_bin(X) when is_binary(X) -> X;
 to_bin(X) when is_list(X)   -> list_to_binary(X);
 to_bin(X) when is_atom(X)   -> atom_to_binary(X, utf8).
+
+%% IPv6 literals must be bracketed in a URI authority
+%% (RFC 3986 §3.2.2). IPv4 literals and hostnames go through bare.
+build_authority(Host, Port) ->
+    HostPart = case is_ipv6_literal(Host) of
+                   true  -> <<"[", Host/binary, "]">>;
+                   false -> Host
+               end,
+    iolist_to_binary([HostPart, ":", integer_to_binary(Port)]).
+
+is_ipv6_literal(Host) ->
+    case inet:parse_address(binary_to_list(Host)) of
+        {ok, {_, _, _, _, _, _, _, _}} -> true;
+        _ -> false
+    end.

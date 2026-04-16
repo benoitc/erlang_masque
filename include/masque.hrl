@@ -29,6 +29,17 @@
 %% for extensions (e.g. compression, ICMP, QUIC-aware proxying).
 -define(MASQUE_CONTEXT_ID_UDP, 0).
 
+%% RFC 9298 §5: maximum UDP payload carried in an HTTP Datagram.
+%% Anything larger is refused outbound and dropped inbound.
+-define(MASQUE_MAX_UDP_PAYLOAD, 65527).
+
+%% Default capsule-buffer ceiling in bytes. Capsules exceeding this
+%% trigger a stream reset with H3_MESSAGE_ERROR (RFC 9297 §3.3).
+-define(MASQUE_DEFAULT_MAX_CAPSULE_SIZE, 1048576).
+
+%% RFC 9114 §8.1: stream-level error codes we emit.
+-define(MASQUE_H3_MESSAGE_ERROR, 16#10E).
+
 %%====================================================================
 %% Capsule types (RFC 9298 §7)
 %%====================================================================

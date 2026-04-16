@@ -22,7 +22,9 @@
     handler    :: module(),
     h_state    :: term(),
     req        :: map(),
-    cap_buf = <<>> :: binary()
+    cap_buf = <<>> :: binary(),
+    max_cap    :: pos_integer(),
+    cap_fin_seen = false :: boolean()
 }).
 
 %%====================================================================
@@ -43,11 +45,14 @@ init(#{conn := Conn, stream_id := StreamId, router := Router,
     %% proxy is ready to forward UDP. So the user's `init/2' (which
     %% for the built-in proxy opens the gen_udp socket and validates
     %% the target) MUST run to completion before we commit to 200.
+    MaxCap = maps:get(max_capsule_size, HOpts,
+                      ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE),
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, Actions} ->
             State0 = #state{conn = Conn, stream_id = StreamId,
                             router = Router, handler = Handler,
-                            h_state = HState, req = Req},
+                            h_state = HState, req = Req,
+                            max_cap = MaxCap},
             ok = quic_h3:send_response(Conn, StreamId, 200,
                                        response_headers()),
             %% Claim the request stream so its body bytes (capsules)
@@ -84,20 +89,24 @@ handle_cast(_Msg, S) ->
 handle_info({masque_datagram_in, StreamId, Payload},
             #state{stream_id = StreamId} = S) ->
     case masque_datagram:decode(Payload) of
-        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} ->
+        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}}
+          when byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD ->
             dispatch(handle_packet, [UdpBytes], S);
+        {ok, {?MASQUE_CONTEXT_ID_UDP, _}} ->
+            %% Oversized UDP payload — RFC 9298 §5 says drop.
+            {noreply, S};
         {ok, {_Ctx, _Bytes}} ->
             %% Unknown context-id: RFC 9298 §5 says silently drop.
             {noreply, S};
         {error, _} ->
             {noreply, S}
     end;
-handle_info({masque_stream_data, StreamId, Data, _Fin},
-            #state{stream_id = StreamId, cap_buf = Buf} = S) ->
-    drain_capsules(<<Buf/binary, Data/binary>>, S);
-handle_info({quic_h3, _Conn, {data, StreamId, Data, _Fin}},
-            #state{stream_id = StreamId, cap_buf = Buf} = S) ->
-    drain_capsules(<<Buf/binary, Data/binary>>, S);
+handle_info({masque_stream_data, StreamId, Data, Fin},
+            #state{stream_id = StreamId} = S) ->
+    handle_stream_bytes(Data, Fin, S);
+handle_info({quic_h3, _Conn, {data, StreamId, Data, Fin}},
+            #state{stream_id = StreamId} = S) ->
+    handle_stream_bytes(Data, Fin, S);
 handle_info({masque_stream_reset, StreamId, _ErrorCode},
             #state{stream_id = StreamId} = S) ->
     {stop, peer_reset, S};
@@ -170,9 +179,13 @@ do_actions([{send_packet, Data} | Rest], S) ->
 do_actions([{send_packet, Ctx, Data} | Rest], S) ->
     %% Silent drop on oversize - RFC 9298 §5 (HTTP Datagrams are
     %% unreliable; application can resend if it cares).
+    PayloadSize = iolist_size(Data),
     Max = quic_h3:max_datagram_size(S#state.conn, S#state.stream_id),
     Overhead = ctx_overhead(Ctx),
-    case Max > 0 andalso (iolist_size(Data) + Overhead) > Max of
+    TooBigForUDP = Ctx =:= ?MASQUE_CONTEXT_ID_UDP
+                   andalso PayloadSize > ?MASQUE_MAX_UDP_PAYLOAD,
+    TooBigForQUIC = Max > 0 andalso (PayloadSize + Overhead) > Max,
+    case TooBigForUDP orelse TooBigForQUIC of
         true ->
             do_actions(Rest, S);
         false ->
@@ -192,23 +205,41 @@ do_actions([{close_session, _Code, _Msg} | _Rest], S) ->
 do_actions([_Unknown | Rest], S) ->
     do_actions(Rest, S).
 
+handle_stream_bytes(Data, Fin, #state{cap_buf = Buf,
+                                      max_cap = Max} = S) ->
+    New = <<Buf/binary, Data/binary>>,
+    case byte_size(New) > Max of
+        true ->
+            reset_and_stop(capsule_buffer_overflow, S);
+        false ->
+            drain_capsules(New, Fin, S#state{cap_fin_seen = Fin})
+    end.
+
 %% Pull every complete capsule out of `Buf` and dispatch it to the
-%% handler module. Stops when the buffer is empty or decode reports
-%% `{more, _}'; malformed capsules terminate the session.
-drain_capsules(Buf, S) ->
+%% handler module. Malformed capsules and a FIN arriving mid-capsule
+%% abort the HTTP/3 stream with H3_MESSAGE_ERROR per RFC 9297 §3.3 /
+%% RFC 9114 §4.1.2.
+drain_capsules(Buf, Fin, S) ->
     case masque_capsule:decode(Buf) of
         {ok, {Type, Value, Rest}} ->
             case dispatch(handle_capsule, [Type, Value], S) of
                 {noreply, S2} ->
-                    drain_capsules(Rest, S2#state{cap_buf = <<>>});
+                    drain_capsules(Rest, Fin, S2#state{cap_buf = <<>>});
                 {stop, _, _} = Stop ->
                     Stop
             end;
+        {more, _} when Fin, Buf =/= <<>> ->
+            %% Stream closed mid-capsule — truncated.
+            reset_and_stop(truncated_capsule, S);
         {more, _} ->
             {noreply, S#state{cap_buf = Buf}};
         {error, _Reason} ->
-            {stop, malformed_capsule, S}
+            reset_and_stop(malformed_capsule, S)
     end.
+
+reset_and_stop(Reason, #state{conn = Conn, stream_id = StreamId} = S) ->
+    _ = (catch quic_h3:cancel(Conn, StreamId, ?MASQUE_H3_MESSAGE_ERROR)),
+    {stop, Reason, S}.
 
 safe_apply(M, F, A) ->
     try apply(M, F, A)

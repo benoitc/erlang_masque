@@ -83,10 +83,17 @@ init(#{target_host := Host, target_port := Port} = Req, Opts) ->
 
 handle_packet(Data, #state{socket = S} = State) ->
     case gen_udp:send(S, Data) of
-        ok -> {ok, State};
-        {error, _Reason} ->
-            %% Dropping outbound is fine - UDP is lossy. Surfacing
-            %% persistent socket errors belongs in Patch 2.
+        ok ->
+            {ok, State};
+        {error, Reason} when Reason =:= closed;
+                             Reason =:= einval;
+                             Reason =:= enotconn ->
+            %% Socket is unusable - close the tunnel rather than
+            %% silently black-holing every packet.
+            {stop, {target_socket_lost, Reason}, State};
+        {error, _Transient} ->
+            %% Transient send errors (ENOBUFS, EAGAIN, etc.): drop and
+            %% keep going - HTTP Datagrams are unreliable by design.
             {ok, State}
     end.
 
@@ -105,6 +112,10 @@ handle_info({udp_passive, Socket}, #state{socket = Socket} = State) ->
     %% Only hit if the user passed `{active, N}` in socket_opts.
     _ = inet:setopts(Socket, [{active, true}]),
     {ok, State};
+handle_info({udp_error, Socket, Reason}, #state{socket = Socket} = State) ->
+    {stop, {target_socket_error, Reason}, State};
+handle_info({udp_closed, Socket}, #state{socket = Socket} = State) ->
+    {stop, target_socket_closed, State};
 handle_info(_Other, State) ->
     {ok, State}.
 

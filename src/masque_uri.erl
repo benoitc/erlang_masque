@@ -12,7 +12,7 @@
 %%% operators are not supported.
 -module(masque_uri).
 
--export([expand/2, match/2]).
+-export([expand/2, match/2, to_path/1, valid_host/1]).
 
 -export_type([template/0, vars/0]).
 
@@ -25,10 +25,12 @@
 %%====================================================================
 
 %% @doc Expand a URI template using `Vars`. Returns the absolute path
-%% to place in the `:path` pseudo-header.
+%% to place in the `:path` pseudo-header. Absolute `http(s)://…`
+%% templates are accepted - only the path-and-onwards portion is
+%% expanded, mirroring what servers actually match at runtime.
 -spec expand(template(), vars()) -> binary().
 expand(Template, Vars) when is_binary(Template), is_map(Vars) ->
-    iolist_to_binary(expand_parts(parse(Template), Vars)).
+    iolist_to_binary(expand_parts(parse(to_path(Template)), Vars)).
 
 %% @doc Match a request path against a template.
 %%
@@ -40,13 +42,17 @@ expand(Template, Vars) when is_binary(Template), is_map(Vars) ->
   | {error, no_match | bad_port | bad_host | bad_template}.
 match(Template, Path) when is_binary(Template), is_binary(Path) ->
     try
-        Parts = parse(Template),
+        Parts = parse(to_path(Template)),
         case match_parts(Parts, Path, #{}) of
             {ok, #{target_host := H, target_port := P} = Out}
               when byte_size(H) > 0 ->
-                case parse_port(P) of
-                    {ok, PortInt} -> {ok, Out#{target_port := PortInt}};
-                    error -> {error, bad_port}
+                case {valid_host(H), parse_port(P)} of
+                    {true, {ok, PortInt}} ->
+                        {ok, Out#{target_port := PortInt}};
+                    {false, _} ->
+                        {error, bad_host};
+                    {_, error} ->
+                        {error, bad_port}
                 end;
             {ok, _} ->
                 {error, bad_host};
@@ -56,6 +62,60 @@ match(Template, Path) when is_binary(Template), is_binary(Path) ->
     catch
         throw:bad_template -> {error, bad_template}
     end.
+
+%% @doc Strip an absolute `http(s)://…' template to its path portion.
+%% Path-shaped templates pass through unchanged.
+-spec to_path(binary()) -> binary().
+to_path(<<"http://",  Rest/binary>>) -> drop_authority(Rest);
+to_path(<<"https://", Rest/binary>>) -> drop_authority(Rest);
+to_path(Path) -> Path.
+
+drop_authority(Rest) ->
+    case binary:match(Rest, <<"/">>) of
+        {Pos, 1} ->
+            <<_:Pos/binary, Tail/binary>> = Rest,
+            Tail;
+        nomatch ->
+            <<"/">>
+    end.
+
+%% @doc Validate `Host' as an IPv4 literal, IPv6 literal, or LDH
+%% registered name. Rejects IPv6 zone identifiers (RFC 3986 excludes
+%% the `%zone' suffix from URI host syntax).
+-spec valid_host(binary()) -> boolean().
+valid_host(<<>>) ->
+    false;
+valid_host(Host) when is_binary(Host) ->
+    S = binary_to_list(Host),
+    case inet:parse_address(S) of
+        {ok, _} ->
+            not has_zone_id(Host);
+        {error, _} ->
+            valid_reg_name(Host)
+    end.
+
+has_zone_id(Host) ->
+    binary:match(Host, <<"%">>) =/= nomatch.
+
+%% reg-name per RFC 3986: one or more labels joined by dots, each label
+%% a non-empty run of alphanumerics / `-' with no leading or trailing
+%% hyphen.
+valid_reg_name(Host) ->
+    Labels = binary:split(Host, <<".">>, [global]),
+    Labels =/= [] andalso lists:all(fun valid_label/1, Labels).
+
+valid_label(<<>>) -> false;
+valid_label(L) ->
+    Bytes = binary_to_list(L),
+    lists:all(fun is_ldh/1, Bytes)
+    andalso hd(Bytes) =/= $-
+    andalso lists:last(Bytes) =/= $-.
+
+is_ldh(C) when C >= $a, C =< $z -> true;
+is_ldh(C) when C >= $A, C =< $Z -> true;
+is_ldh(C) when C >= $0, C =< $9 -> true;
+is_ldh($-)                      -> true;
+is_ldh(_)                       -> false.
 
 %%====================================================================
 %% Template parsing

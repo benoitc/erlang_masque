@@ -38,7 +38,9 @@
     integration_custom_h3_listener/1,
     fallback_receives_non_masque_requests/1,
     udp_source_spoofing_rejected/1,
-    handshake_rejected_when_init_fails/1
+    handshake_rejected_when_init_fails/1,
+    udp_payload_65527_boundary/1,
+    reject_response_carries_proxy_status/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -70,7 +72,9 @@ all() -> [
     integration_custom_h3_listener,
     fallback_receives_non_masque_requests,
     udp_source_spoofing_rejected,
-    handshake_rejected_when_init_fails
+    handshake_rejected_when_init_fails,
+    udp_payload_65527_boundary,
+    reject_response_carries_proxy_status
 ].
 
 init_per_suite(Config) ->
@@ -92,7 +96,8 @@ init_per_testcase(Case, Config)
        Case =:= graceful_close_signals_owner;
        Case =:= many_packets_in_order;
        Case =:= concurrent_tunnels;
-       Case =:= large_payload_near_mtu ->
+       Case =:= large_payload_near_mtu;
+       Case =:= udp_payload_65527_boundary ->
     Certs = ?config(certs, Config),
     ServerCtx = maps:merge(Certs, #{handler => masque_echo_handler}),
     {ok, Server} = masque_test_helpers:start_masque_server(ServerCtx),
@@ -335,11 +340,15 @@ collect_packets(Sess, N, Timeout) ->
 
 oversize_packet_rejected(Config) ->
     Sess = connect_to(Config),
-    %% QUIC datagrams are bounded by path MTU minus headers; a 64 KiB
-    %% payload is guaranteed to exceed it.
+    %% 70000 bytes exceeds both the RFC 9298 §5 UDP payload ceiling
+    %% (65527) and the path MTU - either `payload_too_large' or
+    %% `datagram_too_large' is a valid refusal.
     Huge = binary:copy(<<"X">>, 70000),
-    ?assertMatch({error, {datagram_too_large, 70000, _}},
-                 masque:send_packet(Sess, Huge)),
+    case masque:send_packet(Sess, Huge) of
+        {error, {payload_too_large, 70000, _}}  -> ok;
+        {error, {datagram_too_large, 70000, _}} -> ok;
+        Other -> ct:fail({unexpected, Other})
+    end,
     ok = masque:close(Sess).
 
 graceful_close_signals_owner(Config) ->
@@ -483,6 +492,33 @@ start_integration_server(#{cert := Cert, key := Key}, WithFallback) ->
         Err ->
             Err
     end.
+
+udp_payload_65527_boundary(Config) ->
+    Sess = connect_to(Config),
+    %% 65528 bytes is one over the RFC 9298 §5 ceiling - refused.
+    Over = binary:copy(<<"X">>, 65528),
+    ?assertMatch({error, {payload_too_large, 65528, 65527}},
+                 masque:send_packet(Sess, Over)),
+    ok = masque:close(Sess).
+
+reject_response_carries_proxy_status(Config) ->
+    Server = ?config(server, Config),
+    Port = maps:get(port, Server),
+    {ok, Conn} = masque_test_helpers:h3_client_connect(Port, #{}),
+    %% Path does not match the template - server must respond 404 and
+    %% include a Proxy-Status header naming the failure class.
+    {ok, StreamId} = quic_h3:request(Conn, [
+        {<<":method">>, <<"CONNECT">>},
+        {<<":protocol">>, <<"connect-udp">>},
+        {<<":scheme">>, <<"https">>},
+        {<<":authority">>, <<"localhost">>},
+        {<<":path">>, <<"/nonsense/path/">>}
+    ]),
+    {ok, 404, Headers} =
+        masque_test_helpers:h3_await_response(StreamId, 5000),
+    {_, PS} = lists:keyfind(<<"proxy-status">>, 1, Headers),
+    ?assertEqual(<<"masque; error=http_protocol_error">>, PS),
+    quic_h3:close(Conn).
 
 udp_source_spoofing_rejected(Config) ->
     Server = ?config(server, Config),

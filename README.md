@@ -1,12 +1,13 @@
 # masque
 
 An Erlang implementation of [RFC 9298 - Proxying UDP in HTTP][rfc9298]
-(MASQUE CONNECT-UDP), built on top of [`erlang_quic`][quic]'s HTTP/3
-stack.
+(MASQUE CONNECT-UDP) over **HTTP/3**, built on
+[`erlang_quic`][quic]'s `quic_h3` stack. HTTP/1.1 Upgrade and
+HTTP/2 transports are not supported.
 
 `masque` lets you tunnel arbitrary UDP flows (DNS, QUIC, WireGuard,
-game traffic, …) through a standard, authenticated HTTPS endpoint.
-Both proxy **server** and **client** are shipped in this library.
+game traffic, …) through an authenticated HTTPS endpoint. Both proxy
+**server** and **client** are shipped in this library.
 
 ## Features
 

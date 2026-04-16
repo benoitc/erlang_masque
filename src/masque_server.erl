@@ -220,15 +220,25 @@ validate(Method, Path, Headers, Template) ->
 match_path(Path, Headers, Template) ->
     case masque_uri:match(Template, Path) of
         {ok, #{target_host := Host, target_port := Port}} ->
-            {ok, #{
-                method => <<"CONNECT">>,
-                path => Path,
-                authority => header(<<":authority">>, Headers, <<>>),
-                scheme => header(<<":scheme">>, Headers, <<"https">>),
-                target_host => Host,
-                target_port => Port,
-                headers => Headers
-            }};
+            %% `:scheme' and `:authority' presence is enforced by
+            %% `quic_h3' for Extended CONNECT; we surface whatever it
+            %% delivers without silently substituting defaults.
+            case {header(<<":scheme">>, Headers),
+                  header(<<":authority">>, Headers)} of
+                {Scheme, Authority} when Scheme =/= undefined,
+                                          Authority =/= undefined ->
+                    {ok, #{
+                        method => <<"CONNECT">>,
+                        path => Path,
+                        authority => Authority,
+                        scheme => Scheme,
+                        target_host => Host,
+                        target_port => Port,
+                        headers => Headers
+                    }};
+                _ ->
+                    {error, bad_path}
+            end;
         {error, bad_port} ->
             {error, bad_port};
         {error, bad_host} ->
@@ -250,10 +260,33 @@ reject(Conn, StreamId, Reason) ->
     Body = <<Phrase/binary, "\n">>,
     Headers = [
         {<<"content-type">>, <<"text/plain; charset=utf-8">>},
-        {<<"content-length">>, integer_to_binary(byte_size(Body))}
+        {<<"content-length">>, integer_to_binary(byte_size(Body))},
+        %% RFC 9209 structured field - gives clients a machine-readable
+        %% tag for the failure beyond the numeric status (RFC 9298 §3
+        %% recommendation).
+        {<<"proxy-status">>, proxy_status_field(Reason)}
     ],
     ok = quic_h3:send_response(Conn, StreamId, Status, Headers),
     ok = quic_h3:send_data(Conn, StreamId, Body, true).
+
+%% Map MASQUE handshake errors to a minimal Proxy-Status structured
+%% field value. We use `masque' as the proxy identifier and attach an
+%% RFC 9209 `error' parameter naming the failure class.
+proxy_status_field(Reason) ->
+    Error = proxy_status_error(Reason),
+    <<"masque; error=", Error/binary>>.
+
+proxy_status_error(bad_method)        -> <<"http_protocol_error">>;
+proxy_status_error(bad_protocol)      -> <<"http_protocol_error">>;
+proxy_status_error(bad_path)          -> <<"http_protocol_error">>;
+proxy_status_error(bad_port)          -> <<"http_protocol_error">>;
+proxy_status_error(bad_host)          -> <<"http_protocol_error">>;
+proxy_status_error(resolution_failed) -> <<"dns_error">>;
+proxy_status_error(upstream_timeout)  -> <<"connection_timeout">>;
+proxy_status_error(forbidden)         -> <<"destination_ip_prohibited">>;
+proxy_status_error(loop_detected)     -> <<"proxy_loop_detected">>;
+proxy_status_error(overload)          -> <<"proxy_internal_error">>;
+proxy_status_error(_)                 -> <<"proxy_internal_error">>.
 
 header(Name, Headers) ->
     header(Name, Headers, undefined).

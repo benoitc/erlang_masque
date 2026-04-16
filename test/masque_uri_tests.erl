@@ -60,6 +60,37 @@ match_zero_port_test() ->
                  masque_uri:match(?TPL,
                                   <<"/.well-known/masque/udp/192.0.2.6/0/">>)).
 
+absolute_template_strips_to_path_test() ->
+    AbsTpl = <<"https://proxy.example/.well-known/masque/udp/"
+               "{target_host}/{target_port}/">>,
+    ?assertEqual(<<"/.well-known/masque/udp/192.0.2.6/443/">>,
+                 masque_uri:expand(AbsTpl,
+                                   #{target_host => <<"192.0.2.6">>,
+                                     target_port => 443})),
+    {ok, Vars} = masque_uri:match(
+                    AbsTpl,
+                    <<"/.well-known/masque/udp/192.0.2.6/443/">>),
+    ?assertEqual(<<"192.0.2.6">>, maps:get(target_host, Vars)).
+
+valid_host_accepts_ipv4_ipv6_and_hostname_test() ->
+    ?assert(masque_uri:valid_host(<<"192.0.2.6">>)),
+    ?assert(masque_uri:valid_host(<<"example.com">>)),
+    ?assert(masque_uri:valid_host(<<"a-b.c0">>)),
+    ?assert(masque_uri:valid_host(<<"2001:db8::1">>)).
+
+valid_host_rejects_zone_id_and_bad_labels_test() ->
+    ?assertNot(masque_uri:valid_host(<<>>)),
+    ?assertNot(masque_uri:valid_host(<<"fe80::1%eth0">>)),
+    ?assertNot(masque_uri:valid_host(<<"-bad.example">>)),
+    ?assertNot(masque_uri:valid_host(<<"bad-.example">>)),
+    ?assertNot(masque_uri:valid_host(<<"spaces in.host">>)).
+
+match_rejects_bad_host_shape_test() ->
+    Tpl = ?TPL,
+    ?assertEqual({error, bad_host},
+                 masque_uri:match(Tpl,
+                     <<"/.well-known/masque/udp/-bad/443/">>)).
+
 roundtrip_test_() ->
     Cases = [
         {<<"192.0.2.6">>, 443},
