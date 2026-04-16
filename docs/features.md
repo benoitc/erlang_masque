@@ -28,6 +28,25 @@ Current coverage of the `masque` library against the relevant RFCs.
 10. External-peer interop suite scaffolding (skippable)
 11. Two runnable examples
 
+## Security posture (v0.1)
+
+- Handler `init/2` runs before the `200` handshake response, so a
+  tunnel only commits once DNS and socket setup have succeeded.
+- `masque_udp_proxy_handler` calls `gen_udp:connect/3` on the target
+  so the kernel drops any packet whose source does not match.
+- UDP payloads are clamped to the RFC 9298 §5 limit of 65527 bytes
+  in both directions.
+- Malformed or truncated capsules trigger an HTTP/3 stream reset
+  with `H3_MESSAGE_ERROR` (RFC 9297 §3.3) instead of a silent close.
+- The incoming capsule buffer is bounded (default 1 MiB, tunable
+  via `handler_opts.max_capsule_size`).
+- Rejected handshakes carry a `Proxy-Status` header (RFC 9209)
+  naming the failure class (`dns_error`, `connection_timeout`,
+  `destination_ip_prohibited`, `http_protocol_error`, ...).
+- Client validates the handshake response: a 2xx carrying
+  `content-length` or `content-type` is rejected as malformed per
+  RFC 9297 §3.4.
+
 ## Deferred to follow-up releases
 
 - **Proxy chaining + authorization hooks** - client option to dial one
