@@ -39,11 +39,17 @@ start_link(Args) ->
 init(#{conn := Conn, stream_id := StreamId, router := Router,
        handler := Handler, handler_opts := HOpts, req := Req}) ->
     process_flag(trap_exit, true),
+    %% RFC 9298 §3: a 2xx response means the tunnel is set up and the
+    %% proxy is ready to forward UDP. So the user's `init/2' (which
+    %% for the built-in proxy opens the gen_udp socket and validates
+    %% the target) MUST run to completion before we commit to 200.
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, Actions} ->
             State0 = #state{conn = Conn, stream_id = StreamId,
                             router = Router, handler = Handler,
                             h_state = HState, req = Req},
+            ok = quic_h3:send_response(Conn, StreamId, 200,
+                                       response_headers()),
             %% Claim the request stream so its body bytes (capsules)
             %% are delivered here instead of being buffered inside
             %% `quic_h3'. Any already-buffered bytes are returned
@@ -53,6 +59,9 @@ init(#{conn := Conn, stream_id := StreamId, router := Router,
         {stop, Reason} ->
             {stop, Reason}
     end.
+
+response_headers() ->
+    [{<<"capsule-protocol">>, <<"?1">>}].
 
 claim_stream(#state{conn = Conn, stream_id = StreamId,
                     cap_buf = Buf} = S) ->

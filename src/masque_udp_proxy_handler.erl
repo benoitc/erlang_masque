@@ -22,6 +22,10 @@
 %%%   <li>`family => inet | inet6 | auto' (default `auto').</li>
 %%%   <li>`socket_opts => [gen_udp:option()]' - extra options merged on
 %%%       top of `[binary, {active, true}]'.</li>
+%%%   <li>`port => inet:port_number()' - bind the local UDP socket to
+%%%       a fixed port. Default `0' (kernel-assigned ephemeral).
+%%%       Useful for firewall rules; conflicts with concurrent tunnels
+%%%       that share a listener.</li>
 %%% </ul>
 -module(masque_udp_proxy_handler).
 -behaviour(masque_handler).
@@ -51,33 +55,52 @@ init(#{target_host := Host, target_port := Port} = Req, Opts) ->
     Family = pick_family(maps:get(family, Opts, auto), Host),
     SocketOpts = [binary, {active, true}
                   | maps:get(socket_opts, Opts, [])],
+    BindPort = maps:get(port, Opts, 0),
     case resolve(ResolverFun, Host, Family) of
         {ok, IP, BindFamily} ->
-            case gen_udp:open(0, [BindFamily | SocketOpts]) of
+            case gen_udp:open(BindPort, [BindFamily | SocketOpts]) of
                 {ok, Socket} ->
-                    {ok, #state{socket = Socket,
-                                target_ip = IP,
-                                target_port = Port}};
+                    %% Connect the socket to the resolved target so
+                    %% the kernel rejects inbound datagrams from any
+                    %% other source (RFC 9298 §4 threat model).
+                    case gen_udp:connect(Socket, IP, Port) of
+                        ok ->
+                            {ok, #state{socket = Socket,
+                                        target_ip = IP,
+                                        target_port = Port}};
+                        {error, CReason} ->
+                            _ = gen_udp:close(Socket),
+                            {stop, {resolution_failed,
+                                    {connect, CReason}}}
+                    end;
                 {error, Reason} ->
-                    {stop, {udp_open, Reason}}
+                    {stop, {resolution_failed, {udp_open, Reason}}}
             end;
         {error, Reason} ->
             _ = Req,  %% silence unused warning when tracing disabled
-            {stop, {resolve, Reason}}
+            {stop, {resolution_failed, {resolve, Reason}}}
     end.
 
-handle_packet(Data, #state{socket = S, target_ip = IP,
-                            target_port = P} = State) ->
-    case gen_udp:send(S, IP, P, Data) of
+handle_packet(Data, #state{socket = S} = State) ->
+    case gen_udp:send(S, Data) of
         ok -> {ok, State};
         {error, _Reason} ->
-            %% Dropping outbound is fine - UDP is lossy.
+            %% Dropping outbound is fine - UDP is lossy. Surfacing
+            %% persistent socket errors belongs in Patch 2.
             {ok, State}
     end.
 
-handle_info({udp, Socket, _FromIP, _FromPort, Bytes},
-            #state{socket = Socket} = State) ->
+%% Defensive double-check: on connected UDP the kernel already drops
+%% non-target sources, but we re-validate at application level in
+%% case a platform ever weakens that guarantee.
+handle_info({udp, Socket, FromIP, FromPort, Bytes},
+            #state{socket = Socket, target_ip = IP, target_port = Port} = State)
+  when FromIP =:= IP, FromPort =:= Port ->
     {ok, State, [{send_packet, Bytes}]};
+handle_info({udp, Socket, _FromIP, _FromPort, _Bytes},
+            #state{socket = Socket} = State) ->
+    %% Source mismatch - drop silently.
+    {ok, State};
 handle_info({udp_passive, Socket}, #state{socket = Socket} = State) ->
     %% Only hit if the user passed `{active, N}` in socket_opts.
     _ = inet:setopts(Socket, [{active, true}]),

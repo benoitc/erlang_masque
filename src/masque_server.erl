@@ -164,8 +164,6 @@ handle_request(Conn, StreamId, Method, Path, Headers,
             Req = Req0#{handler_opts => HandlerOpts},
             case accept_request(HandlerMod, Req) of
                 accept ->
-                    ok = quic_h3:send_response(Conn, StreamId, 200,
-                                               response_headers()),
                     spawn_session(Conn, StreamId, Router,
                                   HandlerMod, HandlerOpts, Req);
                 {reject, Reason} ->
@@ -182,16 +180,28 @@ handle_request(Conn, StreamId, Method, Path, Headers,
             end
     end.
 
-spawn_session(_Conn, _StreamId, undefined, _Handler, _HOpts, _Req) ->
-    %% No router attached - this path is only hit by the listener-wide
-    %% default handler (connection_handler override should always be
-    %% in effect). Nothing to route without it.
-    ok;
+spawn_session(Conn, StreamId, undefined, _Handler, _HOpts, _Req) ->
+    %% No router attached - fall back to 502 so the client does not
+    %% wait on a tunnel that will never carry data.
+    reject(Conn, StreamId, resolution_failed);
 spawn_session(Conn, StreamId, Router, Handler, HOpts, Req) ->
     Args = #{conn => Conn, stream_id => StreamId, router => Router,
              handler => Handler, handler_opts => HOpts, req => Req},
-    {ok, _Pid} = masque_server_connection:start_session(Router, Args),
-    ok.
+    case masque_server_connection:start_session(Router, Args) of
+        {ok, _Pid} ->
+            %% Session process has already sent the 200 response
+            %% from inside `init/1' - nothing more to do here.
+            ok;
+        {error, Reason} ->
+            %% Handler `init/2' refused (DNS failure, socket open
+            %% error, policy) - the handshake response was NOT yet
+            %% sent, so we can still reject with a meaningful status.
+            reject(Conn, StreamId, map_init_error(Reason))
+    end.
+
+map_init_error({resolution_failed, _}) -> resolution_failed;
+map_init_error({reject, Err})          -> Err;
+map_init_error(_)                      -> resolution_failed.
 
 validate(Method, Path, Headers, Template) ->
     case Method of
@@ -244,13 +254,6 @@ reject(Conn, StreamId, Reason) ->
     ],
     ok = quic_h3:send_response(Conn, StreamId, Status, Headers),
     ok = quic_h3:send_data(Conn, StreamId, Body, true).
-
-response_headers() ->
-    [
-        %% Capsule-Protocol header per RFC 9297 §3.4 - signals that
-        %% the proxy supports capsule framing on the request body.
-        {<<"capsule-protocol">>, <<"?1">>}
-    ].
 
 header(Name, Headers) ->
     header(Name, Headers, undefined).

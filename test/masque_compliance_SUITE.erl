@@ -36,7 +36,9 @@
     concurrent_tunnels/1,
     large_payload_near_mtu/1,
     integration_custom_h3_listener/1,
-    fallback_receives_non_masque_requests/1
+    fallback_receives_non_masque_requests/1,
+    udp_source_spoofing_rejected/1,
+    handshake_rejected_when_init_fails/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -66,7 +68,9 @@ all() -> [
     concurrent_tunnels,
     large_payload_near_mtu,
     integration_custom_h3_listener,
-    fallback_receives_non_masque_requests
+    fallback_receives_non_masque_requests,
+    udp_source_spoofing_rejected,
+    handshake_rejected_when_init_fails
 ].
 
 init_per_suite(Config) ->
@@ -91,6 +95,30 @@ init_per_testcase(Case, Config)
        Case =:= large_payload_near_mtu ->
     Certs = ?config(certs, Config),
     ServerCtx = maps:merge(Certs, #{handler => masque_echo_handler}),
+    {ok, Server} = masque_test_helpers:start_masque_server(ServerCtx),
+    [{server, Server} | Config];
+init_per_testcase(udp_source_spoofing_rejected, Config) ->
+    Certs = ?config(certs, Config),
+    {UdpPid, UdpPort} = start_udp_echo(),
+    ProxyBindPort = ephemeral_port(),
+    ServerCtx = maps:merge(Certs, #{
+        handler      => masque_udp_proxy_handler,
+        handler_opts => #{port => ProxyBindPort}
+    }),
+    {ok, Server} = masque_test_helpers:start_masque_server(ServerCtx),
+    [{server, Server},
+     {udp_pid, UdpPid},
+     {udp_port, UdpPort},
+     {proxy_bind_port, ProxyBindPort} | Config];
+init_per_testcase(handshake_rejected_when_init_fails, Config) ->
+    Certs = ?config(certs, Config),
+    %% Resolver always fails - `init/2' returns `{stop, _}' and the
+    %% handshake must come back with 502.
+    ServerCtx = maps:merge(Certs, #{
+        handler      => masque_udp_proxy_handler,
+        handler_opts => #{resolver =>
+                              fun(_) -> {error, nxdomain} end}
+    }),
     {ok, Server} = masque_test_helpers:start_masque_server(ServerCtx),
     [{server, Server} | Config];
 init_per_testcase(Case, Config)
@@ -455,6 +483,70 @@ start_integration_server(#{cert := Cert, key := Key}, WithFallback) ->
         Err ->
             Err
     end.
+
+udp_source_spoofing_rejected(Config) ->
+    Server = ?config(server, Config),
+    UdpPort = ?config(udp_port, Config),
+    ProxyBindPort = ?config(proxy_bind_port, Config),
+    ProxyURI = iolist_to_binary(
+        ["https://localhost:", integer_to_list(maps:get(port, Server))]),
+    {ok, Sess} = masque:connect(ProxyURI,
+                                {<<"127.0.0.1">>, UdpPort},
+                                #{verify => verify_none,
+                                  alpn => [<<"h3">>]}),
+    %% Legitimate round-trip works: client -> proxy -> echo -> back.
+    ok = masque:send_packet(Sess, <<"legit">>),
+    receive
+        {masque_packet, Sess, <<"legit">>} -> ok
+    after 5000 ->
+        ct:fail("legitimate echo never arrived")
+    end,
+    %% Spoof: a third-party UDP sender blasts the proxy's bound port.
+    %% The proxy socket is connected to the target, so the kernel
+    %% must drop these and the tunnel owner must not see them.
+    {ok, Attacker} = gen_udp:open(0, [binary, {active, false},
+                                       {ip, {127,0,0,1}}]),
+    [ok = gen_udp:send(Attacker, {127,0,0,1}, ProxyBindPort, <<"attack", N>>)
+     || N <- lists:seq(1, 10)],
+    ok = gen_udp:close(Attacker),
+    %% Give the kernel a beat, then check we received nothing extra.
+    ?assertEqual(timeout, drain_masque_packets(Sess, 300)),
+    ok = masque:close(Sess).
+
+handshake_rejected_when_init_fails(Config) ->
+    Server = ?config(server, Config),
+    Port = maps:get(port, Server),
+    ProxyURI = iolist_to_binary(
+        ["https://localhost:", integer_to_list(Port)]),
+    %% DNS resolution fails inside `init/2'. Because the 200 response
+    %% is only sent AFTER init succeeds, the client must see a 502
+    %% rather than a successful tunnel that silently never carries
+    %% data.
+    ?assertMatch({error, {handshake_rejected, 502}},
+                 masque:connect(ProxyURI,
+                                {<<"target.invalid">>, 443},
+                                #{verify => verify_none,
+                                  alpn => [<<"h3">>]})).
+
+%% Receive every pending `{masque_packet, Sess, _}' until `Timeout' ms
+%% of silence. Returns `timeout' on success (nothing spurious left),
+%% or `{unexpected, Data}' if any bytes were delivered.
+drain_masque_packets(Sess, Timeout) ->
+    receive
+        {masque_packet, Sess, Data} -> {unexpected, Data}
+    after Timeout ->
+        timeout
+    end.
+
+%% Ask the OS for an unused UDP port. We open then close a socket,
+%% which is a standard "next-available" trick. There's a tiny race
+%% window before the MASQUE proxy binds, but it's good enough for a
+%% single-shot test.
+ephemeral_port() ->
+    {ok, S} = gen_udp:open(0, [{ip, {127,0,0,1}}]),
+    {ok, P} = inet:port(S),
+    gen_udp:close(S),
+    P.
 
 %% Start a trivial in-process UDP echo server bound to loopback.
 start_udp_echo() ->
