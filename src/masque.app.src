@@ -9,7 +9,8 @@
     ssl,
     crypto,
     public_key,
-    quic
+    quic,
+    h2
    ]},
   {env, []},
   {modules, []},

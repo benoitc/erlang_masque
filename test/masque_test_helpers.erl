@@ -38,7 +38,9 @@ generate_certs() ->
             {ok, KeyPem}  = file:read_file(KeyFile),
             [{'Certificate', CertDer, _}] = public_key:pem_decode(CertPem),
             KeyDer = decode_key(KeyPem),
-            {ok, #{tmp_dir => TmpDir, cert => CertDer, key => KeyDer}};
+            {ok, #{tmp_dir => TmpDir,
+                   cert => CertDer, key => KeyDer,
+                   cert_file => CertFile, key_file => KeyFile}};
         _ ->
             os:cmd("rm -rf " ++ TmpDir),
             {error, cert_generation_failed}

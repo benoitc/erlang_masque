@@ -14,4 +14,9 @@ init([]) ->
     SupFlags = #{strategy => one_for_one,
                  intensity => 10,
                  period => 10},
-    {ok, {SupFlags, []}}.
+    Children = [
+        #{id    => masque_h2_session_sup,
+          start => {masque_h2_session_sup, start_link, []},
+          type  => supervisor}
+    ],
+    {ok, {SupFlags, Children}}.

@@ -15,7 +15,8 @@
 -export([send_packet/2, send_packet/3, recv_packet/2, set_active/2]).
 -export([send_capsule/3]).
 -export([start_listener/2, stop_listener/1]).
--export([h3_handlers/1]).
+-export([start_listener_h2/2, stop_listener_h2/1]).
+-export([h3_handlers/1, h2_handlers/1]).
 
 -include("masque.hrl").
 
@@ -38,15 +39,23 @@
 %% A UDP target - either a resolved IP or a host name to resolve, and a port.
 -type target() :: {inet:hostname() | inet:ip_address(), inet:port_number()}.
 
+-type transport() :: h3 | h2.
+
 -type connect_opts() ::
     #{
+        %% Transport preference. `[h3, h2]' (default) races the two,
+        %% giving h3 a `prefer_timeout_ms' head start; `[h3]' or
+        %% `[h2]' uses only that transport.
+        transports => [transport()],
+        prefer_timeout_ms => non_neg_integer(),
         uri_template => binary(),
         verify => verify_peer | verify_none,
         cacerts => [public_key:der_encoded()],
         timeout => pos_integer() | infinity,
         capsule_protocol => boolean(),
         active => true | false | once | pos_integer(),
-        owner => pid()
+        owner => pid(),
+        ssl_opts => [ssl:tls_client_option()]
     }.
 
 -type listener_opts() ::
@@ -84,23 +93,41 @@ connect(ProxyURI, Target, Opts) when is_map(Opts) ->
         {ok, Host, Port} ->
             Owner = maps:get(owner, Opts, self()),
             Opts1 = Opts#{proxy => {Host, Port}},
-            case masque_client_session:start_link(Target, Opts1, Owner) of
-                {ok, Pid} ->
-                    Timeout = maps:get(timeout, Opts, 5000),
-                    case gen_statem:call(Pid, handshake_await, Timeout + 1000) of
-                        ok ->
-                            {ok, Pid};
-                        {error, Reason} ->
-                            catch unlink(Pid),
-                            catch exit(Pid, kill),
-                            {error, Reason}
-                    end;
-                {error, Reason} ->
-                    {error, Reason}
-            end;
+            Transports = normalize_transports(
+                           maps:get(transports, Opts, [h3, h2])),
+            connect_via(Transports, Target, Opts1, Owner);
         {error, _} = Err ->
             Err
     end.
+
+connect_via([h3], Target, Opts, Owner) ->
+    dial_single(masque_client_session, Target, Opts, Owner);
+connect_via([h2], Target, Opts, Owner) ->
+    dial_single(masque_h2_client_session, Target, Opts, Owner);
+connect_via(Transports, Target, Opts, Owner)
+  when length(Transports) >= 2 ->
+    masque_racer:race(Transports, Target, Opts, Owner).
+
+%% Direct (non-racing) dial via a single transport module.
+dial_single(Mod, Target, Opts, Owner) ->
+    case Mod:start_link(Target, Opts, Owner) of
+        {ok, Pid} ->
+            Timeout = maps:get(timeout, Opts, 5000),
+            case gen_statem:call(Pid, handshake_await, Timeout + 1000) of
+                ok ->
+                    {ok, Pid};
+                {error, Reason} ->
+                    catch unlink(Pid),
+                    catch exit(Pid, kill),
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+normalize_transports([]) -> [h3, h2];
+normalize_transports(L) when is_list(L) ->
+    [T || T <- L, T =:= h3 orelse T =:= h2].
 
 %% @equiv connect(ProxyURI, Target, #{})
 -spec connect(proxy_uri(), target()) -> {ok, session()} | {error, term()}.
@@ -168,6 +195,21 @@ start_listener(Name, Opts) ->
 -spec stop_listener(atom()) -> ok | {error, term()}.
 stop_listener(Name) ->
     masque_server:stop_listener(Name).
+
+-spec start_listener_h2(atom(), map()) ->
+    {ok, h2:server_ref()} | {error, term()}.
+start_listener_h2(Name, Opts) ->
+    masque_h2_server:start_listener(Name, Opts).
+
+-spec stop_listener_h2(h2:server_ref()) -> ok | {error, term()}.
+stop_listener_h2(Ref) ->
+    masque_h2_server:stop_listener(Ref).
+
+-spec h2_handlers(map()) ->
+    #{handler := fun((pid(), non_neg_integer(), binary(), binary(),
+                      list()) -> any())}.
+h2_handlers(Opts) ->
+    masque_h2_server:h2_handlers(Opts).
 
 %% @doc Return the `handler' and `connection_handler' funs needed to
 %% run MASQUE inside a user-owned `quic_h3:start_server/3' call.

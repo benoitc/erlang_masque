@@ -40,7 +40,9 @@
     udp_source_spoofing_rejected/1,
     handshake_rejected_when_init_fails/1,
     udp_payload_65527_boundary/1,
-    reject_response_carries_proxy_status/1
+    reject_response_carries_proxy_status/1,
+    h2_echo_round_trip/1,
+    h2_udp_proxy_round_trip/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -74,7 +76,9 @@ all() -> [
     udp_source_spoofing_rejected,
     handshake_rejected_when_init_fails,
     udp_payload_65527_boundary,
-    reject_response_carries_proxy_status
+    reject_response_carries_proxy_status,
+    h2_echo_round_trip,
+    h2_udp_proxy_round_trip
 ].
 
 init_per_suite(Config) ->
@@ -140,6 +144,15 @@ init_per_testcase(Case, Config)
     end,
     {ok, Server} = masque_test_helpers:start_masque_server(ServerCtx),
     [{server, Server}, {udp_pid, UdpPid}, {udp_port, UdpPort} | Config];
+init_per_testcase(h2_echo_round_trip, Config) ->
+    Certs = ?config(certs, Config),
+    {ok, Server} = start_h2_echo_server(Certs),
+    [{server, Server} | Config];
+init_per_testcase(h2_udp_proxy_round_trip, Config) ->
+    Certs = ?config(certs, Config),
+    {UdpPid, UdpPort} = start_udp_echo(),
+    {ok, Server} = start_h2_proxy_server(Certs),
+    [{server, Server}, {udp_pid, UdpPid}, {udp_port, UdpPort} | Config];
 init_per_testcase(Case, Config)
   when Case =:= integration_custom_h3_listener;
        Case =:= fallback_receives_non_masque_requests ->
@@ -155,11 +168,12 @@ init_per_testcase(_Case, Config) ->
 
 end_per_testcase(_Case, Config) ->
     Server = ?config(server, Config),
-    %% Integration cases register the server via `quic_h3' directly;
-    %% everyone else uses the `masque' facade. Both `stop' entry
-    %% points accept the `name' atom.
     _ = (catch masque_test_helpers:stop_masque_server(Server)),
     _ = (catch quic_h3:stop_server(maps:get(name, Server))),
+    case maps:find(h2_ref, Server) of
+        {ok, Ref} -> _ = (catch h2:stop_server(Ref));
+        error     -> ok
+    end,
     case ?config(udp_pid, Config) of
         undefined -> ok;
         Pid       -> exit(Pid, shutdown)
@@ -239,7 +253,8 @@ client_connects_to_server(Config) ->
     {ok, Sess} = masque:connect(ProxyURI,
                                 {<<"192.0.2.6">>, 443},
                                 #{verify => verify_none,
-                                  alpn => [<<"h3">>]}),
+                                  alpn => [<<"h3">>],
+                                  transports => [h3]}),
     ?assertMatch(#{state := open,
                    target := {<<"192.0.2.6">>, 443}},
                  masque:info(Sess)),
@@ -255,6 +270,7 @@ client_handshake_rejected_maps_error(Config) ->
                        {<<"192.0.2.6">>, 443},
                        #{verify => verify_none,
                          alpn => [<<"h3">>],
+                         transports => [h3],
                          uri_template => <<"/wrong/{target_host}/{target_port}/">>}).
 
 datagram_echo_message_mode(Config) ->
@@ -382,7 +398,8 @@ udp_proxy_round_trip(Config) ->
     {ok, Sess} = masque:connect(ProxyURI,
                                 {<<"127.0.0.1">>, UdpPort},
                                 #{verify => verify_none,
-                                  alpn => [<<"h3">>]}),
+                                  alpn => [<<"h3">>],
+                                  transports => [h3]}),
     Payload = <<"ping through proxy">>,
     ok = masque:send_packet(Sess, Payload),
     receive
@@ -403,7 +420,8 @@ udp_proxy_policy_denies(Config) ->
                  masque:connect(ProxyURI,
                                 {<<"127.0.0.1">>, UdpPort},
                                 #{verify => verify_none,
-                                  alpn => [<<"h3">>]})).
+                                  alpn => [<<"h3">>],
+                                  transports => [h3]})).
 
 integration_custom_h3_listener(Config) ->
     Server = ?config(server, Config),
@@ -414,7 +432,8 @@ integration_custom_h3_listener(Config) ->
     {ok, Sess} = masque:connect(ProxyURI,
                                 {<<"127.0.0.1">>, 9},
                                 #{verify => verify_none,
-                                  alpn => [<<"h3">>]}),
+                                  alpn => [<<"h3">>],
+                                  transports => [h3]}),
     ?assertMatch(#{state := open}, masque:info(Sess)),
     ok = masque:close(Sess),
     %% (b) A non-MASQUE request goes to our fallback - we only check
@@ -529,7 +548,8 @@ udp_source_spoofing_rejected(Config) ->
     {ok, Sess} = masque:connect(ProxyURI,
                                 {<<"127.0.0.1">>, UdpPort},
                                 #{verify => verify_none,
-                                  alpn => [<<"h3">>]}),
+                                  alpn => [<<"h3">>],
+                                  transports => [h3]}),
     %% Legitimate round-trip works: client -> proxy -> echo -> back.
     ok = masque:send_packet(Sess, <<"legit">>),
     receive
@@ -562,7 +582,8 @@ handshake_rejected_when_init_fails(Config) ->
                  masque:connect(ProxyURI,
                                 {<<"target.invalid">>, 443},
                                 #{verify => verify_none,
-                                  alpn => [<<"h3">>]})).
+                                  alpn => [<<"h3">>],
+                                  transports => [h3]})).
 
 %% Receive every pending `{masque_packet, Sess, _}' until `Timeout' ms
 %% of silence. Returns `timeout' on success (nothing spurious left),
@@ -583,6 +604,101 @@ ephemeral_port() ->
     {ok, P} = inet:port(S),
     gen_udp:close(S),
     P.
+
+h2_echo_round_trip(Config) ->
+    Server = ?config(server, Config),
+    Port = maps:get(port, Server),
+    %% Raw h2 client to isolate: connect, send CONNECT-UDP, send a
+    %% DATAGRAM capsule, expect the echo handler to send one back.
+    {ok, Conn} = h2:connect("localhost", Port,
+                            #{transport => ssl, verify => verify_none,
+                              sync => true}),
+    Path = masque_uri:expand(?TPL,
+                             #{target_host => <<"192.0.2.6">>,
+                               target_port => 443}),
+    {ok, Sid} = h2:request(Conn, [
+        {<<":method">>, <<"CONNECT">>},
+        {<<":scheme">>, <<"https">>},
+        {<<":authority">>, <<"localhost">>},
+        {<<":path">>, Path},
+        {<<"capsule-protocol">>, <<"?1">>}
+    ], #{protocol => <<"connect-udp">>}),
+    %% Wait for 200
+    receive
+        {h2, Conn, {response, Sid, 200, _}} -> ok
+    after 5000 ->
+        ct:fail("no h2 200")
+    end,
+    %% Register ourselves as stream handler so we get data events
+    %% (by default client-mode h2 sends data to the owner, which IS
+    %% us, so this should work without registration - but let's be
+    %% explicit).
+    h2:set_stream_handler(Conn, Sid, self()),
+    %% Send a DATAGRAM capsule: inner = context-id(0) ++ "h2 echo"
+    Inner = iolist_to_binary(masque_datagram:encode(0, <<"h2 echo">>)),
+    Capsule = iolist_to_binary(h2_capsule:encode(datagram, Inner)),
+    timer:sleep(200),
+    SendR = h2:send_data(Conn, Sid, Capsule, false),
+    ct:pal("h2:send_data -> ~p, stream ~p alive=~p~n",
+           [SendR, Sid, is_process_alive(Conn)]),
+    %% Expect the echo back as a DATAGRAM capsule on the same stream.
+    %% Also dump any other messages for debugging.
+    receive
+        {h2, _, {data, _, EchoCapsule, _}} ->
+            {ok, {datagram, EchoInner}, _} = h2_capsule:decode(EchoCapsule),
+            {ok, {0, <<"h2 echo">>}} = masque_datagram:decode(EchoInner)
+    after 5000 ->
+        %% Dump remaining messages for debugging.
+        ct:pal("client mailbox: ~p~n",
+               [element(2, process_info(self(), messages))]),
+        ct:fail("no h2 echo data")
+    end,
+    h2:close(Conn).
+
+h2_udp_proxy_round_trip(Config) ->
+    Server = ?config(server, Config),
+    UdpPort = ?config(udp_port, Config),
+    Port = maps:get(port, Server),
+    ProxyURI = iolist_to_binary(
+        ["https://localhost:", integer_to_list(Port)]),
+    {ok, Sess} = masque:connect(ProxyURI,
+                                {<<"127.0.0.1">>, UdpPort},
+                                #{verify => verify_none,
+                                  transports => [h2]}),
+    Payload = <<"h2 proxy ping">>,
+    ok = masque:send_packet(Sess, Payload),
+    receive
+        {masque_packet, Sess, Reply} -> ?assertEqual(Payload, Reply)
+    after 5000 ->
+        ct:fail("no h2 proxy echo")
+    end,
+    ok = masque:close(Sess).
+
+start_h2_echo_server(#{cert_file := CertFile, key_file := KeyFile}) ->
+    Name = list_to_atom(
+        "h2_echo_" ++ integer_to_list(erlang:unique_integer([positive]))),
+    Opts = #{port => 0,
+             cert => CertFile, key => KeyFile,
+             handler => masque_echo_handler},
+    case masque_h2_server:start_listener(Name, Opts) of
+        {ok, Ref} ->
+            {_, _, BoundPort} = Ref,
+            {ok, #{name => Name, port => BoundPort, h2_ref => Ref}};
+        Err -> Err
+    end.
+
+start_h2_proxy_server(#{cert_file := CertFile, key_file := KeyFile}) ->
+    Name = list_to_atom(
+        "h2_proxy_" ++ integer_to_list(erlang:unique_integer([positive]))),
+    Opts = #{port => 0,
+             cert => CertFile, key => KeyFile,
+             handler => masque_udp_proxy_handler},
+    case masque_h2_server:start_listener(Name, Opts) of
+        {ok, Ref} ->
+            {_, _, BoundPort} = Ref,
+            {ok, #{name => Name, port => BoundPort, h2_ref => Ref}};
+        Err -> Err
+    end.
 
 %% Start a trivial in-process UDP echo server bound to loopback.
 start_udp_echo() ->
@@ -610,14 +726,21 @@ udp_echo_loop(S) ->
     end.
 
 connect_to(Config) ->
+    connect_to(Config, h3).
+
+connect_to(Config, Transport) ->
     Server = ?config(server, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
         ["https://localhost:", integer_to_list(Port)]),
+    Opts = case Transport of
+        h3 -> #{verify => verify_none, alpn => [<<"h3">>],
+                transports => [h3]};
+        h2 -> #{verify => verify_none, transports => [h2]}
+    end,
     {ok, Sess} = masque:connect(ProxyURI,
                                 {<<"192.0.2.6">>, 443},
-                                #{verify => verify_none,
-                                  alpn => [<<"h3">>]}),
+                                Opts),
     Sess.
 
 %%====================================================================
