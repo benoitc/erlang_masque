@@ -358,10 +358,17 @@ closing(internal, do_close, #data{conn = Conn, stream_id = StreamId} = Data) ->
 closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
 
-terminate(_Reason, _State, #data{conn = undefined}) ->
-    ok;
-terminate(_Reason, _State, #data{conn = Conn}) ->
+terminate(_Reason, _State, #data{conn = undefined} = D) ->
+    cancel_all_waiters(D);
+terminate(_Reason, _State, #data{conn = Conn} = D) ->
+    cancel_all_waiters(D),
     _ = (catch quic_h3:close(Conn)),
+    ok.
+
+cancel_all_waiters(#data{rx_waiters = Ws}) ->
+    _ = queue:fold(fun({_From, TRef}, _) ->
+        _ = erlang:cancel_timer(TRef), ok
+    end, ok, Ws),
     ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
@@ -391,7 +398,7 @@ do_connect(Data, Opts) ->
             %% for subsequent capsules, so suppress the default FIN.
             case quic_h3:request(Conn, ReqHeaders, #{end_stream => false}) of
                 {ok, StreamId} -> {ok, Conn, StreamId};
-                {error, R}     -> {error, {request, R}}
+                {error, R}     -> quic_h3:close(Conn), {error, {request, R}}
             end;
         {error, Reason} ->
             {error, {connect, Reason}}

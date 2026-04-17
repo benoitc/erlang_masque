@@ -207,10 +207,17 @@ closing(internal, do_close, #data{conn = Conn, stream_id = StreamId} = Data) ->
 closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
 
-terminate(_Reason, _State, #data{conn = undefined}) ->
-    ok;
-terminate(_Reason, _State, #data{conn = Conn}) ->
+terminate(_Reason, _State, #data{conn = undefined} = D) ->
+    cancel_all_waiters(D);
+terminate(_Reason, _State, #data{conn = Conn} = D) ->
+    cancel_all_waiters(D),
     _ = (catch h2:close(Conn)),
+    ok.
+
+cancel_all_waiters(#data{rx_waiters = Ws}) ->
+    _ = queue:fold(fun({_From, TRef}, _) ->
+        _ = erlang:cancel_timer(TRef), ok
+    end, ok, Ws),
     ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
@@ -238,7 +245,7 @@ do_connect(Data, Opts) ->
             case h2:request(Conn, ReqHeaders,
                             #{protocol => ?MASQUE_CONNECT_UDP_PROTOCOL}) of
                 {ok, StreamId} -> {ok, Conn, StreamId};
-                {error, R}     -> {error, {request, R}}
+                {error, R}     -> h2:close(Conn), {error, {request, R}}
             end;
         {error, Reason} ->
             {error, {connect, Reason}}
