@@ -16,6 +16,7 @@
 -export([send_capsule/3]).
 -export([start_listener/2, stop_listener/1]).
 -export([start_listener_h2/2, stop_listener_h2/1]).
+-export([start_chain_listener/2]).
 -export([h3_handlers/1, h2_handlers/1]).
 
 -include("masque.hrl").
@@ -204,6 +205,16 @@ start_listener_h2(Name, Opts) ->
 -spec stop_listener_h2(h2:server_ref()) -> ok | {error, term()}.
 stop_listener_h2(Ref) ->
     masque_h2_server:stop_listener(Ref).
+
+%% @doc Start a chaining (two-hop) listener.
+%%
+%% Convenience wrapper: starts an h3 listener with
+%% `masque_chain_handler' as the handler module. Every accepted
+%% tunnel is relayed to the upstream proxy specified in
+%% `handler_opts.upstream_proxy'.
+-spec start_chain_listener(atom(), map()) -> {ok, pid()} | {error, term()}.
+start_chain_listener(Name, Opts) ->
+    start_listener(Name, Opts#{handler => masque_chain_handler}).
 
 -spec h2_handlers(map()) ->
     #{handler := fun((pid(), non_neg_integer(), binary(), binary(),

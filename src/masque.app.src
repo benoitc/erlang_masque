@@ -1,6 +1,6 @@
 {application, masque,
  [{description, "MASQUE: Proxying UDP in HTTP (RFC 9298) for Erlang"},
-  {vsn, "0.2.0"},
+  {vsn, "0.3.0"},
   {registered, [masque_sup]},
   {mod, {masque_app, []}},
   {applications,

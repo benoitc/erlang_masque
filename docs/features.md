@@ -15,6 +15,13 @@ Current coverage of the `masque` library against the relevant RFCs.
 | 9220 - Extended CONNECT in HTTP/3 | `:protocol` negotiation and `SETTINGS_ENABLE_CONNECT_PROTOCOL` | Delegated to `quic_h3` |
 | 8441 - Extended CONNECT in HTTP/2 | `:protocol` negotiation | Delegated to `erlang_h2` |
 
+## Delivered in v0.3
+
+- Server-side proxy chaining (`masque_chain_handler`): an Ingress
+  listener opens a MASQUE client session to an upstream Egress proxy
+  and relays datagrams both ways. Enables Private Relay-style two-hop
+  tunnels with zero client-side changes.
+
 ## Delivered in v0.2
 
 - HTTP/2 transport: client session (`masque_h2_client_session`),
@@ -62,9 +69,9 @@ Current coverage of the `masque` library against the relevant RFCs.
 
 ## Deferred to follow-up releases
 
-- **Proxy chaining + authorization hooks** - client option to dial one
-  proxy through another; per-tunnel auth callback. Pencilled in for
-  v0.3.
+- **Per-tunnel authorization hooks** - pluggable auth callback
+  beyond `accept/1` (e.g. Privacy Pass token verification).
+  Pencilled in for v0.4.
 - **CONNECT-TCP** (draft-ietf-masque-connect-tcp) - TCP tunneling
   alongside UDP. Required for a Private Relay-style deployment.
 - **RFC 9484 (Proxying IP in HTTP)** - distinct protocol, separate

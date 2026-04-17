@@ -4,6 +4,17 @@ All notable changes to `masque` are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-04-17
+
+### Added
+
+- Server-side proxy chaining: `masque_chain_handler` relays each
+  tunnel through an upstream MASQUE proxy, enabling two-hop
+  topologies (Private Relay pattern). Convenience wrapper
+  `masque:start_chain_listener/2`.
+- 2 new CT cases: `chain_round_trip` (full Client-Ingress-Egress-UDP
+  path) and `chain_upstream_failure_returns_502`.
+
 ## [0.2.0] - 2026-04-17
 
 ### Added
