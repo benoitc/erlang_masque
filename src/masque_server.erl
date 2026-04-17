@@ -67,15 +67,24 @@ start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
         settings => merged_settings(Opts),
         %% `alpn' and `max_datagram_frame_size' are not declared keys
         %% on `quic_h3:server_opts()' - they belong in `quic_opts'.
-        quic_opts => #{
-            alpn => maps:get(alpn, Opts, [<<"h3">>]),
-            max_datagram_frame_size =>
-                maps:get(max_datagram_frame_size, Opts, 65535)
-        },
+        quic_opts => build_quic_opts(Opts),
         handler => Handler,
         connection_handler => ConnectionHandler
     },
     quic_h3:start_server(Name, Port, ServerOpts).
+
+build_quic_opts(Opts) ->
+    Base = #{
+        alpn => maps:get(alpn, Opts, [<<"h3">>]),
+        max_datagram_frame_size =>
+            maps:get(max_datagram_frame_size, Opts, 65535)
+    },
+    %% SO_REUSEPORT lets the OS spread incoming packets across N
+    %% listener processes for kernel-level scaling.
+    case maps:get(reuseport, Opts, false) of
+        true  -> Base#{reuseport => true};
+        false -> Base
+    end.
 
 %% @doc Stop a MASQUE listener.
 -spec stop_listener(listener_name()) -> ok | {error, term()}.

@@ -41,7 +41,11 @@ start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
         enable_connect_protocol => true,
         settings => merged_settings(Opts)
     },
-    h2:start_server(Name, Port, ServerOpts).
+    ServerOpts1 = case maps:find(acceptors, Opts) of
+        {ok, N} -> ServerOpts#{acceptors => N};
+        error   -> ServerOpts
+    end,
+    h2:start_server(Name, Port, ServerOpts1).
 
 -spec stop_listener(h2:server_ref() | listener_name()) -> ok | {error, term()}.
 stop_listener({_, _, _} = Ref) ->
@@ -57,15 +61,9 @@ stop_listener(Name) when is_atom(Name) ->
     #{handler := fun((pid(), non_neg_integer(), binary(), binary(),
                       list()) -> any())}.
 h2_handlers(Opts0) ->
-    Opts        = defaults(Opts0),
-    Template    = maps:get(uri_template, Opts),
-    HandlerMod  = maps:get(handler, Opts),
-    HandlerOpts = maps:get(handler_opts, Opts, #{}),
-    Fallback    = maps:get(fallback, Opts, undefined),
-    #{
-        handler => make_handler_fun(Template, HandlerMod,
-                                    HandlerOpts, Fallback)
-    }.
+    Opts = defaults(Opts0),
+    Dispatch = build_dispatch(Opts),
+    #{handler => make_dispatch_fun(Dispatch)}.
 
 %%====================================================================
 %% Internal
@@ -73,8 +71,10 @@ h2_handlers(Opts0) ->
 
 defaults(Opts) ->
     D = #{
-        uri_template => ?MASQUE_DEFAULT_URI_TEMPLATE,
-        handler      => masque_udp_proxy_handler
+        uri_template     => ?MASQUE_DEFAULT_URI_TEMPLATE,
+        tcp_uri_template => ?MASQUE_DEFAULT_TCP_URI_TEMPLATE,
+        handler          => masque_udp_proxy_handler,
+        tcp_handler      => masque_tcp_proxy_handler
     },
     maps:merge(D, Opts).
 
@@ -86,20 +86,34 @@ merged_settings(Opts) ->
     User = maps:get(settings, Opts, #{}),
     User#{enable_connect_protocol => 1}.
 
-make_handler_fun(Template, HandlerMod, HandlerOpts, Fallback) ->
+build_dispatch(Opts) ->
+    #{udp_template => maps:get(uri_template, Opts),
+      tcp_template => maps:get(tcp_uri_template, Opts),
+      udp_handler  => maps:get(handler, Opts),
+      tcp_handler  => maps:get(tcp_handler, Opts),
+      handler_opts => maps:get(handler_opts, Opts, #{}),
+      fallback     => maps:get(fallback, Opts, undefined)}.
+
+make_dispatch_fun(Dispatch) ->
     fun(Conn, StreamId, Method, Path, Headers) ->
-        handle_request(Conn, StreamId, Method, Path, Headers,
-                       Template, HandlerMod, HandlerOpts, Fallback)
+        dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch)
     end.
 
-handle_request(Conn, StreamId, Method, Path, Headers,
-               Template, HandlerMod, HandlerOpts, Fallback) ->
-    case validate(Method, Path, Headers, Template) of
+dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch) ->
+    #{udp_template := UdpTpl, tcp_template := TcpTpl,
+      udp_handler := UdpHandler, tcp_handler := TcpHandler,
+      handler_opts := HandlerOpts, fallback := Fallback} = Dispatch,
+    case validate(Method, Path, Headers, UdpTpl, TcpTpl) of
         {ok, Req0} ->
+            Protocol = maps:get(protocol, Req0),
+            HandlerMod = case Protocol of
+                udp -> UdpHandler;
+                tcp -> TcpHandler
+            end,
             Req = Req0#{handler_opts => HandlerOpts},
             case accept_request(HandlerMod, Req) of
                 accept ->
-                    spawn_session(Conn, StreamId,
+                    spawn_session(Conn, StreamId, Protocol,
                                   HandlerMod, HandlerOpts, Req);
                 {reject, Reason} ->
                     reject(Conn, StreamId, Reason)
@@ -113,8 +127,9 @@ handle_request(Conn, StreamId, Method, Path, Headers,
             end
     end.
 
-spawn_session(Conn, StreamId, Handler, HOpts, Req) ->
+spawn_session(Conn, StreamId, Protocol, Handler, HOpts, Req) ->
     Args = #{conn => Conn, stream_id => StreamId,
+             protocol => Protocol, transport => h2,
              handler => Handler, handler_opts => HOpts, req => Req},
     case masque_h2_session_sup:start_session(Args) of
         {ok, _Pid} -> ok;
@@ -125,15 +140,15 @@ map_init_error({resolution_failed, _}) -> resolution_failed;
 map_init_error({reject, Err})          -> Err;
 map_init_error(_)                      -> resolution_failed.
 
-%% h2_connection preserves `:protocol' in the handler-visible headers
-%% (RFC 8441); all other pseudo-headers are stripped.
-validate(Method, Path, Headers, Template) ->
+validate(Method, Path, Headers, UdpTemplate, TcpTemplate) ->
     case Method of
         <<"CONNECT">> ->
             Protocol = header(<<":protocol">>, Headers),
             case Protocol of
                 ?MASQUE_CONNECT_UDP_PROTOCOL ->
-                    match_path(Path, Headers, Template);
+                    match_path(Path, Headers, UdpTemplate, udp);
+                ?MASQUE_CONNECT_TCP_PROTOCOL ->
+                    match_path(Path, Headers, TcpTemplate, tcp);
                 _ ->
                     {error, bad_protocol}
             end;
@@ -145,7 +160,7 @@ validate(Method, Path, Headers, Template) ->
 %% headers (they stay in the stream record but are not exposed). We
 %% still populate the Req map with best-effort values so the handler
 %% callback sees a consistent shape on both transports.
-match_path(Path, Headers, Template) ->
+match_path(Path, Headers, Template, Protocol) ->
     case masque_uri:match(Template, Path) of
         {ok, #{target_host := Host, target_port := Port}} ->
             Authority = case header(<<":authority">>, Headers) of
@@ -154,6 +169,7 @@ match_path(Path, Headers, Template) ->
                         end,
             {ok, #{
                 method => <<"CONNECT">>,
+                protocol => Protocol,
                 path => Path,
                 authority => Authority,
                 scheme => <<"https">>,
