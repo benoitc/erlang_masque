@@ -42,6 +42,7 @@
 %% Behaviour callbacks
 %%====================================================================
 
+-spec accept(masque_handler:req()) -> masque_handler:accept_result().
 accept(#{target_host := Host, target_port := Port} = Req) ->
     Opts = maps:get(handler_opts, Req, #{}),
     AllowFun = maps:get(allow, Opts, fun default_allow/1),
@@ -50,6 +51,7 @@ accept(#{target_host := Host, target_port := Port} = Req) ->
         false -> {reject, forbidden}
     end.
 
+-spec init(masque_handler:req(), term()) -> {ok, #state{}} | {stop, term()}.
 init(#{target_host := Host, target_port := Port} = Req, Opts) ->
     ResolverFun = maps:get(resolver, Opts, fun default_resolver/1),
     Family = pick_family(maps:get(family, Opts, auto), Host),
@@ -81,6 +83,7 @@ init(#{target_host := Host, target_port := Port} = Req, Opts) ->
             {stop, {resolution_failed, {resolve, Reason}}}
     end.
 
+-spec handle_packet(binary(), #state{}) -> {ok, #state{}} | {stop, term(), #state{}}.
 handle_packet(Data, #state{socket = S} = State) ->
     case gen_udp:send(S, Data) of
         ok ->
@@ -100,6 +103,7 @@ handle_packet(Data, #state{socket = S} = State) ->
 %% Defensive double-check: on connected UDP the kernel already drops
 %% non-target sources, but we re-validate at application level in
 %% case a platform ever weakens that guarantee.
+-spec handle_info(term(), #state{}) -> {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
 handle_info({udp, Socket, FromIP, FromPort, Bytes},
             #state{socket = Socket, target_ip = IP, target_port = Port} = State)
   when FromIP =:= IP, FromPort =:= Port ->
@@ -119,6 +123,7 @@ handle_info({udp_closed, Socket}, #state{socket = Socket} = State) ->
 handle_info(_Other, State) ->
     {ok, State}.
 
+-spec terminate(term(), #state{}) -> ok.
 terminate(_Reason, #state{socket = S}) ->
     _ = gen_udp:close(S),
     ok.

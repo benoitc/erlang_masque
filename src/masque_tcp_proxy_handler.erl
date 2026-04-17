@@ -26,6 +26,7 @@
 %% Behaviour callbacks
 %%====================================================================
 
+-spec accept(masque_handler:req()) -> masque_handler:accept_result().
 accept(#{target_host := Host, target_port := Port} = Req) ->
     Opts = maps:get(handler_opts, Req, #{}),
     AllowFun = maps:get(allow, Opts, fun(_) -> true end),
@@ -34,6 +35,7 @@ accept(#{target_host := Host, target_port := Port} = Req) ->
         false -> {reject, forbidden}
     end.
 
+-spec init(masque_handler:req(), term()) -> {ok, #state{}} | {stop, term()}.
 init(#{target_host := Host, target_port := Port}, Opts) ->
     ResolverFun = maps:get(resolver, Opts, fun default_resolver/1),
     Family = pick_family(maps:get(family, Opts, auto), Host),
@@ -52,6 +54,7 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
             {stop, {resolution_failed, {resolve, Reason}}}
     end.
 
+-spec handle_data(binary(), #state{}) -> {ok, #state{}} | {stop, term(), #state{}}.
 handle_data(Data, #state{socket = S} = State) ->
     case gen_tcp:send(S, Data) of
         ok ->
@@ -62,6 +65,7 @@ handle_data(Data, #state{socket = S} = State) ->
             {stop, {target_error, Reason}, State}
     end.
 
+-spec handle_info(term(), #state{}) -> {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
 handle_info({tcp, Socket, Bytes}, #state{socket = Socket} = State) ->
     {ok, State, [{send_data, Bytes}]};
 handle_info({tcp_closed, Socket}, #state{socket = Socket} = State) ->
@@ -71,6 +75,7 @@ handle_info({tcp_error, Socket, Reason}, #state{socket = Socket} = State) ->
 handle_info(_Other, State) ->
     {ok, State}.
 
+-spec terminate(term(), #state{}) -> ok.
 terminate(_Reason, #state{socket = S}) ->
     _ = gen_tcp:close(S),
     ok.

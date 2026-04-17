@@ -26,6 +26,7 @@
 %% API
 %%====================================================================
 
+-spec start_link(map()) -> {ok, pid()} | ignore | {error, term()}.
 start_link(Args) ->
     gen_server:start_link(?MODULE, Args, []).
 

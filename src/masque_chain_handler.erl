@@ -38,6 +38,7 @@
 %% Behaviour callbacks
 %%====================================================================
 
+-spec accept(masque_handler:req()) -> masque_handler:accept_result().
 accept(#{target_host := Host, target_port := Port} = Req) ->
     Opts = maps:get(handler_opts, Req, #{}),
     AllowFun = maps:get(allow, Opts, fun(_) -> true end),
@@ -61,18 +62,22 @@ init(#{target_host := Host, target_port := Port,
             {stop, {resolution_failed, {upstream, Reason}}}
     end.
 
+-spec handle_packet(binary(), #state{}) -> {ok, #state{}}.
 handle_packet(Data, #state{upstream = Sess} = State) ->
     _ = masque:send(Sess, Data),
     {ok, State}.
 
+-spec handle_data(binary(), #state{}) -> {ok, #state{}}.
 handle_data(Data, #state{upstream = Sess} = State) ->
     _ = masque:send(Sess, Data),
     {ok, State}.
 
+-spec handle_capsule(non_neg_integer(), binary(), #state{}) -> {ok, #state{}}.
 handle_capsule(Type, Value, #state{upstream = Sess} = State) ->
     _ = masque:send_capsule(Sess, Type, Value),
     {ok, State}.
 
+-spec handle_info(term(), #state{}) -> {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
 handle_info({masque_data, Sess, Data}, #state{upstream = Sess,
                                               protocol = udp} = State) ->
     {ok, State, [{send, Data}]};
@@ -86,6 +91,7 @@ handle_info({masque_closed, Sess, _Reason}, #state{upstream = Sess} = State) ->
 handle_info(_Other, State) ->
     {ok, State}.
 
+-spec terminate(term(), #state{}) -> ok.
 terminate(_Reason, #state{upstream = Sess}) ->
     _ = masque:close(Sess),
     ok.

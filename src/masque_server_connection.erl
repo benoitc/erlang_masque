@@ -29,21 +29,26 @@
 %% API
 %%====================================================================
 
+-spec start_link() -> {ok, pid()} | ignore | {error, term()}.
 start_link() ->
     gen_server:start_link(?MODULE, [], []).
 
 %% @doc Spawn a session process linked to this router (so the
 %% session outlives the short-lived handler fun) and register it.
+-spec start_session(pid(), map()) -> {ok, pid()} | {error, term()}.
 start_session(RouterPid, SessionArgs) ->
     gen_server:call(RouterPid, {start_session, SessionArgs}).
 
 %% @doc Register `SessionPid` as the owner of `StreamId`'s datagrams.
+-spec register_session(pid(), non_neg_integer(), pid()) -> ok.
 register_session(RouterPid, StreamId, SessionPid) ->
     gen_server:call(RouterPid, {register, StreamId, SessionPid}).
 
+-spec unregister_session(pid(), non_neg_integer()) -> ok.
 unregister_session(RouterPid, StreamId) ->
     gen_server:cast(RouterPid, {unregister, StreamId}).
 
+-spec lookup_session(pid(), non_neg_integer()) -> {ok, pid()} | error.
 lookup_session(RouterPid, StreamId) ->
     gen_server:call(RouterPid, {lookup, StreamId}).
 
