@@ -203,9 +203,9 @@ apply_actions_noreply(Actions, State) ->
     end.
 
 do_actions([], S) -> {ok, S};
-do_actions([{send_packet, Data} | Rest], S) ->
-    do_actions([{send_packet, ?MASQUE_CONTEXT_ID_UDP, Data} | Rest], S);
-do_actions([{send_packet, Ctx, Data} | Rest], S) ->
+do_actions([{send, Data} | Rest], S) ->
+    do_actions([{send, ?MASQUE_CONTEXT_ID_UDP, Data} | Rest], S);
+do_actions([{send, Ctx, Data} | Rest], S) ->
     PayloadSize = iolist_size(Data),
     case Ctx =:= ?MASQUE_CONTEXT_ID_UDP
          andalso PayloadSize > ?MASQUE_MAX_UDP_PAYLOAD of

@@ -58,15 +58,15 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
     end.
 
 handle_packet(Data, #state{upstream = Sess} = State) ->
-    _ = masque:send_packet(Sess, Data),
+    _ = masque:send(Sess, Data),
     {ok, State}.
 
 handle_capsule(Type, Value, #state{upstream = Sess} = State) ->
     _ = masque:send_capsule(Sess, Type, Value),
     {ok, State}.
 
-handle_info({masque_packet, Sess, Data}, #state{upstream = Sess} = State) ->
-    {ok, State, [{send_packet, Data}]};
+handle_info({masque_data, Sess, Data}, #state{upstream = Sess} = State) ->
+    {ok, State, [{send, Data}]};
 handle_info({masque_capsule, Sess, Type, Value}, #state{upstream = Sess} = State) ->
     {ok, State, [{send_capsule, Type, Value}]};
 handle_info({masque_closed, Sess, _Reason}, #state{upstream = Sess} = State) ->

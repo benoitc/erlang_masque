@@ -1,15 +1,16 @@
-%%% @doc Client-side MASQUE CONNECT-UDP session over HTTP/2.
+%%% @doc Client-side MASQUE CONNECT-TCP session.
 %%%
-%%% Mirrors `masque_client_session' but uses `erlang_h2' as the
-%%% transport. HTTP/2 has no native datagram channel, so every UDP
-%%% payload is wrapped in a DATAGRAM capsule (RFC 9297 §3.2) and
-%%% carried on the CONNECT request stream body alongside any
-%%% extension capsules.
--module(masque_h2_client_session).
+%%% TCP data travels as raw bytes on the HTTP request/response stream
+%%% body - no datagrams, no context-IDs, no capsule wrapping for the
+%%% base case. Stream END_STREAM = TCP FIN.
+%%%
+%%% Supports both HTTP/3 (quic_h3) and HTTP/2 (h2) as the outer
+%%% transport, selected by `transport => h3 | h2' in opts.
+-module(masque_tcp_client_session).
 -behaviour(gen_statem).
 
 -export([start_link/3, stop/1, info/1]).
--export([send/2, send/3, recv/2, set_mode/2]).
+-export([send/2, recv/2, set_mode/2]).
 -export([send_capsule/3]).
 
 -export([init/1, callback_mode/0, terminate/3, code_change/4]).
@@ -17,11 +18,6 @@
 
 -include("masque.hrl").
 
-%% `h2:connect/3' has `sync' / `verify' / `ssl_opts' keys that
-%% dialyzer does not see in its published `connect_opts()' type.
-%% The scope of the suppression is exactly the single call site
-%% (plus the headers builder that feeds it), keeping every other
-%% check strict.
 -dialyzer({nowarn_function, [do_connect/2, request_headers/1,
                               build_authority/2, is_ipv6_literal/1]}).
 
@@ -33,16 +29,14 @@
     target_host    :: binary(),
     target_port    :: 1..65535,
     uri_template   :: binary(),
-    capsule_proto  :: boolean(),
+    transport      :: h3 | h2,
     conn           :: pid() | undefined,
     stream_id      :: non_neg_integer() | undefined,
     handshake_from :: gen_statem:from() | undefined,
     timeout_ref    :: reference() | undefined,
     mode           :: message | queue,
     rx_buf = queue:new() :: queue:queue(binary()),
-    rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
-    cap_buf = <<>> :: binary(),
-    max_cap        :: pos_integer()
+    rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()})
 }).
 
 %%====================================================================
@@ -56,9 +50,7 @@ stop(Pid) -> gen_statem:call(Pid, stop, 5000).
 info(Pid) -> gen_statem:call(Pid, info, 1000).
 
 send(Pid, Data) ->
-    send(Pid, ?MASQUE_CONTEXT_ID_UDP, Data).
-send(Pid, ContextId, Data) ->
-    gen_statem:call(Pid, {send, ContextId, Data}).
+    gen_statem:call(Pid, {send, Data}).
 
 recv(Pid, Timeout) ->
     gen_statem:call(Pid, {recv, Timeout}, Timeout + 500).
@@ -81,8 +73,7 @@ init({Target, Opts, Owner}) ->
     {TargetHost, TargetPort} = Target,
     MRef = erlang:monitor(process, Owner),
     Mode = maps:get(mode, Opts, message),
-    MaxCap = maps:get(max_capsule_size, Opts,
-                      ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE),
+    Transport = maps:get(transport, Opts, h3),
     Data = #data{
         owner = Owner,
         owner_ref = MRef,
@@ -91,10 +82,9 @@ init({Target, Opts, Owner}) ->
         target_host = to_bin(TargetHost),
         target_port = TargetPort,
         uri_template = maps:get(uri_template, Opts,
-                                ?MASQUE_DEFAULT_URI_TEMPLATE),
-        capsule_proto = maps:get(capsule_protocol, Opts, true),
-        mode = Mode,
-        max_cap = MaxCap
+                                ?MASQUE_DEFAULT_TCP_URI_TEMPLATE),
+        transport = Transport,
+        mode = Mode
     },
     {ok, connecting, Data,
      [{next_event, internal, {do_handshake, Opts}}]}.
@@ -118,21 +108,16 @@ connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
 connecting({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
-connecting(info, {h2, _Conn, {response, StreamId, Status, Headers}},
-           #data{stream_id = StreamId} = Data) ->
+connecting(info, {Tag, _Conn, {response, StreamId, Status, _Headers}},
+           #data{stream_id = StreamId} = Data)
+  when Tag =:= quic_h3; Tag =:= h2 ->
     cancel_timer(Data#data.timeout_ref),
     case Status of
         S when S >= 200, S < 300 ->
-            case validate_response(Headers, Data) of
-                ok ->
-                    reply_handshake(Data, ok),
-                    {next_state, open,
-                     Data#data{timeout_ref = undefined,
-                               handshake_from = undefined}};
-                {error, _} = Err ->
-                    reply_handshake(Data, Err),
-                    {stop, element(2, Err)}
-            end;
+            reply_handshake(Data, ok),
+            {next_state, open,
+             Data#data{timeout_ref = undefined,
+                       handshake_from = undefined}};
         _ ->
             reply_handshake(Data, {error, {handshake_rejected, Status}}),
             {stop, {handshake_rejected, Status}}
@@ -154,10 +139,7 @@ connecting({call, From}, stop, Data) ->
 open({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, open)}]};
 open({call, From}, {send, Payload}, Data) ->
-    Reply = send_out(Data, ?MASQUE_CONTEXT_ID_UDP, Payload),
-    {keep_state, Data, [{reply, From, Reply}]};
-open({call, From}, {send, Ctx, Payload}, Data) ->
-    Reply = send_out(Data, Ctx, Payload),
+    Reply = send_out(Data, Payload),
     {keep_state, Data, [{reply, From, Reply}]};
 open({call, From}, {recv, Timeout}, Data) ->
     handle_recv_call(From, Timeout, Data);
@@ -166,62 +148,86 @@ open({call, From}, {set_mode, Mode}, Data) ->
 open({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 open({call, From}, {send_capsule, Type, Value}, Data) ->
-    %% Outbound extension capsules travel on the stream as-is.
     Enc = iolist_to_binary(masque_capsule:encode(Type, Value)),
-    Reply = h2:send_data(Data#data.conn, Data#data.stream_id,
-                         Enc, false),
+    Reply = transport_send_data(Data, Enc, false),
     {keep_state, Data, [{reply, From, Reply}]};
 open({call, From}, stop, Data) ->
     {next_state, closing, Data,
      [{reply, From, ok},
       {next_event, internal, do_close}]};
-open(info, {h2, _Conn, {data, StreamId, Bytes, Fin}},
-     #data{stream_id = StreamId, cap_buf = Buf, max_cap = Max} = Data) ->
-    New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
-        true  -> client_stream_abort(capsule_buffer_overflow, Data);
-        false -> drain_capsules(New, Fin, Data)
+%% Incoming stream data - raw TCP bytes (no capsule decoding)
+open(info, {Tag, _Conn, {data, StreamId, Bytes, Fin}},
+     #data{stream_id = StreamId} = Data)
+  when Tag =:= quic_h3; Tag =:= h2 ->
+    Data2 = deliver(Bytes, Data),
+    case Fin of
+        true ->
+            _ = notify_owner_closed(peer_fin, Data2),
+            {stop, normal, Data2};
+        false ->
+            {keep_state, Data2}
     end;
-open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
-    {keep_state, drop_waiter(TRef, From, Data)};
-open(info, {h2, _Conn, {stream_reset, StreamId, _ErrorCode}},
-     #data{stream_id = StreamId} = Data) ->
+open(info, {Tag, _Conn, {stream_reset, StreamId, _}},
+     #data{stream_id = StreamId} = Data)
+  when Tag =:= quic_h3; Tag =:= h2 ->
     _ = notify_owner_closed(peer_reset, Data),
     {stop, peer_reset, Data};
 open(info, {h2, _Conn, closed}, Data) ->
     _ = notify_owner_closed(peer_closed, Data),
     {stop, peer_closed, Data};
+open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
+    {keep_state, drop_waiter(TRef, From, Data)};
 open(info, {'DOWN', Ref, process, _, _},
      #data{owner_ref = Ref} = Data) ->
     {next_state, closing, Data, [{next_event, internal, do_close}]};
 open(info, _Msg, Data) ->
     {keep_state, Data}.
 
-closing(internal, do_close, #data{conn = Conn, stream_id = StreamId} = Data) ->
-    case (catch h2:send_data(Conn, StreamId, <<>>, true)) of
-        ok -> ok;
-        _  -> catch h2:cancel(Conn, StreamId)
+closing(internal, do_close, Data) ->
+    case (catch transport_send_data(Data, <<>>, true)) of
+        ok  -> ok;
+        _   -> catch transport_cancel(Data)
     end,
-    _ = (catch h2:close(Conn)),
+    _ = (catch transport_close(Data)),
     {stop, normal, Data};
 closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
 
-terminate(_Reason, _State, #data{conn = undefined}) ->
-    ok;
-terminate(_Reason, _State, #data{conn = Conn}) ->
-    _ = (catch h2:close(Conn)),
+terminate(_Reason, _State, #data{conn = undefined}) -> ok;
+terminate(_Reason, _State, Data) ->
+    _ = (catch transport_close(Data)),
     ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
     {ok, State, Data}.
 
 %%====================================================================
-%% Transport-specific (h2)
+%% Transport dispatch (h3 vs h2)
 %%====================================================================
 
-do_connect(Data, Opts) ->
-    SSLOpts = build_ssl_opts(Opts),
+do_connect(#data{transport = h3} = Data, Opts) ->
+    ConnOpts = maps:with([verify, cacerts], Opts),
+    ConnOpts1 = ConnOpts#{
+        sync => true,
+        settings => #{enable_connect_protocol => 1},
+        quic_opts => #{
+            alpn => maps:get(alpn, Opts, [<<"h3">>])
+        }
+    },
+    case quic_h3:connect(Data#data.proxy_host,
+                         Data#data.proxy_port, ConnOpts1) of
+        {ok, Conn} ->
+            ReqHeaders = request_headers(Data),
+            case quic_h3:request(Conn, ReqHeaders, #{end_stream => false}) of
+                {ok, StreamId} -> {ok, Conn, StreamId};
+                {error, R}     -> {error, {request, R}}
+            end;
+        {error, Reason} -> {error, {connect, Reason}}
+    end;
+do_connect(#data{transport = h2} = Data, Opts) ->
+    SSLOpts = [{server_name_indication,
+                binary_to_list(Data#data.proxy_host)}
+               | maps:get(ssl_opts, Opts, [])],
     ConnOpts = #{
         transport => ssl,
         ssl_opts  => SSLOpts,
@@ -231,144 +237,52 @@ do_connect(Data, Opts) ->
         settings  => #{enable_connect_protocol => 1}
     },
     case h2:connect(Data#data.proxy_host,
-                    Data#data.proxy_port,
-                    ConnOpts) of
+                    Data#data.proxy_port, ConnOpts) of
         {ok, Conn} ->
             ReqHeaders = request_headers(Data),
             case h2:request(Conn, ReqHeaders,
-                            #{protocol => ?MASQUE_CONNECT_UDP_PROTOCOL}) of
+                            #{protocol => ?MASQUE_CONNECT_TCP_PROTOCOL}) of
                 {ok, StreamId} -> {ok, Conn, StreamId};
                 {error, R}     -> {error, {request, R}}
             end;
-        {error, Reason} ->
-            {error, {connect, Reason}}
+        {error, Reason} -> {error, {connect, Reason}}
     end.
 
-%% `h2:connect/3' merges `verify'/`cacerts' and `ssl_opts' into the
-%% TLS socket options. We build the SNI + ALPN bits here and leave
-%% user-supplied overrides intact.
-build_ssl_opts(Opts) ->
-    Base = [{server_name_indication, host_to_sni(Opts)}],
-    UserOpts = maps:get(ssl_opts, Opts, []),
-    Base ++ UserOpts.
+send_out(#data{} = Data, Payload) ->
+    transport_send_data(Data, iolist_to_binary(Payload), false).
 
-host_to_sni(Opts) ->
-    case maps:get(proxy, Opts) of
-        {H, _} when is_binary(H) -> binary_to_list(H);
-        {H, _} when is_list(H)   -> H;
-        _                        -> "localhost"
-    end.
+transport_send_data(#data{transport = h3, conn = C, stream_id = S}, Bytes, Fin) ->
+    quic_h3:send_data(C, S, Bytes, Fin);
+transport_send_data(#data{transport = h2, conn = C, stream_id = S}, Bytes, Fin) ->
+    h2:send_data(C, S, Bytes, Fin).
+
+transport_cancel(#data{transport = h3, conn = C, stream_id = S}) ->
+    quic_h3:cancel(C, S);
+transport_cancel(#data{transport = h2, conn = C, stream_id = S}) ->
+    h2:cancel(C, S).
+
+transport_close(#data{transport = h3, conn = C}) -> quic_h3:close(C);
+transport_close(#data{transport = h2, conn = C}) -> h2:close(C).
 
 request_headers(#data{proxy_host = ProxyHost, proxy_port = ProxyPort,
                       target_host = TargetHost, target_port = TargetPort,
-                      uri_template = Template,
-                      capsule_proto = CapProto}) ->
+                      uri_template = Template}) ->
     Path = masque_uri:expand(Template, #{
         target_host => TargetHost,
         target_port => TargetPort
     }),
     Authority = build_authority(ProxyHost, ProxyPort),
-    Base = [
+    [
         {<<":method">>, <<"CONNECT">>},
+        {<<":protocol">>, ?MASQUE_CONNECT_TCP_PROTOCOL},
         {<<":scheme">>, <<"https">>},
         {<<":authority">>, Authority},
-        {<<":path">>, Path}
-    ],
-    case CapProto of
-        true  -> Base ++ [{<<"capsule-protocol">>, <<"?1">>}];
-        false -> Base
-    end.
-
-%% Outbound: UDP payloads become DATAGRAM capsules whose inner
-%% payload is `ContextId (varint) || UdpBytes'. Oversize payloads are
-%% refused at the API boundary; capsule headers are a few extra bytes
-%% and we size-check before framing.
-send_out(#data{conn = Conn, stream_id = StreamId}, Ctx, Payload)
-  when is_integer(Ctx), Ctx >= 0 ->
-    PayloadSize = iolist_size(Payload),
-    case Ctx =:= ?MASQUE_CONTEXT_ID_UDP
-         andalso PayloadSize > ?MASQUE_MAX_UDP_PAYLOAD of
-        true ->
-            {error, {payload_too_large, PayloadSize,
-                     ?MASQUE_MAX_UDP_PAYLOAD}};
-        false ->
-            %% Context-ID varint || UDP bytes -> DATAGRAM capsule ->
-            %% stream body.
-            InnerIoData = masque_datagram:encode(Ctx, Payload),
-            Inner = iolist_to_binary(InnerIoData),
-            Capsule = iolist_to_binary(h2_capsule:encode(datagram, Inner)),
-            h2:send_data(Conn, StreamId, Capsule, false)
-    end.
+        {<<":path">>, Path},
+        {<<"capsule-protocol">>, <<"?1">>}
+    ].
 
 %%====================================================================
-%% Capsule decode loop (covers both DATAGRAM and extension capsules)
-%%====================================================================
-
-drain_capsules(Buf, Fin, #data{} = Data) ->
-    case h2_capsule:decode(Buf) of
-        {ok, {Type, Inner}, Rest} ->
-            Data2 = deliver_capsule(Type, Inner, Data),
-            drain_capsules(Rest, Fin, Data2#data{cap_buf = <<>>});
-        {more, _} when Fin, Buf =/= <<>> ->
-            client_stream_abort(truncated_capsule, Data);
-        {more, _} ->
-            {keep_state, Data#data{cap_buf = Buf}};
-        {error, _} ->
-            client_stream_abort(malformed_capsule, Data)
-    end.
-
-deliver_capsule(datagram, Inner, Data) ->
-    case masque_datagram:decode(Inner) of
-        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}}
-          when byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD ->
-            deliver_packet(UdpBytes, Data);
-        _ ->
-            Data
-    end;
-deliver_capsule(Type, Inner, #data{owner = Owner} = Data)
-  when is_integer(Type) ->
-    Owner ! {masque_capsule, self(), Type, Inner},
-    Data.
-
-client_stream_abort(Reason, #data{conn = Conn, stream_id = StreamId} = Data) ->
-    %% HTTP/2 has no `H3_MESSAGE_ERROR'; use `protocol_error' (0x1).
-    _ = (catch h2:cancel(Conn, StreamId, protocol_error)),
-    _ = notify_owner_closed(Reason, Data),
-    {stop, Reason, Data}.
-
-%%====================================================================
-%% Response validation (mirrors the h3 session)
-%%====================================================================
-
-validate_response(Headers, #data{capsule_proto = CapsuleRequested}) ->
-    HasContentLength = header_present(<<"content-length">>, Headers),
-    HasContentType   = header_present(<<"content-type">>, Headers),
-    CapsuleAck = case header_value(<<"capsule-protocol">>, Headers) of
-                     <<"?1">> -> true;
-                     _        -> false
-                 end,
-    if
-        HasContentLength ->
-            {error, malformed_response};
-        HasContentType ->
-            {error, malformed_response};
-        CapsuleRequested andalso not CapsuleAck ->
-            {error, capsule_protocol_not_acknowledged};
-        true ->
-            ok
-    end.
-
-header_present(Name, Headers) ->
-    lists:keyfind(Name, 1, Headers) =/= false.
-
-header_value(Name, Headers) ->
-    case lists:keyfind(Name, 1, Headers) of
-        {_, V} -> V;
-        false  -> undefined
-    end.
-
-%%====================================================================
-%% Rx buffering (identical to the h3 session)
+%% Rx buffering
 %%====================================================================
 
 handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
@@ -382,19 +296,17 @@ handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
                 queue:in({From, TRef}, Data#data.rx_waiters)}}
     end.
 
-deliver_packet(UdpBytes, #data{mode = message, owner = Owner} = Data) ->
-    Owner ! {masque_data, self(), UdpBytes},
+deliver(Bytes, #data{mode = message, owner = Owner} = Data) ->
+    Owner ! {masque_data, self(), Bytes},
     Data;
-deliver_packet(UdpBytes, #data{mode = queue,
-                                rx_waiters = Ws,
-                                rx_buf = Buf} = Data) ->
+deliver(Bytes, #data{mode = queue, rx_waiters = Ws, rx_buf = Buf} = Data) ->
     case queue:out(Ws) of
         {{value, {From, TRef}}, Ws2} ->
             _ = erlang:cancel_timer(TRef),
-            gen_statem:reply(From, {ok, UdpBytes}),
+            gen_statem:reply(From, {ok, Bytes}),
             Data#data{rx_waiters = Ws2};
         {empty, _} ->
-            Data#data{rx_buf = queue:in(UdpBytes, Buf)}
+            Data#data{rx_buf = queue:in(Bytes, Buf)}
     end.
 
 drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->
@@ -415,8 +327,9 @@ reply_handshake(#data{handshake_from = From}, Reply) ->
     gen_statem:reply(From, Reply).
 
 session_info(#data{target_host = H, target_port = P,
-                   proxy_host = PH, proxy_port = PP}, State) ->
-    #{state => State, transport => h2,
+                   proxy_host = PH, proxy_port = PP,
+                   transport = T}, State) ->
+    #{state => State, protocol => tcp, transport => T,
       proxy => {PH, PP}, target => {H, P}}.
 
 cancel_timer(undefined) -> ok;

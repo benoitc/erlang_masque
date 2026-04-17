@@ -12,7 +12,7 @@
 
 -export([version/0]).
 -export([connect/3, connect/2, close/1, info/1]).
--export([send_packet/2, send_packet/3, recv_packet/2, set_active/2]).
+-export([send/2, send/3, recv/2, set_mode/2]).
 -export([send_capsule/3]).
 -export([start_listener/2, stop_listener/1]).
 -export([start_listener_h2/2, stop_listener_h2/1]).
@@ -102,12 +102,23 @@ connect(ProxyURI, Target, Opts) when is_map(Opts) ->
     end.
 
 connect_via([h3], Target, Opts, Owner) ->
-    dial_single(masque_client_session, Target, Opts, Owner);
+    dial_single(session_mod(Opts, h3), Target, Opts, Owner);
 connect_via([h2], Target, Opts, Owner) ->
-    dial_single(masque_h2_client_session, Target, Opts, Owner);
+    dial_single(session_mod(Opts, h2), Target, Opts, Owner);
 connect_via(Transports, Target, Opts, Owner)
   when length(Transports) >= 2 ->
     masque_racer:race(Transports, Target, Opts, Owner).
+
+session_mod(Opts, h3) ->
+    case maps:get(protocol, Opts, udp) of
+        tcp -> masque_tcp_client_session;
+        _   -> masque_client_session
+    end;
+session_mod(Opts, h2) ->
+    case maps:get(protocol, Opts, udp) of
+        tcp -> masque_tcp_client_session;
+        _   -> masque_h2_client_session
+    end.
 
 %% Direct (non-racing) dial via a single transport module.
 dial_single(Mod, Target, Opts, Owner) ->
@@ -135,55 +146,55 @@ normalize_transports(L) when is_list(L) ->
 connect(ProxyURI, Target) ->
     connect(ProxyURI, Target, #{}).
 
-%% @doc Close a MASQUE session and its underlying HTTP/3 connection.
+%% @doc Close a MASQUE session.
 -spec close(session()) -> ok.
 close(Sess) when is_pid(Sess) ->
-    _ = catch masque_client_session:stop(Sess),
+    %% All session modules export stop/1.
+    _ = (catch gen_statem:call(Sess, stop, 5000)),
     ok.
 
 %% @doc Return a map describing the session's current state and peers.
 -spec info(session()) -> map().
 info(Sess) when is_pid(Sess) ->
-    masque_client_session:info(Sess).
+    gen_statem:call(Sess, info, 1000).
 
-%% @doc Send a UDP packet through the tunnel (context-id 0).
--spec send_packet(session(), iodata()) -> ok | {error, term()}.
-send_packet(Sess, Data) ->
-    masque_client_session:send_packet(Sess, Data).
+%% @doc Send data through the tunnel.
+%%
+%% For UDP tunnels: sends a UDP packet (context-id 0). For TCP tunnels:
+%% sends raw bytes on the stream.
+-spec send(session(), iodata()) -> ok | {error, term()}.
+send(Sess, Data) ->
+    gen_statem:call(Sess, {send, Data}).
 
-%% @doc Send a packet under an explicit context-id (extension use).
--spec send_packet(session(), non_neg_integer(), iodata()) ->
+%% @doc Send data under an explicit context-id (UDP extension use).
+-spec send(session(), non_neg_integer(), iodata()) ->
     ok | {error, term()}.
-send_packet(Sess, ContextId, Data) ->
-    masque_client_session:send_packet(Sess, ContextId, Data).
+send(Sess, ContextId, Data) ->
+    gen_statem:call(Sess, {send, ContextId, Data}).
 
-%% @doc Block until a UDP packet is received or `Timeout' ms elapses.
+%% @doc Block until data is received or `Timeout' ms elapses.
 %%
 %% Requires the session to be in `queue' delivery mode (see
-%% {@link set_active/2}).
--spec recv_packet(session(), pos_integer()) ->
+%% {@link set_mode/2}).
+-spec recv(session(), pos_integer()) ->
     {ok, binary()} | {error, timeout | term()}.
-recv_packet(Sess, Timeout) ->
-    masque_client_session:recv_packet(Sess, Timeout).
+recv(Sess, Timeout) ->
+    gen_statem:call(Sess, {recv, Timeout}, Timeout + 500).
 
 %% @doc Send a capsule on the tunnel's request stream (RFC 9297 §3.2).
-%%
-%% Capsules are reliably framed; unknown types travel through unchanged.
-%% Incoming capsules are delivered to the owner as
-%% `{masque_capsule, Sess, Type, Value}' messages.
 -spec send_capsule(session(), non_neg_integer(), iodata()) ->
     ok | {error, term()}.
 send_capsule(Sess, Type, Value) ->
-    masque_client_session:send_capsule(Sess, Type, Value).
+    gen_statem:call(Sess, {send_capsule, Type, Value}).
 
 %% @doc Switch the session between `message' and `queue' delivery modes.
 %%
 %% `message' (default) delivers every incoming packet to the owner as
-%% `{masque_packet, Sess, Data}'. `queue' buffers packets and requires
-%% the caller to pull them via {@link recv_packet/2}.
--spec set_active(session(), message | queue) -> ok.
-set_active(Sess, Mode) ->
-    masque_client_session:set_active(Sess, Mode).
+%% `{masque_data, Sess, Data}'. `queue' buffers packets and requires
+%% the caller to pull them via {@link recv/2}.
+-spec set_mode(session(), message | queue) -> ok.
+set_mode(Sess, Mode) ->
+    gen_statem:call(Sess, {set_mode, Mode}).
 
 %%====================================================================
 %% Server facade

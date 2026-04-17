@@ -111,22 +111,25 @@ stop_listener(Name) ->
       connection_handler := connection_handler_fun()}.
 h3_handlers(Opts0) ->
     Opts = defaults(Opts0),
-    Template    = maps:get(uri_template, Opts),
-    HandlerMod  = maps:get(handler, Opts),
+    UdpTemplate = maps:get(uri_template, Opts),
+    TcpTemplate = maps:get(tcp_uri_template, Opts),
+    UdpHandler  = maps:get(handler, Opts),
+    TcpHandler  = maps:get(tcp_handler, Opts),
     HandlerOpts = maps:get(handler_opts, Opts, #{}),
     Fallback    = maps:get(fallback, Opts, undefined),
+    Dispatch = #{udp_template => UdpTemplate, tcp_template => TcpTemplate,
+                 udp_handler => UdpHandler, tcp_handler => TcpHandler,
+                 handler_opts => HandlerOpts, fallback => Fallback},
     ConnectionHandler = fun(_ConnPid) ->
         {ok, Router} = masque_server_connection:start_link(),
         #{
             owner   => Router,
-            handler => make_handler_fun(Template, HandlerMod,
-                                        HandlerOpts, Fallback, Router),
+            handler => make_dispatch_fun(Dispatch, Router),
             h3_datagram_enabled => true
         }
     end,
     #{
-        handler => make_handler_fun(Template, HandlerMod,
-                                    HandlerOpts, Fallback, undefined),
+        handler => make_dispatch_fun(Dispatch, undefined),
         connection_handler => ConnectionHandler
     }.
 
@@ -136,8 +139,10 @@ h3_handlers(Opts0) ->
 
 defaults(Opts) ->
     D = #{
-        uri_template => ?MASQUE_DEFAULT_URI_TEMPLATE,
-        handler      => masque_udp_proxy_handler
+        uri_template     => ?MASQUE_DEFAULT_URI_TEMPLATE,
+        tcp_uri_template => ?MASQUE_DEFAULT_TCP_URI_TEMPLATE,
+        handler          => masque_udp_proxy_handler,
+        tcp_handler      => masque_tcp_proxy_handler
     },
     maps:merge(D, Opts).
 
@@ -151,27 +156,32 @@ merged_settings(Opts) ->
         h3_datagram => 1
     }).
 
-make_handler_fun(Template, HandlerMod, HandlerOpts, Fallback, Router) ->
+make_dispatch_fun(Dispatch, Router) ->
     fun(Conn, StreamId, Method, Path, Headers) ->
-        handle_request(Conn, StreamId, Method, Path, Headers,
-                       Template, HandlerMod, HandlerOpts, Fallback, Router)
+        dispatch_request(Conn, StreamId, Method, Path, Headers,
+                         Dispatch, Router)
     end.
 
-handle_request(Conn, StreamId, Method, Path, Headers,
-               Template, HandlerMod, HandlerOpts, Fallback, Router) ->
-    case validate(Method, Path, Headers, Template) of
+dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
+    #{udp_template := UdpTpl, tcp_template := TcpTpl,
+      udp_handler := UdpHandler, tcp_handler := TcpHandler,
+      handler_opts := HandlerOpts, fallback := Fallback} = Dispatch,
+    case validate(Method, Path, Headers, UdpTpl, TcpTpl) of
         {ok, Req0} ->
+            Protocol = maps:get(protocol, Req0),
+            HandlerMod = case Protocol of
+                udp -> UdpHandler;
+                tcp -> TcpHandler
+            end,
             Req = Req0#{handler_opts => HandlerOpts},
             case accept_request(HandlerMod, Req) of
                 accept ->
-                    spawn_session(Conn, StreamId, Router,
+                    spawn_session(Conn, StreamId, Router, Protocol,
                                   HandlerMod, HandlerOpts, Req);
                 {reject, Reason} ->
                     reject(Conn, StreamId, Reason)
             end;
         {error, Reason} ->
-            %% Not a MASQUE request - delegate to the caller's
-            %% `fallback' if they provided one, otherwise reject.
             case Fallback of
                 undefined ->
                     reject(Conn, StreamId, Reason);
@@ -180,36 +190,30 @@ handle_request(Conn, StreamId, Method, Path, Headers,
             end
     end.
 
-spawn_session(Conn, StreamId, undefined, _Handler, _HOpts, _Req) ->
-    %% No router attached - fall back to 502 so the client does not
-    %% wait on a tunnel that will never carry data.
+spawn_session(Conn, StreamId, undefined, _Proto, _Handler, _HOpts, _Req) ->
     reject(Conn, StreamId, resolution_failed);
-spawn_session(Conn, StreamId, Router, Handler, HOpts, Req) ->
+spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req) ->
     Args = #{conn => Conn, stream_id => StreamId, router => Router,
+             protocol => Protocol, transport => h3,
              handler => Handler, handler_opts => HOpts, req => Req},
     case masque_server_connection:start_session(Router, Args) of
-        {ok, _Pid} ->
-            %% Session process has already sent the 200 response
-            %% from inside `init/1' - nothing more to do here.
-            ok;
-        {error, Reason} ->
-            %% Handler `init/2' refused (DNS failure, socket open
-            %% error, policy) - the handshake response was NOT yet
-            %% sent, so we can still reject with a meaningful status.
-            reject(Conn, StreamId, map_init_error(Reason))
+        {ok, _Pid} -> ok;
+        {error, Reason} -> reject(Conn, StreamId, map_init_error(Reason))
     end.
 
 map_init_error({resolution_failed, _}) -> resolution_failed;
 map_init_error({reject, Err})          -> Err;
 map_init_error(_)                      -> resolution_failed.
 
-validate(Method, Path, Headers, Template) ->
+validate(Method, Path, Headers, UdpTemplate, TcpTemplate) ->
     case Method of
         <<"CONNECT">> ->
             Protocol = header(<<":protocol">>, Headers),
             case Protocol of
                 ?MASQUE_CONNECT_UDP_PROTOCOL ->
-                    match_path(Path, Headers, Template);
+                    match_path(Path, Headers, UdpTemplate, udp);
+                ?MASQUE_CONNECT_TCP_PROTOCOL ->
+                    match_path(Path, Headers, TcpTemplate, tcp);
                 _ ->
                     {error, bad_protocol}
             end;
@@ -217,7 +221,7 @@ validate(Method, Path, Headers, Template) ->
             {error, bad_method}
     end.
 
-match_path(Path, Headers, Template) ->
+match_path(Path, Headers, Template, Protocol) ->
     case masque_uri:match(Template, Path) of
         {ok, #{target_host := Host, target_port := Port}} ->
             %% `:scheme' and `:authority' presence is enforced by
@@ -229,6 +233,7 @@ match_path(Path, Headers, Template) ->
                                           Authority =/= undefined ->
                     {ok, #{
                         method => <<"CONNECT">>,
+                        protocol => Protocol,
                         path => Path,
                         authority => Authority,
                         scheme => Scheme,

@@ -4,6 +4,28 @@ All notable changes to `masque` are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-04-17
+
+### Added
+
+- CONNECT-TCP (draft-ietf-httpbis-connect-tcp) alongside CONNECT-UDP.
+  One listener serves both protocols; the `:protocol` pseudo-header
+  selects the handler. Client picks `protocol => tcp | udp` in opts.
+- Unified API: `masque:send/2`, `masque:recv/2`, `{masque_data, Sess, Data}`
+  for both protocols. No backward-compat aliases.
+- `masque_tcp_proxy_handler`: bridges CONNECT-TCP tunnels to real
+  TCP connections via `gen_tcp`.
+- `masque_tcp_client_session`: client TCP session over h3 or h2.
+- `masque_tcp_server_session`: per-tunnel TCP server session.
+- 4 new CT cases: `tcp_echo_round_trip`, `tcp_large_transfer`,
+  `tcp_target_closes`, `tcp_and_udp_same_listener`.
+
+### Changed
+
+- `send_packet`/`recv_packet`/`{masque_packet,...}` replaced by
+  `send`/`recv`/`{masque_data,...}` everywhere. Breaking change.
+- Server dispatches by `:protocol` to `udp_handler` or `tcp_handler`.
+
 ## [0.3.0] - 2026-04-17
 
 ### Added

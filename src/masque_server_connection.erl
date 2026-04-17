@@ -57,7 +57,8 @@ init([]) ->
 
 handle_call({start_session, Args}, _From, S) ->
     #{stream_id := StreamId} = Args,
-    case masque_server_session:start_link(Args) of
+    Mod = session_module(Args),
+    case Mod:start_link(Args) of
         {ok, Pid} ->
             MRef = erlang:monitor(process, Pid),
             {reply, {ok, Pid},
@@ -125,6 +126,9 @@ code_change(_OldVsn, S, _Extra) ->
 %%====================================================================
 %% Internal
 %%====================================================================
+
+session_module(#{protocol := tcp}) -> masque_tcp_server_session;
+session_module(_)                  -> masque_server_session.
 
 drop_stream(StreamId, S) ->
     Sessions2 = maps:remove(StreamId, S#state.sessions),

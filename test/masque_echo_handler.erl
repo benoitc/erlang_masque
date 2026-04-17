@@ -14,7 +14,7 @@ init(_Req, _Opts) ->
     {ok, undefined}.
 
 handle_packet(Data, State) ->
-    {ok, State, [{send_packet, Data}]}.
+    {ok, State, [{send, Data}]}.
 
 handle_capsule(Type, Value, State) ->
     {ok, State, [{send_capsule, Type, Value}]}.

@@ -30,10 +30,10 @@ resolve(ProxyURI, Name, ResolverIP, ResolverPort) ->
                                 {ResolverIP, ResolverPort},
                                 #{verify => verify_none}),
     Query = build_dns_query(Name),
-    ok = masque:send_packet(Sess, Query),
+    ok = masque:send(Sess, Query),
     Result =
         receive
-            {masque_packet, Sess, Reply} -> {ok, Reply}
+            {masque_data, Sess, Reply} -> {ok, Reply}
         after 3000 ->
             {error, timeout}
         end,

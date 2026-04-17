@@ -174,9 +174,9 @@ apply_actions_noreply(Actions, State) ->
     end.
 
 do_actions([], S) -> {ok, S};
-do_actions([{send_packet, Data} | Rest], S) ->
-    do_actions([{send_packet, ?MASQUE_CONTEXT_ID_UDP, Data} | Rest], S);
-do_actions([{send_packet, Ctx, Data} | Rest], S) ->
+do_actions([{send, Data} | Rest], S) ->
+    do_actions([{send, ?MASQUE_CONTEXT_ID_UDP, Data} | Rest], S);
+do_actions([{send, Ctx, Data} | Rest], S) ->
     %% Silent drop on oversize - RFC 9298 §5 (HTTP Datagrams are
     %% unreliable; application can resend if it cares).
     PayloadSize = iolist_size(Data),

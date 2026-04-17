@@ -84,7 +84,7 @@ our_client_talks_to_peer_server(Config) ->
                 {ok, Sess} = masque:connect(ProxyURI,
                                             {<<"127.0.0.1">>, 9},
                                             #{verify => verify_none}),
-                ok = masque:send_packet(Sess, <<"interop ping">>),
+                ok = masque:send(Sess, <<"interop ping">>),
                 masque:close(Sess)
             after
                 stop_peer()

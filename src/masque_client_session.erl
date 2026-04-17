@@ -14,7 +14,7 @@
 -behaviour(gen_statem).
 
 -export([start_link/3, stop/1, info/1]).
--export([send_packet/2, send_packet/3, recv_packet/2, set_active/2]).
+-export([send/2, send/3, recv/2, set_mode/2]).
 -export([send_capsule/3]).
 
 -export([init/1, callback_mode/0, terminate/3, code_change/4]).
@@ -44,8 +44,8 @@
     handshake_from :: gen_statem:from() | undefined,
     timeout_ref   :: reference() | undefined,
     %% Delivery mode: `message' delivers incoming UDP payloads to the
-    %% owner as `{masque_packet, Sess, Data}', `queue' buffers them
-    %% for sync `recv_packet/2'.
+    %% owner as `{masque_data, Sess, Data}', `queue' buffers them
+    %% for sync `recv/2'.
     mode          :: message | queue,
     %% Pending sync receivers and buffered datagrams (when mode=queue).
     rx_buf = queue:new() :: queue:queue(binary()),
@@ -69,17 +69,17 @@ stop(Pid) ->
 info(Pid) ->
     gen_statem:call(Pid, info, 1000).
 
-send_packet(Pid, Data) ->
-    send_packet(Pid, ?MASQUE_CONTEXT_ID_UDP, Data).
+send(Pid, Data) ->
+    send(Pid, ?MASQUE_CONTEXT_ID_UDP, Data).
 
-send_packet(Pid, ContextId, Data) ->
-    gen_statem:call(Pid, {send_packet, ContextId, Data}).
+send(Pid, ContextId, Data) ->
+    gen_statem:call(Pid, {send, ContextId, Data}).
 
-recv_packet(Pid, Timeout) ->
-    gen_statem:call(Pid, {recv_packet, Timeout}, Timeout + 500).
+recv(Pid, Timeout) ->
+    gen_statem:call(Pid, {recv, Timeout}, Timeout + 500).
 
-set_active(Pid, Mode) when Mode =:= message; Mode =:= queue ->
-    gen_statem:call(Pid, {set_active, Mode}).
+set_mode(Pid, Mode) when Mode =:= message; Mode =:= queue ->
+    gen_statem:call(Pid, {set_mode, Mode}).
 
 send_capsule(Pid, Type, Value) ->
     gen_statem:call(Pid, {send_capsule, Type, Value}).
@@ -169,12 +169,15 @@ connecting({call, From}, stop, Data) ->
 
 open({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, open)}]};
-open({call, From}, {send_packet, Ctx, Payload}, Data) ->
-    Reply = send_packet_out(Data, Ctx, Payload),
+open({call, From}, {send, Payload}, Data) ->
+    Reply = send_out(Data, ?MASQUE_CONTEXT_ID_UDP, Payload),
     {keep_state, Data, [{reply, From, Reply}]};
-open({call, From}, {recv_packet, Timeout}, Data) ->
+open({call, From}, {send, Ctx, Payload}, Data) ->
+    Reply = send_out(Data, Ctx, Payload),
+    {keep_state, Data, [{reply, From, Reply}]};
+open({call, From}, {recv, Timeout}, Data) ->
     handle_recv_call(From, Timeout, Data);
-open({call, From}, {set_active, Mode}, Data) ->
+open({call, From}, {set_mode, Mode}, Data) ->
     {keep_state, Data#data{mode = Mode}, [{reply, From, ok}]};
 open({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
@@ -215,7 +218,7 @@ open(info, {'DOWN', Ref, process, _, _},
 open(info, _Msg, Data) ->
     {keep_state, Data}.
 
-send_packet_out(#data{conn = Conn, stream_id = StreamId}, Ctx, Payload)
+send_out(#data{conn = Conn, stream_id = StreamId}, Ctx, Payload)
   when is_integer(Ctx), Ctx >= 0 ->
     PayloadSize = iolist_size(Payload),
     %% RFC 9298 §5: UDP payloads capped at 65527 regardless of the
@@ -298,7 +301,7 @@ handle_recv_call(From, Timeout, #data{rx_buf = Buf, rx_waiters = Ws} = Data) ->
     end.
 
 deliver_packet(UdpBytes, #data{mode = message, owner = Owner} = Data) ->
-    Owner ! {masque_packet, self(), UdpBytes},
+    Owner ! {masque_data, self(), UdpBytes},
     Data;
 deliver_packet(UdpBytes, #data{mode = queue,
                                 rx_waiters = Ws,

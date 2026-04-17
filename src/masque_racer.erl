@@ -130,10 +130,10 @@ spawn_attempt(Racer, Transport, Target, Opts) ->
     spawn(fun() -> attempt(Racer, Transport, Target, Opts) end).
 
 attempt(Racer, Transport, Target, Opts) ->
-    Mod = transport_mod(Transport),
+    Mod = transport_mod(Transport, Opts),
     %% Owner = self() (the worker) so the losing session's incoming
     %% messages die with the worker when we kill it.
-    case Mod:start_link(Target, Opts, self()) of
+    case Mod:start_link(Target, Opts#{transport => Transport}, self()) of
         {ok, Pid} ->
             T = maps:get(timeout, Opts, 5000),
             case gen_statem:call(Pid, handshake_await, T + 1000) of
@@ -160,8 +160,16 @@ attempt(Racer, Transport, Target, Opts) ->
             exit(normal)
     end.
 
-transport_mod(h3) -> masque_client_session;
-transport_mod(h2) -> masque_h2_client_session.
+transport_mod(h3, Opts) ->
+    case maps:get(protocol, Opts, udp) of
+        tcp -> masque_tcp_client_session;
+        _   -> masque_client_session
+    end;
+transport_mod(h2, Opts) ->
+    case maps:get(protocol, Opts, udp) of
+        tcp -> masque_tcp_client_session;
+        _   -> masque_h2_client_session
+    end.
 
 transfer_owner(h3, Pid, Owner) ->
     %% Session doesn't (yet) expose a live owner-swap. Use the

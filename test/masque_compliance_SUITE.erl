@@ -47,7 +47,11 @@
     chain_upstream_failure_returns_502/1,
     chain_multiple_packets/1,
     chain_concurrent_tunnels/1,
-    chain_capsule_forwarding/1
+    chain_capsule_forwarding/1,
+    tcp_echo_round_trip/1,
+    tcp_large_transfer/1,
+    tcp_target_closes/1,
+    tcp_and_udp_same_listener/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -88,7 +92,11 @@ all() -> [
     chain_upstream_failure_returns_502,
     chain_multiple_packets,
     chain_concurrent_tunnels,
-    chain_capsule_forwarding
+    chain_capsule_forwarding,
+    tcp_echo_round_trip,
+    tcp_large_transfer,
+    tcp_target_closes,
+    tcp_and_udp_same_listener
 ].
 
 init_per_suite(Config) ->
@@ -231,6 +239,22 @@ init_per_testcase(Case, Config)
                    orelse Case =:= fallback_receives_non_masque_requests,
     {ok, Server} = start_integration_server(Certs, WithFallback),
     [{server, Server} | Config];
+init_per_testcase(Case, Config)
+  when Case =:= tcp_echo_round_trip;
+       Case =:= tcp_large_transfer;
+       Case =:= tcp_target_closes ->
+    Certs = ?config(certs, Config),
+    {TcpPid, TcpPort} = start_tcp_echo(),
+    {ok, Server} = masque_test_helpers:start_masque_server(Certs),
+    [{server, Server}, {tcp_pid, TcpPid}, {tcp_port, TcpPort} | Config];
+init_per_testcase(tcp_and_udp_same_listener, Config) ->
+    Certs = ?config(certs, Config),
+    {TcpPid, TcpPort} = start_tcp_echo(),
+    {UdpPid, UdpPort} = start_udp_echo(),
+    {ok, Server} = masque_test_helpers:start_masque_server(Certs),
+    [{server, Server},
+     {tcp_pid, TcpPid}, {tcp_port, TcpPort},
+     {udp_pid, UdpPid}, {udp_port, UdpPort} | Config];
 init_per_testcase(_Case, Config) ->
     Certs = ?config(certs, Config),
     {ok, Server} = masque_test_helpers:start_masque_server(Certs),
@@ -251,6 +275,10 @@ end_per_testcase(_Case, Config) ->
     case ?config(udp_pid, Config) of
         undefined -> ok;
         Pid       -> exit(Pid, shutdown)
+    end,
+    case ?config(tcp_pid, Config) of
+        undefined -> ok;
+        TPid      -> exit(TPid, shutdown)
     end,
     timer:sleep(50),
     ok.
@@ -350,9 +378,9 @@ client_handshake_rejected_maps_error(Config) ->
 datagram_echo_message_mode(Config) ->
     Sess = connect_to(Config),
     Msg = <<"hello udp ", 1, 2, 3>>,
-    ok = masque:send_packet(Sess, Msg),
+    ok = masque:send(Sess, Msg),
     receive
-        {masque_packet, Sess, Echoed} ->
+        {masque_data, Sess, Echoed} ->
             ?assertEqual(Msg, Echoed)
     after 5000 ->
         ct:fail("no echo received")
@@ -361,20 +389,20 @@ datagram_echo_message_mode(Config) ->
 
 datagram_echo_queue_mode(Config) ->
     Sess = connect_to(Config),
-    ok = masque:set_active(Sess, queue),
+    ok = masque:set_mode(Sess, queue),
     Msgs = [<<"a">>, <<"bb">>, <<"cccc">>, <<1,2,3,4,5>>],
-    [ok = masque:send_packet(Sess, M) || M <- Msgs],
-    Received = [element(2, masque:recv_packet(Sess, 5000)) || _ <- Msgs],
+    [ok = masque:send(Sess, M) || M <- Msgs],
+    Received = [element(2, masque:recv(Sess, 5000)) || _ <- Msgs],
     ?assertEqual(lists:sort(Msgs), lists:sort(Received)),
-    ?assertEqual({error, timeout}, masque:recv_packet(Sess, 100)),
+    ?assertEqual({error, timeout}, masque:recv(Sess, 100)),
     ok = masque:close(Sess).
 
 many_packets_in_order(Config) ->
     Sess = connect_to(Config),
-    ok = masque:set_active(Sess, queue),
+    ok = masque:set_mode(Sess, queue),
     N = 100,
     Msgs = [integer_to_binary(I) || I <- lists:seq(1, N)],
-    [ok = masque:send_packet(Sess, M) || M <- Msgs],
+    [ok = masque:send(Sess, M) || M <- Msgs],
     %% Datagrams are unreliable and unordered in principle. Verify we
     %% receive all N *as a set* within a generous budget.
     Received = collect_packets(Sess, N, 10000),
@@ -389,9 +417,9 @@ concurrent_tunnels(Config) ->
                 Tag = list_to_binary("t" ++ integer_to_list(I)),
                 try
                     Sess = connect_to(Config),
-                    ok = masque:send_packet(Sess, Tag),
+                    ok = masque:send(Sess, Tag),
                     receive
-                        {masque_packet, Sess, Echo} ->
+                        {masque_data, Sess, Echo} ->
                             Parent ! {done, I, Tag, Echo}
                     after 8000 ->
                         Parent ! {timeout, I}
@@ -414,16 +442,16 @@ large_payload_near_mtu(Config) ->
     Sess = connect_to(Config),
     %% Stay comfortably below typical QUIC datagram ceiling (~1200).
     Payload = binary:copy(<<"A">>, 1000),
-    ok = masque:send_packet(Sess, Payload),
+    ok = masque:send(Sess, Payload),
     receive
-        {masque_packet, Sess, Echo} -> ?assertEqual(Payload, Echo)
+        {masque_data, Sess, Echo} -> ?assertEqual(Payload, Echo)
     after 5000 -> ct:fail("no echo for large payload")
     end,
     ok = masque:close(Sess).
 
 collect_packets(_Sess, 0, _Timeout) -> [];
 collect_packets(Sess, N, Timeout) ->
-    case masque:recv_packet(Sess, Timeout) of
+    case masque:recv(Sess, Timeout) of
         {ok, Bytes}    -> [Bytes | collect_packets(Sess, N - 1, Timeout)];
         {error, timeout} -> []
     end.
@@ -434,7 +462,7 @@ oversize_packet_rejected(Config) ->
     %% (65527) and the path MTU - either `payload_too_large' or
     %% `datagram_too_large' is a valid refusal.
     Huge = binary:copy(<<"X">>, 70000),
-    case masque:send_packet(Sess, Huge) of
+    case masque:send(Sess, Huge) of
         {error, {payload_too_large, 70000, _}}  -> ok;
         {error, {datagram_too_large, 70000, _}} -> ok;
         Other -> ct:fail({unexpected, Other})
@@ -475,9 +503,9 @@ udp_proxy_round_trip(Config) ->
                                   alpn => [<<"h3">>],
                                   transports => [h3]}),
     Payload = <<"ping through proxy">>,
-    ok = masque:send_packet(Sess, Payload),
+    ok = masque:send(Sess, Payload),
     receive
-        {masque_packet, Sess, Echoed} ->
+        {masque_data, Sess, Echoed} ->
             ?assertEqual(Payload, Echoed)
     after 5000 ->
         ct:fail("no UDP echo returned through proxy")
@@ -591,7 +619,7 @@ udp_payload_65527_boundary(Config) ->
     %% 65528 bytes is one over the RFC 9298 §5 ceiling - refused.
     Over = binary:copy(<<"X">>, 65528),
     ?assertMatch({error, {payload_too_large, 65528, 65527}},
-                 masque:send_packet(Sess, Over)),
+                 masque:send(Sess, Over)),
     ok = masque:close(Sess).
 
 reject_response_carries_proxy_status(Config) ->
@@ -625,9 +653,9 @@ udp_source_spoofing_rejected(Config) ->
                                   alpn => [<<"h3">>],
                                   transports => [h3]}),
     %% Legitimate round-trip works: client -> proxy -> echo -> back.
-    ok = masque:send_packet(Sess, <<"legit">>),
+    ok = masque:send(Sess, <<"legit">>),
     receive
-        {masque_packet, Sess, <<"legit">>} -> ok
+        {masque_data, Sess, <<"legit">>} -> ok
     after 5000 ->
         ct:fail("legitimate echo never arrived")
     end,
@@ -640,7 +668,7 @@ udp_source_spoofing_rejected(Config) ->
      || N <- lists:seq(1, 10)],
     ok = gen_udp:close(Attacker),
     %% Give the kernel a beat, then check we received nothing extra.
-    ?assertEqual(timeout, drain_masque_packets(Sess, 300)),
+    ?assertEqual(timeout, drain_masque_datas(Sess, 300)),
     ok = masque:close(Sess).
 
 handshake_rejected_when_init_fails(Config) ->
@@ -659,12 +687,12 @@ handshake_rejected_when_init_fails(Config) ->
                                   alpn => [<<"h3">>],
                                   transports => [h3]})).
 
-%% Receive every pending `{masque_packet, Sess, _}' until `Timeout' ms
+%% Receive every pending `{masque_data, Sess, _}' until `Timeout' ms
 %% of silence. Returns `timeout' on success (nothing spurious left),
 %% or `{unexpected, Data}' if any bytes were delivered.
-drain_masque_packets(Sess, Timeout) ->
+drain_masque_datas(Sess, Timeout) ->
     receive
-        {masque_packet, Sess, Data} -> {unexpected, Data}
+        {masque_data, Sess, Data} -> {unexpected, Data}
     after Timeout ->
         timeout
     end.
@@ -691,9 +719,9 @@ chain_round_trip(Config) ->
                                   alpn => [<<"h3">>],
                                   transports => [h3]}),
     Payload = <<"chain ping">>,
-    ok = masque:send_packet(Sess, Payload),
+    ok = masque:send(Sess, Payload),
     receive
-        {masque_packet, Sess, Reply} ->
+        {masque_data, Sess, Reply} ->
             ?assertEqual(Payload, Reply)
     after 8000 ->
         ct:fail("no chain echo")
@@ -711,11 +739,11 @@ chain_multiple_packets(Config) ->
                                 #{verify => verify_none,
                                   alpn => [<<"h3">>],
                                   transports => [h3]}),
-    ok = masque:set_active(Sess, queue),
+    ok = masque:set_mode(Sess, queue),
     N = 50,
     Msgs = [<<"chain-", (integer_to_binary(I))/binary>> || I <- lists:seq(1, N)],
-    [ok = masque:send_packet(Sess, M) || M <- Msgs],
-    Received = [element(2, masque:recv_packet(Sess, 8000)) || _ <- Msgs],
+    [ok = masque:send(Sess, M) || M <- Msgs],
+    Received = [element(2, masque:recv(Sess, 8000)) || _ <- Msgs],
     ?assertEqual(lists:sort(Msgs), lists:sort(Received)),
     ok = masque:close(Sess).
 
@@ -736,9 +764,9 @@ chain_concurrent_tunnels(Config) ->
                                                 #{verify => verify_none,
                                                   alpn => [<<"h3">>],
                                                   transports => [h3]}),
-                    ok = masque:send_packet(Sess, Tag),
+                    ok = masque:send(Sess, Tag),
                     receive
-                        {masque_packet, Sess, Echo} ->
+                        {masque_data, Sess, Echo} ->
                             Parent ! {done, I, Tag, Echo}
                     after 8000 ->
                         Parent ! {timeout, I}
@@ -859,9 +887,9 @@ h2_udp_proxy_round_trip(Config) ->
                                 #{verify => verify_none,
                                   transports => [h2]}),
     Payload = <<"h2 proxy ping">>,
-    ok = masque:send_packet(Sess, Payload),
+    ok = masque:send(Sess, Payload),
     receive
-        {masque_packet, Sess, Reply} -> ?assertEqual(Payload, Reply)
+        {masque_data, Sess, Reply} -> ?assertEqual(Payload, Reply)
     after 5000 ->
         ct:fail("no h2 proxy echo")
     end,
@@ -959,3 +987,152 @@ connect_udp_headers() ->
 
 expand_path(Host, Port) ->
     masque_uri:expand(?TPL, #{target_host => Host, target_port => Port}).
+
+%%====================================================================
+%% TCP test cases
+%%====================================================================
+
+tcp_echo_round_trip(Config) ->
+    Server = ?config(server, Config),
+    TcpPort = ?config(tcp_port, Config),
+    Port = maps:get(port, Server),
+    ProxyURI = iolist_to_binary(
+        ["https://localhost:", integer_to_list(Port)]),
+    {ok, Sess} = masque:connect(ProxyURI,
+                                {<<"127.0.0.1">>, TcpPort},
+                                #{verify => verify_none,
+                                  transports => [h3],
+                                  alpn => [<<"h3">>],
+                                  protocol => tcp}),
+    ?assertMatch(#{protocol := tcp, state := open}, masque:info(Sess)),
+    ok = masque:send(Sess, <<"hello tcp">>),
+    receive
+        {masque_data, Sess, <<"hello tcp">>} -> ok
+    after 5000 ->
+        ct:fail("no tcp echo")
+    end,
+    ok = masque:close(Sess).
+
+tcp_large_transfer(Config) ->
+    Server = ?config(server, Config),
+    TcpPort = ?config(tcp_port, Config),
+    Port = maps:get(port, Server),
+    ProxyURI = iolist_to_binary(
+        ["https://localhost:", integer_to_list(Port)]),
+    {ok, Sess} = masque:connect(ProxyURI,
+                                {<<"127.0.0.1">>, TcpPort},
+                                #{verify => verify_none,
+                                  transports => [h3],
+                                  alpn => [<<"h3">>],
+                                  protocol => tcp}),
+    ok = masque:set_mode(Sess, queue),
+    Payload = binary:copy(<<"A">>, 100000),
+    ok = masque:send(Sess, Payload),
+    %% Collect echoed bytes (may arrive in chunks).
+    Received = collect_tcp_bytes(Sess, byte_size(Payload), 8000),
+    ?assertEqual(Payload, Received),
+    ok = masque:close(Sess).
+
+tcp_target_closes(Config) ->
+    Server = ?config(server, Config),
+    TcpPort = ?config(tcp_port, Config),
+    Port = maps:get(port, Server),
+    ProxyURI = iolist_to_binary(
+        ["https://localhost:", integer_to_list(Port)]),
+    {ok, Sess} = masque:connect(ProxyURI,
+                                {<<"127.0.0.1">>, TcpPort},
+                                #{verify => verify_none,
+                                  transports => [h3],
+                                  alpn => [<<"h3">>],
+                                  protocol => tcp}),
+    %% Send the magic "close" command to our TCP echo server.
+    ok = masque:send(Sess, <<"CLOSE">>),
+    MRef = erlang:monitor(process, Sess),
+    receive
+        {'DOWN', MRef, process, Sess, _} -> ok;
+        {masque_closed, Sess, _} -> ok
+    after 5000 ->
+        ct:fail("session did not close after target FIN")
+    end.
+
+tcp_and_udp_same_listener(Config) ->
+    Server = ?config(server, Config),
+    TcpPort = ?config(tcp_port, Config),
+    UdpPort = ?config(udp_port, Config),
+    Port = maps:get(port, Server),
+    ProxyURI = iolist_to_binary(
+        ["https://localhost:", integer_to_list(Port)]),
+    %% TCP tunnel
+    {ok, TcpSess} = masque:connect(ProxyURI,
+                                   {<<"127.0.0.1">>, TcpPort},
+                                   #{verify => verify_none,
+                                     transports => [h3],
+                                     alpn => [<<"h3">>],
+                                     protocol => tcp}),
+    ok = masque:send(TcpSess, <<"tcp data">>),
+    receive {masque_data, TcpSess, <<"tcp data">>} -> ok
+    after 5000 -> ct:fail("tcp echo failed") end,
+    %% UDP tunnel on the same listener
+    {ok, UdpSess} = masque:connect(ProxyURI,
+                                   {<<"127.0.0.1">>, UdpPort},
+                                   #{verify => verify_none,
+                                     transports => [h3],
+                                     alpn => [<<"h3">>],
+                                     protocol => udp}),
+    ok = masque:send(UdpSess, <<"udp data">>),
+    receive {masque_data, UdpSess, <<"udp data">>} -> ok
+    after 5000 -> ct:fail("udp echo failed") end,
+    ok = masque:close(TcpSess),
+    ok = masque:close(UdpSess).
+
+collect_tcp_bytes(Sess, Expected, Timeout) ->
+    collect_tcp_bytes(Sess, Expected, Timeout, <<>>).
+
+collect_tcp_bytes(_Sess, Expected, _Timeout, Acc)
+  when byte_size(Acc) >= Expected ->
+    Acc;
+collect_tcp_bytes(Sess, Expected, Timeout, Acc) ->
+    case masque:recv(Sess, Timeout) of
+        {ok, Chunk} ->
+            collect_tcp_bytes(Sess, Expected, Timeout,
+                              <<Acc/binary, Chunk/binary>>);
+        {error, timeout} ->
+            Acc
+    end.
+
+%%====================================================================
+%% TCP echo server (test fixture)
+%%====================================================================
+
+start_tcp_echo() ->
+    {ok, LSock} = gen_tcp:listen(0, [binary, {active, true},
+                                     {ip, {127,0,0,1}},
+                                     {reuseaddr, true}]),
+    {ok, LPort} = inet:port(LSock),
+    Pid = spawn(fun() -> tcp_echo_accept_loop(LSock) end),
+    ok = gen_tcp:controlling_process(LSock, Pid),
+    {Pid, LPort}.
+
+tcp_echo_accept_loop(LSock) ->
+    case gen_tcp:accept(LSock, 5000) of
+        {ok, Sock} ->
+            spawn(fun() -> tcp_echo_accept_loop(LSock) end),
+            tcp_echo_conn_loop(Sock);
+        {error, timeout} ->
+            tcp_echo_accept_loop(LSock);
+        {error, closed} ->
+            ok
+    end.
+
+tcp_echo_conn_loop(Sock) ->
+    receive
+        {tcp, Sock, <<"CLOSE">>} ->
+            gen_tcp:close(Sock);
+        {tcp, Sock, Data} ->
+            gen_tcp:send(Sock, Data),
+            tcp_echo_conn_loop(Sock);
+        {tcp_closed, Sock} ->
+            ok;
+        {tcp_error, Sock, _} ->
+            gen_tcp:close(Sock)
+    end.

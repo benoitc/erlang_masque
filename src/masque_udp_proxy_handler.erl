@@ -9,7 +9,7 @@
 %%%   <li>Client-to-target: `handle_packet/2' sends the payload to the
 %%%       resolved target on the UDP socket.</li>
 %%%   <li>Target-to-client: `{udp, Socket, _, _, Bytes}' messages arrive
-%%%       on the session process and are emitted as `send_packet' actions
+%%%       on the session process and are emitted as `send' actions
 %%%       back through the tunnel.</li>
 %%% </ul>
 %%%
@@ -103,7 +103,7 @@ handle_packet(Data, #state{socket = S} = State) ->
 handle_info({udp, Socket, FromIP, FromPort, Bytes},
             #state{socket = Socket, target_ip = IP, target_port = Port} = State)
   when FromIP =:= IP, FromPort =:= Port ->
-    {ok, State, [{send_packet, Bytes}]};
+    {ok, State, [{send, Bytes}]};
 handle_info({udp, Socket, _FromIP, _FromPort, _Bytes},
             #state{socket = Socket} = State) ->
     %% Source mismatch - drop silently.

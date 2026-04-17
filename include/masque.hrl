@@ -15,11 +15,16 @@
 %% The value of the `:protocol' pseudo-header for RFC 9298 requests.
 -define(MASQUE_CONNECT_UDP_PROTOCOL, <<"connect-udp">>).
 
-%% Default request URI template per RFC 9298 §3.
+%% The value of the `:protocol' pseudo-header for draft-ietf-httpbis-connect-tcp.
+-define(MASQUE_CONNECT_TCP_PROTOCOL, <<"connect-tcp">>).
+
+%% Default request URI templates.
 %% Variables: `target_host' (IP literal, reg-name, or percent-encoded)
 %%            `target_port' (1..65535)
 -define(MASQUE_DEFAULT_URI_TEMPLATE,
         <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
+-define(MASQUE_DEFAULT_TCP_URI_TEMPLATE,
+        <<"/.well-known/masque/tcp/{target_host}/{target_port}/">>).
 
 %%====================================================================
 %% Inner datagram framing (RFC 9298 §5)
@@ -58,6 +63,6 @@
 -define(MASQUE_STATUS_BAD_GATEWAY,       502). %% resolution / upstream failure
 -define(MASQUE_STATUS_GATEWAY_TIMEOUT,   504). %% upstream did not respond
 -define(MASQUE_STATUS_LOOP_DETECTED,     508). %% policy: self-loop
--define(MASQUE_STATUS_NOT_IMPLEMENTED,   501). %% :protocol is not connect-udp
+-define(MASQUE_STATUS_NOT_IMPLEMENTED,   501). %% :protocol not recognized
 
 -endif.
