@@ -15,6 +15,19 @@ Current coverage of the `masque` library against the relevant RFCs.
 | 9220 - Extended CONNECT in HTTP/3 | `:protocol` negotiation and `SETTINGS_ENABLE_CONNECT_PROTOCOL` | Delegated to `quic_h3` |
 | 8441 - Extended CONNECT in HTTP/2 | `:protocol` negotiation | Delegated to `erlang_h2` |
 
+## Delivered in v0.4
+
+- CONNECT-TCP (draft-ietf-httpbis-connect-tcp): TCP tunneling alongside
+  UDP. One listener serves both protocols via `:protocol` dispatch.
+- Unified API: `masque:send/2`, `masque:recv/2`, `{masque_data, Sess, Data}`
+  for both UDP and TCP tunnels.
+- `masque_tcp_proxy_handler`: bridges CONNECT-TCP tunnels to real TCP
+  connections via `gen_tcp`.
+- `masque_tcp_client_session` + `masque_tcp_server_session` for TCP.
+- Scaling: configurable h2 `acceptors`, h3 `reuseport`, per-protocol
+  session supervisors.
+- Dual-protocol h2 server dispatch.
+
 ## Delivered in v0.3
 
 - Server-side proxy chaining (`masque_chain_handler`): an Ingress

@@ -47,60 +47,39 @@ Add to your `rebar.config`:
 
 ## Quick start
 
-### Running proxy server
-
-```erlang
-{ok, CertDer} = file:read_file("cert.der"),
-{ok, KeyDer}  = file:read_file("key.der"),
-
-{ok, _} = masque:start_listener(my_proxy, #{
-    port    => 4433,
-    cert    => CertDer,
-    key     => KeyDer
-    %% defaults: uri_template = /.well-known/masque/udp/{target_host}/{target_port}/
-    %%           handler      = masque_udp_proxy_handler
-}).
-```
-
-With a policy hook:
+### Proxy server (serves both UDP and TCP tunnels)
 
 ```erlang
 {ok, _} = masque:start_listener(my_proxy, #{
-    port    => 4433,
-    cert    => CertDer,
-    key     => KeyDer,
-    handler_opts => #{
-        allow => fun({Host, Port}) ->
-            Port =:= 53 andalso lists:member(Host, [<<"1.1.1.1">>, <<"8.8.8.8">>])
-        end
-    }
+    port => 4433,
+    cert => CertDer,
+    key  => KeyDer
+    %% One listener dispatches both connect-udp and connect-tcp.
+    %% Defaults: udp_handler = masque_udp_proxy_handler,
+    %%           tcp_handler = masque_tcp_proxy_handler.
 }).
 ```
 
 ### Client
 
 ```erlang
-{ok, Sess} = masque:connect(<<"https://proxy.example:4433">>,
-                             {<<"192.0.2.6">>, 443},
-                             #{verify => verify_none}),
+%% UDP tunnel (DNS, QUIC, game traffic)
+{ok, Sess} = masque:connect(<<"https://proxy:4433">>,
+                             {<<"1.1.1.1">>, 53},
+                             #{protocol => udp}).
 
-ok         = masque:send_packet(Sess, <<"hello target">>),
+%% TCP tunnel (web, TLS)
+{ok, Sess} = masque:connect(<<"https://proxy:4433">>,
+                             {<<"example.com">>, 443},
+                             #{protocol => tcp}).
 
-%% Default: owner receives `{masque_packet, Sess, Data}' messages.
-receive
-    {masque_packet, Sess, Reply} -> Reply
-end,
+%% Unified send/recv - works for both protocols
+ok          = masque:send(Sess, Data),
+{ok, Reply} = masque:recv(Sess, 5000),
+ok          = masque:close(Sess).
 
-ok         = masque:close(Sess).
-```
-
-Blocking receive (no mailbox pattern matching):
-
-```erlang
-{ok, Sess} = masque:connect(ProxyURI, Target, #{verify => verify_none}),
-ok         = masque:set_active(Sess, queue),
-ok         = masque:send_packet(Sess, Payload),
-{ok, Bytes} = masque:recv_packet(Sess, 3000).
+%% Message mode (default): owner receives {masque_data, Sess, Data}
+receive {masque_data, Sess, Bytes} -> Bytes end.
 ```
 
 ### Custom server handler
@@ -109,21 +88,23 @@ ok         = masque:send_packet(Sess, Payload),
 -module(my_handler).
 -behaviour(masque_handler).
 
--export([accept/1, init/2, handle_packet/2, terminate/2]).
+-export([accept/1, init/2, handle_packet/2, handle_data/2, terminate/2]).
 
 accept(#{target_host := Host}) ->
     case is_allowed(Host) of
         true  -> accept;
-        false -> {reject, forbidden}   %% → HTTP 403 to the client
+        false -> {reject, forbidden}
     end.
 
-init(_Req, _Opts) ->
-    {ok, #{counter => 0}}.
+init(_Req, _Opts) -> {ok, #{}}.
 
-handle_packet(Data, #{counter := N} = S) ->
-    {ok, S#{counter := N + 1}, [{send_packet, Data}]}.
+%% UDP tunnels
+handle_packet(Data, S) -> {ok, S, [{send, Data}]}.
 
-terminate(_Reason, _State) -> ok.
+%% TCP tunnels
+handle_data(Data, S) -> {ok, S, [{send_data, Data}]}.
+
+terminate(_Reason, _S) -> ok.
 ```
 
 ## Examples

@@ -76,8 +76,8 @@ same handler module works on either transport.
 On HTTP/3, UDP payloads travel as native HTTP Datagrams (RFC 9297).
 On HTTP/2, there is no datagram channel, so every UDP payload is
 wrapped in a DATAGRAM capsule (RFC 9297 S3.2) and sent as stream
-body data. The `masque` API hides this difference: `send_packet`,
-`recv_packet`, and `{masque_packet, _, _}` messages look the same
+body data. The `masque` API hides this difference: `send`,
+`recv`, and `{masque_data, _, _}` messages look the same
 regardless of transport.
 
 ---
@@ -89,22 +89,22 @@ delivery modes for inbound UDP payloads:
 
 | Mode | Delivery | Pick it when… |
 | --- | --- | --- |
-| `message` (default) | Owner receives `{masque_packet, Sess, Data}` for each incoming UDP packet. | Owner is an OTP process (`gen_server`, `gen_statem`) that already has a mailbox loop and wants to handle packets alongside its other events. |
-| `queue` | Packets buffer inside the session; pull with `masque:recv_packet/2`. | Imperative/sync code, scripts, tests, simple request/response patterns. |
+| `message` (default) | Owner receives `{masque_data, Sess, Data}` for each incoming UDP packet. | Owner is an OTP process (`gen_server`, `gen_statem`) that already has a mailbox loop and wants to handle packets alongside its other events. |
+| `queue` | Packets buffer inside the session; pull with `masque:recv/2`. | Imperative/sync code, scripts, tests, simple request/response patterns. |
 
-Switch at any time with `masque:set_active/2`:
+Switch at any time with `masque:set_mode/2`:
 
 ```erlang
 {ok, Sess} = masque:connect(ProxyURI, Target, #{verify => verify_none}).
-ok = masque:set_active(Sess, queue),
-ok = masque:send_packet(Sess, <<"ping">>),
-{ok, Reply} = masque:recv_packet(Sess, 5000).
+ok = masque:set_mode(Sess, queue),
+ok = masque:send(Sess, <<"ping">>),
+{ok, Reply} = masque:recv(Sess, 5000).
 ```
 
 Message mode inside a `gen_server`:
 
 ```erlang
-handle_info({masque_packet, Sess, Data}, State = #{sess := Sess}) ->
+handle_info({masque_data, Sess, Data}, State = #{sess := Sess}) ->
     {noreply, State#{last_reply := Data}}.
 ```
 
@@ -130,9 +130,9 @@ Sessions = [begin
                 S
             end || T <- Targets],
 
-[ok = masque:send_packet(S, Query) || S <- Sessions],
+[ok = masque:send(S, Query) || S <- Sessions],
 
-Replies = [receive {masque_packet, S, R} -> R after 3000 -> timeout end
+Replies = [receive {masque_data, S, R} -> R after 3000 -> timeout end
            || S <- Sessions],
 
 [masque:close(S) || S <- Sessions].
@@ -277,14 +277,14 @@ Callbacks return a list of actions; the session runs each one in order:
 
 ```erlang
 -type action() ::
-    {send_packet, iodata()}                     %% context 0 - UDP payload
-  | {send_packet, ContextId :: non_neg_integer(), iodata()}
+    {send, iodata()}                     %% context 0 - UDP payload
+  | {send, ContextId :: non_neg_integer(), iodata()}
   | {send_capsule, Type :: non_neg_integer(), iodata()}
   | close_session
   | {close_session, ErrorCode :: non_neg_integer(), Message :: binary()}.
 ```
 
-- `{send_packet, Data}` queues an HTTP Datagram back to the client
+- `{send, Data}` queues an HTTP Datagram back to the client
   (oversize payloads are silently dropped - HTTP Datagrams are
   unreliable by design; see RFC 9298 §5).
 - `{send_capsule, Type, Value}` sends a capsule on the request body
