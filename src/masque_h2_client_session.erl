@@ -312,9 +312,7 @@ drain_capsules(Buf, Fin, #data{} = Data) ->
         {more, _} when Fin, Buf =/= <<>> ->
             client_stream_abort(truncated_capsule, Data);
         {more, _} ->
-            {keep_state, Data#data{cap_buf = Buf}};
-        {error, _} ->
-            client_stream_abort(malformed_capsule, Data)
+            {keep_state, Data#data{cap_buf = Buf}}
     end.
 
 deliver_capsule(datagram, Inner, Data) ->

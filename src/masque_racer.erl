@@ -38,6 +38,7 @@
 
 -include("masque.hrl").
 
+
 %% @doc Race the listed transports and return the winning session.
 -spec race([masque:transport()], masque:target(), map(), pid()) ->
     {ok, masque:session()} | {error, term()}.
@@ -126,9 +127,11 @@ handle_start_secondary(#{secondary_pending := [T | Rest],
 %% Spawn a worker that performs one transport attempt and reports the
 %% outcome to the racer. The session is linked to the worker; on loss
 %% we kill the worker which in turn kills the session.
+-spec spawn_attempt(pid(), masque:transport(), masque:target(), map()) -> pid().
 spawn_attempt(Racer, Transport, Target, Opts) ->
     spawn(fun() -> attempt(Racer, Transport, Target, Opts) end).
 
+-spec attempt(pid(), masque:transport(), masque:target(), map()) -> ok.
 attempt(Racer, Transport, Target, Opts) ->
     Mod = transport_mod(Transport, Opts),
     %% Owner = self() (the worker) so the losing session's incoming
@@ -139,25 +142,21 @@ attempt(Racer, Transport, Target, Opts) ->
             case gen_statem:call(Pid, handshake_await, T + 1000) of
                 ok ->
                     Racer ! {attempt_ready, self(), Transport, Pid},
-                    %% Wait for win/lose signal. Block forever - the
-                    %% racer either tells us or kills us.
                     receive
                         win ->
-                            %% Unlink so the worker can exit without
-                            %% taking the session down.
                             _ = catch unlink(Pid),
-                            exit(normal);
+                            ok;
                         lose ->
                             _ = catch Mod:stop(Pid),
-                            exit(normal)
+                            ok
                     end;
                 {error, Reason} ->
                     Racer ! {attempt_failed, self(), Transport, Reason},
-                    exit(normal)
+                    ok
             end;
         {error, Reason} ->
             Racer ! {attempt_failed, self(), Transport, Reason},
-            exit(normal)
+            ok
     end.
 
 transport_mod(h3, Opts) ->

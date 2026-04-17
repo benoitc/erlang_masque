@@ -84,12 +84,11 @@ Current coverage of the `masque` library against the relevant RFCs.
 
 - **Per-tunnel authorization hooks** - pluggable auth callback
   beyond `accept/1` (e.g. Privacy Pass token verification).
-  Pencilled in for v0.4.
-- **CONNECT-TCP** (draft-ietf-masque-connect-tcp) - TCP tunneling
-  alongside UDP. Required for a Private Relay-style deployment.
+- **Client-side proxy chaining** - client controls both hops via a
+  virtual-transport adapter (server-side chaining is done in v0.3).
 - **RFC 9484 (Proxying IP in HTTP)** - distinct protocol, separate
   library on top of `masque`.
 - **Private Relay-style relay** - separate application on top of
-  `masque` with two-hop chaining, Privacy Pass auth, policy engine.
-- **HTTP/2 fallback** - RFC 9298 targets HTTP/3 here; HTTP/2 datagram
-  support (RFC 9297 §2.2) is not planned.
+  `masque` with two-hop wiring, Privacy Pass auth, policy engine.
+- **HTTP/1.1 Upgrade** - RFC 9298 also defines an HTTP/1.1 path;
+  this library covers h3 and h2 only.

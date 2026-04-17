@@ -41,8 +41,8 @@ init(#{conn := Conn, stream_id := StreamId, transport := Transport,
             State = #state{conn = Conn, stream_id = StreamId,
                            transport = Transport, handler = Handler,
                            h_state = HState, req = Req},
-            send_response(State, 200, [{<<"capsule-protocol">>, <<"?1">>}]),
-            claim_stream(State),
+            _ = send_response(State, 200, [{<<"capsule-protocol">>, <<"?1">>}]),
+            _ = claim_stream(State),
             apply_actions(Actions, State);
         {stop, Reason} ->
             {stop, Reason}

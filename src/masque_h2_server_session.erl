@@ -18,6 +18,7 @@
 
 -include("masque.hrl").
 
+
 -record(state, {
     conn       :: pid(),
     stream_id  :: non_neg_integer(),
@@ -133,9 +134,7 @@ drain_capsules(Buf, Fin, S) ->
         {more, _} when Fin, Buf =/= <<>> ->
             reset_and_stop(truncated_capsule, S);
         {more, _} ->
-            {noreply, S#state{cap_buf = Buf}};
-        {error, _} ->
-            reset_and_stop(malformed_capsule, S)
+            {noreply, S#state{cap_buf = Buf}}
     end.
 
 dispatch_capsule(datagram, Inner, S) ->

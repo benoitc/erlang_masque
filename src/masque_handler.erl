@@ -1,20 +1,22 @@
-%%% @doc Server-side handler behaviour for MASQUE CONNECT-UDP tunnels.
+%%% @doc Server-side handler behaviour for MASQUE tunnels.
 %%%
-%%% This behaviour is stable across the implementation plan but its
-%%% callbacks are added in layers:
+%%% Callbacks:
 %%%
 %%% <ul>
-%%%  <li>`accept/1' (Step 3) - synchronous accept/reject decision for
-%%%      the handshake. Runs in the handler process spawned by the H3
-%%%      connection; return `accept' or `{reject, Reason}' where
-%%%      `Reason' is a `masque_errors:handshake_error()'.</li>
-%%%  <li>`init/2', `handle_packet/2', `handle_capsule/3',
-%%%      `handle_info/2', `terminate/2' - added in Step 5/6 when the
-%%%      session process is wired up.</li>
+%%%  <li>`accept/1' - synchronous accept/reject gate for the handshake.
+%%%      Return `accept' or `{reject, masque_errors:handshake_error()}'.
+%%%      Optional; default is `accept'.</li>
+%%%  <li>`init/2' - session start. Return `{ok, State}' or
+%%%      `{ok, State, [action()]}' or `{stop, Reason}'.</li>
+%%%  <li>`handle_packet/2' - inbound UDP payload (CONNECT-UDP tunnels).</li>
+%%%  <li>`handle_data/2' - inbound TCP bytes (CONNECT-TCP tunnels).</li>
+%%%  <li>`handle_capsule/3' - inbound capsule on the stream body.</li>
+%%%  <li>`handle_info/2' - any other Erlang message.</li>
+%%%  <li>`terminate/2' - session shutdown.</li>
 %%% </ul>
 %%%
-%%% Modules wanting the default accept-everything behaviour can simply
-%%% omit `accept/1'; the server falls back to `accept'.
+%%% All callbacks are optional. Omitting a callback for a given event
+%%% makes the session silently ignore it.
 -module(masque_handler).
 
 -export([default_accept/1]).
@@ -23,6 +25,7 @@
 
 -type req() :: #{
     method := binary(),
+    protocol => udp | tcp,
     path := binary(),
     authority := binary(),
     scheme := binary(),
@@ -41,8 +44,15 @@
 %%====================================================================
 
 -callback accept(req()) -> accept_result().
+-callback init(req(), term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term()}.
+-callback handle_packet(binary(), term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
+-callback handle_data(binary(), term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
+-callback handle_capsule(non_neg_integer(), binary(), term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
+-callback handle_info(term(), term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
+-callback terminate(term(), term()) -> term().
 
--optional_callbacks([accept/1]).
+-optional_callbacks([accept/1, init/2, handle_packet/2, handle_data/2,
+                     handle_capsule/3, handle_info/2, terminate/2]).
 
 %%====================================================================
 %% API

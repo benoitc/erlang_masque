@@ -26,11 +26,12 @@
 -module(masque_chain_handler).
 -behaviour(masque_handler).
 
--export([accept/1, init/2, handle_packet/2, handle_capsule/3,
-         handle_info/2, terminate/2]).
+-export([accept/1, init/2, handle_packet/2, handle_data/2,
+         handle_capsule/3, handle_info/2, terminate/2]).
 
 -record(state, {
-    upstream :: pid()
+    upstream :: pid(),
+    protocol :: udp | tcp
 }).
 
 %%====================================================================
@@ -45,14 +46,17 @@ accept(#{target_host := Host, target_port := Port} = Req) ->
         false -> {reject, forbidden}
     end.
 
-init(#{target_host := Host, target_port := Port}, Opts) ->
+-spec init(masque_handler:req(), map()) -> {ok, #state{}} | {stop, term()}.
+init(#{target_host := Host, target_port := Port,
+       protocol := Proto} = _Req, Opts) ->
     UpstreamURI = maps:get(upstream_proxy, Opts),
     UpstreamOpts = maps:get(upstream_opts, Opts, #{verify => verify_none}),
     Timeout = maps:get(upstream_timeout, Opts, 5000),
-    ConnOpts = UpstreamOpts#{timeout => Timeout, owner => self()},
+    ConnOpts = UpstreamOpts#{timeout => Timeout, owner => self(),
+                              protocol => Proto},
     case masque:connect(UpstreamURI, {Host, Port}, ConnOpts) of
         {ok, Sess} ->
-            {ok, #state{upstream = Sess}};
+            {ok, #state{upstream = Sess, protocol = Proto}};
         {error, Reason} ->
             {stop, {resolution_failed, {upstream, Reason}}}
     end.
@@ -61,12 +65,20 @@ handle_packet(Data, #state{upstream = Sess} = State) ->
     _ = masque:send(Sess, Data),
     {ok, State}.
 
+handle_data(Data, #state{upstream = Sess} = State) ->
+    _ = masque:send(Sess, Data),
+    {ok, State}.
+
 handle_capsule(Type, Value, #state{upstream = Sess} = State) ->
     _ = masque:send_capsule(Sess, Type, Value),
     {ok, State}.
 
-handle_info({masque_data, Sess, Data}, #state{upstream = Sess} = State) ->
+handle_info({masque_data, Sess, Data}, #state{upstream = Sess,
+                                              protocol = udp} = State) ->
     {ok, State, [{send, Data}]};
+handle_info({masque_data, Sess, Data}, #state{upstream = Sess,
+                                              protocol = tcp} = State) ->
+    {ok, State, [{send_data, Data}]};
 handle_info({masque_capsule, Sess, Type, Value}, #state{upstream = Sess} = State) ->
     {ok, State, [{send_capsule, Type, Value}]};
 handle_info({masque_closed, Sess, _Reason}, #state{upstream = Sess} = State) ->

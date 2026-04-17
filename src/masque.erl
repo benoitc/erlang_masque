@@ -25,6 +25,7 @@
     session/0,
     proxy_uri/0,
     target/0,
+    transport/0,
     connect_opts/0,
     listener_opts/0
 ]).
@@ -38,15 +39,15 @@
 -type proxy_uri() :: binary() | string().
 
 %% A UDP target - either a resolved IP or a host name to resolve, and a port.
--type target() :: {inet:hostname() | inet:ip_address(), inet:port_number()}.
+-type target() :: {binary() | inet:hostname() | inet:ip_address(), inet:port_number()}.
 
 -type transport() :: h3 | h2.
 
 -type connect_opts() ::
     #{
-        %% Transport preference. `[h3, h2]' (default) races the two,
-        %% giving h3 a `prefer_timeout_ms' head start; `[h3]' or
-        %% `[h2]' uses only that transport.
+        %% Tunnel protocol: `udp' (default) or `tcp'.
+        protocol => udp | tcp,
+        %% Transport preference. `[h3, h2]' (default) races the two.
         transports => [transport()],
         prefer_timeout_ms => non_neg_integer(),
         uri_template => binary(),
@@ -54,9 +55,13 @@
         cacerts => [public_key:der_encoded()],
         timeout => pos_integer() | infinity,
         capsule_protocol => boolean(),
-        active => true | false | once | pos_integer(),
         owner => pid(),
-        ssl_opts => [ssl:tls_client_option()]
+        ssl_opts => [ssl:tls_client_option()],
+        %% Internal - set by racer, not by callers.
+        transport => transport(),
+        proxy => {binary(), inet:port_number()},
+        alpn => [binary()],
+        mode => message | queue
     }.
 
 -type listener_opts() ::

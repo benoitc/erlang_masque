@@ -51,7 +51,8 @@
     tcp_echo_round_trip/1,
     tcp_large_transfer/1,
     tcp_target_closes/1,
-    tcp_and_udp_same_listener/1
+    tcp_and_udp_same_listener/1,
+    tcp_chain_round_trip/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -96,7 +97,8 @@ all() -> [
     tcp_echo_round_trip,
     tcp_large_transfer,
     tcp_target_closes,
-    tcp_and_udp_same_listener
+    tcp_and_udp_same_listener,
+    tcp_chain_round_trip
 ].
 
 init_per_suite(Config) ->
@@ -208,6 +210,26 @@ init_per_testcase(chain_capsule_forwarding, Config) ->
             }
         })),
     [{server, Ingress}, {egress, Egress} | Config];
+init_per_testcase(tcp_chain_round_trip, Config) ->
+    Certs = ?config(certs, Config),
+    {TcpPid, TcpPort} = start_tcp_echo(),
+    {ok, Egress} = masque_test_helpers:start_masque_server(Certs),
+    EgressPort = maps:get(port, Egress),
+    {ok, Ingress} = masque_test_helpers:start_masque_server(
+        maps:merge(Certs, #{
+            handler => masque_chain_handler,
+            tcp_handler => masque_chain_handler,
+            handler_opts => #{
+                upstream_proxy =>
+                    iolist_to_binary(["https://localhost:",
+                                     integer_to_list(EgressPort)]),
+                upstream_opts => #{verify => verify_none,
+                                   transports => [h3],
+                                   alpn => [<<"h3">>]}
+            }
+        })),
+    [{server, Ingress}, {egress, Egress},
+     {tcp_pid, TcpPid}, {tcp_port, TcpPort} | Config];
 init_per_testcase(chain_upstream_failure_returns_502, Config) ->
     Certs = ?config(certs, Config),
     {ok, Ingress} = masque_test_helpers:start_masque_server(
@@ -1084,6 +1106,28 @@ tcp_and_udp_same_listener(Config) ->
     after 5000 -> ct:fail("udp echo failed") end,
     ok = masque:close(TcpSess),
     ok = masque:close(UdpSess).
+
+tcp_chain_round_trip(Config) ->
+    Ingress = ?config(server, Config),
+    TcpPort = ?config(tcp_port, Config),
+    IngressPort = maps:get(port, Ingress),
+    ProxyURI = iolist_to_binary(
+        ["https://localhost:", integer_to_list(IngressPort)]),
+    {ok, Sess} = masque:connect(ProxyURI,
+                                {<<"127.0.0.1">>, TcpPort},
+                                #{verify => verify_none,
+                                  transports => [h3],
+                                  alpn => [<<"h3">>],
+                                  protocol => tcp}),
+    Payload = <<"tcp chain ping">>,
+    ok = masque:send(Sess, Payload),
+    receive
+        {masque_data, Sess, Reply} ->
+            ?assertEqual(Payload, Reply)
+    after 8000 ->
+        ct:fail("no tcp chain echo")
+    end,
+    ok = masque:close(Sess).
 
 collect_tcp_bytes(Sess, Expected, Timeout) ->
     collect_tcp_bytes(Sess, Expected, Timeout, <<>>).
