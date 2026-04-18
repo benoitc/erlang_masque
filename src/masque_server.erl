@@ -183,7 +183,8 @@ dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
                 udp -> UdpHandler;
                 tcp -> TcpHandler
             end,
-            Req = Req0#{handler_opts => HandlerOpts},
+            Req1 = add_peer_info(Conn, Req0),
+            Req = Req1#{handler_opts => HandlerOpts},
             case accept_request(HandlerMod, Req) of
                 accept ->
                     spawn_session(Conn, StreamId, Router, Protocol,
@@ -218,6 +219,17 @@ spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req) ->
                     %% Session started after timeout. Tunnel is live.
                     ok
             end
+    end.
+
+add_peer_info(Conn, Req) ->
+    QuicConn = quic_h3:get_quic_conn(Conn),
+    Req1 = case quic:peername(QuicConn) of
+        {ok, PeerAddr} -> Req#{peer => PeerAddr};
+        _              -> Req
+    end,
+    case quic:peercert(QuicConn) of
+        {ok, Cert} -> Req1#{peer_cert => Cert};
+        _          -> Req1
     end.
 
 map_init_error(too_many_tunnels)        -> overload;

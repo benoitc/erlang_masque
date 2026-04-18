@@ -32,7 +32,10 @@
     target_host := binary(),
     target_port := 1..65535,
     headers := [{binary(), binary()}],
-    handler_opts => term()
+    handler_opts => term(),
+    %% Connection-level info (H3 only; absent on H2)
+    peer => {inet:ip_address(), inet:port_number()},
+    peer_cert => binary()
 }.
 
 -type accept_result() ::
