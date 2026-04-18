@@ -10,7 +10,8 @@
     crypto,
     public_key,
     quic,
-    h2
+    h2,
+    instrument
    ]},
   {env, []},
   {modules, []},

@@ -196,6 +196,7 @@ accept_request(HandlerMod, Req) ->
     end.
 
 reject(Conn, StreamId, Reason) ->
+    masque_metrics:tunnel_rejected(#{reason => Reason}),
     Status = masque_errors:handshake_status(Reason),
     Phrase = masque_errors:status_reason(Reason),
     Body = <<Phrase/binary, "\n">>,

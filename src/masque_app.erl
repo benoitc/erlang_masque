@@ -5,7 +5,9 @@
 -export([start/2, stop/1]).
 
 start(_StartType, _StartArgs) ->
-    masque_sup:start_link().
+    {ok, Pid} = masque_sup:start_link(),
+    masque_metrics:setup(),
+    {ok, Pid}.
 
 stop(_State) ->
     ok.

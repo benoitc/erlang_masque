@@ -26,7 +26,8 @@
     max_cap    :: pos_integer(),
     cap_fin_seen = false :: boolean(),
     %% Actions from handler init, applied after finalize
-    pending_actions :: [term()] | undefined
+    pending_actions :: [term()] | undefined,
+    start_time :: integer() | undefined
 }).
 
 %%====================================================================
@@ -92,7 +93,12 @@ handle_call(finalize, _From,
         ok ->
             case claim_stream(S#state{pending_actions = undefined}) of
                 {ok, State} ->
-                    {reply, ok, run_init_actions(Actions, State)};
+                    masque_metrics:tunnel_opened(
+                        #{protocol => udp, transport => h3}),
+                    {reply, ok,
+                     run_init_actions(Actions,
+                         State#state{start_time =
+                             erlang:monotonic_time(millisecond)})};
                 {error, _} ->
                     {reply, {error, stream_dead}, S}
             end;
@@ -109,6 +115,8 @@ handle_cast(_Msg, S) ->
 
 handle_info({masque_datagram_in, StreamId, Payload},
             #state{stream_id = StreamId} = S) ->
+    masque_metrics:bytes_in(byte_size(Payload),
+                            #{protocol => udp, transport => h3}),
     case masque_datagram:decode(Payload) of
         {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}}
           when byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD ->
@@ -139,32 +147,33 @@ handle_info(Msg, S) ->
 
 terminate(normal, #state{conn = Conn, stream_id = StreamId,
                           router = Router,
-                          handler = Handler, h_state = HState}) ->
+                          handler = Handler, h_state = HState} = S) ->
+    emit_tunnel_closed(S),
     _ = (catch quic_h3:send_data(Conn, StreamId, <<>>, true)),
     _ = (catch masque_server_connection:unregister_session(Router, StreamId)),
     try_callback(Handler, terminate, [normal, HState]),
     ok;
 terminate(Reason, #state{router = Router, stream_id = StreamId,
-                          handler = Handler, h_state = HState})
+                          handler = Handler, h_state = HState} = S)
   when Reason =:= connection_closed;
        Reason =:= router_gone;
        Reason =:= peer_reset ->
-    %% Connection/router is gone or peer already reset - no point
-    %% sending anything on the stream. Just clean up locally.
+    emit_tunnel_closed(S),
     _ = (catch masque_server_connection:unregister_session(Router, StreamId)),
     try_callback(Handler, terminate, [Reason, HState]),
     ok;
 terminate(Reason, #state{router = Router, stream_id = StreamId,
-                          handler = Handler, h_state = HState})
+                          handler = Handler, h_state = HState} = S)
   when Reason =:= truncated_capsule;
        Reason =:= capsule_buffer_overflow ->
-    %% reset_and_stop already sent cancel - don't double-reset.
+    emit_tunnel_closed(S),
     _ = (catch masque_server_connection:unregister_session(Router, StreamId)),
     try_callback(Handler, terminate, [Reason, HState]),
     ok;
 terminate(Reason, #state{conn = Conn, stream_id = StreamId,
                           router = Router,
-                          handler = Handler, h_state = HState}) ->
+                          handler = Handler, h_state = HState} = S) ->
+    emit_tunnel_closed(S),
     _ = (catch quic_h3:cancel(Conn, StreamId, ?MASQUE_H3_MESSAGE_ERROR)),
     _ = (catch masque_server_connection:unregister_session(Router, StreamId)),
     try_callback(Handler, terminate, [Reason, HState]),
@@ -172,6 +181,12 @@ terminate(Reason, #state{conn = Conn, stream_id = StreamId,
 
 code_change(_OldVsn, S, _Extra) ->
     {ok, S}.
+
+emit_tunnel_closed(#state{start_time = undefined}) -> ok;
+emit_tunnel_closed(#state{start_time = T}) ->
+    Duration = erlang:monotonic_time(millisecond) - T,
+    masque_metrics:tunnel_closed(Duration,
+                                 #{protocol => udp, transport => h3}).
 
 %%====================================================================
 %% Handler dispatch
@@ -243,12 +258,16 @@ do_actions([{send, Ctx, Data} | Rest], S) ->
         false ->
             Enc = masque_datagram:encode(Ctx, Data),
             _ = quic_h3:send_datagram(S#state.conn, S#state.stream_id, Enc),
+            masque_metrics:bytes_out(PayloadSize,
+                                     #{protocol => udp, transport => h3}),
             do_actions(Rest, S)
     end;
 do_actions([{send_capsule, Type, Value} | Rest], S) ->
     Enc = masque_capsule:encode(Type, Value),
-    _ = quic_h3:send_data(S#state.conn, S#state.stream_id,
-                          iolist_to_binary(Enc), false),
+    EncBin = iolist_to_binary(Enc),
+    _ = quic_h3:send_data(S#state.conn, S#state.stream_id, EncBin, false),
+    masque_metrics:bytes_out(byte_size(EncBin),
+                             #{protocol => udp, transport => h3}),
     do_actions(Rest, S);
 do_actions([close_session | _Rest], S) ->
     {stop, normal, S};
