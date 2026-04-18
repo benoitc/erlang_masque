@@ -57,10 +57,12 @@
 -spec start_listener(listener_name(), listener_opts()) ->
     {ok, pid()} | {error, term()}.
 start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
+    persistent_term:erase({masque_drain, Name}),
     Opts = defaults(Opts0),
     Port = maps:get(port, Opts),
     #{handler := Handler,
-      connection_handler := ConnectionHandler} = h3_handlers(Opts),
+      connection_handler := ConnectionHandler} =
+        h3_handlers(Opts#{drain_key => Name}),
     ServerOpts = #{
         cert => maps:get(cert, Opts),
         key => maps:get(key, Opts),
@@ -89,6 +91,7 @@ build_quic_opts(Opts) ->
 %% @doc Stop a MASQUE listener.
 -spec stop_listener(listener_name()) -> ok | {error, term()}.
 stop_listener(Name) ->
+    persistent_term:erase({masque_drain, Name}),
     quic_h3:stop_server(Name).
 
 %% @doc Return the `handler' and `connection_handler' functions for a
@@ -126,9 +129,11 @@ h3_handlers(Opts0) ->
     TcpHandler  = maps:get(tcp_handler, Opts),
     HandlerOpts = maps:get(handler_opts, Opts, #{}),
     Fallback    = maps:get(fallback, Opts, undefined),
+    DrainKey = maps:get(drain_key, Opts, undefined),
     Dispatch = #{udp_template => UdpTemplate, tcp_template => TcpTemplate,
                  udp_handler => UdpHandler, tcp_handler => TcpHandler,
-                 handler_opts => HandlerOpts, fallback => Fallback},
+                 handler_opts => HandlerOpts, fallback => Fallback,
+                 name => DrainKey},
     MaxTunnels = maps:get(max_tunnels_per_connection, Opts, 0),
     ConnectionHandler = fun(_ConnPid) ->
         {ok, Router} = masque_server_connection:start_link(MaxTunnels),
@@ -173,6 +178,15 @@ make_dispatch_fun(Dispatch, Router) ->
     end.
 
 dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
+    case masque:is_draining(maps:get(name, Dispatch, undefined)) of
+        true ->
+            reject(Conn, StreamId, overload);
+        false ->
+            dispatch_request_1(Conn, StreamId, Method, Path, Headers,
+                               Dispatch, Router)
+    end.
+
+dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
     #{udp_template := UdpTpl, tcp_template := TcpTpl,
       udp_handler := UdpHandler, tcp_handler := TcpHandler,
       handler_opts := HandlerOpts, fallback := Fallback} = Dispatch,

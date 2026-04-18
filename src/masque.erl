@@ -16,6 +16,7 @@
 -export([send_capsule/3, shutdown_write/1]).
 -export([start_listener/2, stop_listener/1]).
 -export([start_listener_h2/2, stop_listener_h2/1]).
+-export([drain_listener/1, undrain_listener/1, is_draining/1]).
 -export([start_chain_listener/2]).
 -export([h3_handlers/1, h2_handlers/1]).
 
@@ -237,9 +238,27 @@ stop_listener(Name) ->
 start_listener_h2(Name, Opts) ->
     masque_h2_server:start_listener(Name, Opts).
 
--spec stop_listener_h2(h2:server_ref()) -> ok | {error, term()}.
+-spec stop_listener_h2(h2:server_ref() | atom()) -> ok | {error, term()}.
 stop_listener_h2(Ref) ->
     masque_h2_server:stop_listener(Ref).
+
+%% @doc Stop accepting new tunnels but let existing ones finish.
+-spec drain_listener(atom()) -> ok.
+drain_listener(Name) ->
+    persistent_term:put({masque_drain, Name}, true),
+    ok.
+
+%% @doc Re-enable new tunnels after draining.
+-spec undrain_listener(atom()) -> ok.
+undrain_listener(Name) ->
+    persistent_term:erase({masque_drain, Name}),
+    ok.
+
+%% @doc Check if a listener is draining.
+-spec is_draining(atom() | undefined) -> boolean().
+is_draining(undefined) -> false;
+is_draining(Name) ->
+    persistent_term:get({masque_drain, Name}, false).
 
 %% @doc Start a chaining (two-hop) listener.
 %%

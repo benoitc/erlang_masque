@@ -33,9 +33,10 @@
 -spec start_listener(listener_name(), listener_opts()) ->
     {ok, h2:server_ref()} | {error, term()}.
 start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
+    persistent_term:erase({masque_drain, Name}),
     Opts = defaults(Opts0),
     Port = maps:get(port, Opts),
-    #{handler := Handler} = h2_handlers(Opts),
+    #{handler := Handler} = h2_handlers(Opts#{drain_key => Name}),
     ServerOpts = #{
         cert => maps:get(cert, Opts),
         key  => maps:get(key, Opts),
@@ -47,17 +48,31 @@ start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
         {ok, N} -> ServerOpts#{acceptors => N};
         error   -> ServerOpts
     end,
-    h2:start_server(Name, Port, ServerOpts1).
+    case h2:start_server(Name, Port, ServerOpts1) of
+        {ok, Ref} ->
+            persistent_term:put({masque_h2_ref, Name}, Ref),
+            persistent_term:put({masque_h2_name, Ref}, Name),
+            {ok, Ref};
+        Error -> Error
+    end.
 
 -spec stop_listener(h2:server_ref() | listener_name()) -> ok | {error, term()}.
 stop_listener({_, _, _} = Ref) ->
+    case persistent_term:get({masque_h2_name, Ref}, undefined) of
+        undefined -> ok;
+        Name ->
+            persistent_term:erase({masque_drain, Name}),
+            persistent_term:erase({masque_h2_ref, Name}),
+            persistent_term:erase({masque_h2_name, Ref})
+    end,
     h2:stop_server(Ref);
 stop_listener(Name) when is_atom(Name) ->
-    %% h2:stop_server takes the server_ref, not an atom. Callers that
-    %% started with a name should hold onto the ref returned by
-    %% start_listener/2. Accept atoms anyway for symmetry with the h3
-    %% facade and return a clear error when we don't have a handle.
-    {error, {no_ref_for_name, Name}}.
+    case persistent_term:get({masque_h2_ref, Name}, undefined) of
+        undefined ->
+            {error, {no_ref_for_name, Name}};
+        Ref ->
+            stop_listener(Ref)
+    end.
 
 -spec h2_handlers(map()) ->
     #{handler := fun((pid(), non_neg_integer(), binary(), binary(),
@@ -95,7 +110,8 @@ build_dispatch(Opts) ->
       tcp_handler  => maps:get(tcp_handler, Opts),
       handler_opts => maps:get(handler_opts, Opts, #{}),
       fallback     => maps:get(fallback, Opts, undefined),
-      max_tunnels  => maps:get(max_tunnels_per_connection, Opts, 0)}.
+      max_tunnels  => maps:get(max_tunnels_per_connection, Opts, 0),
+      name         => maps:get(drain_key, Opts, undefined)}.
 
 make_dispatch_fun(Dispatch) ->
     fun(Conn, StreamId, Method, Path, Headers) ->
@@ -103,6 +119,15 @@ make_dispatch_fun(Dispatch) ->
     end.
 
 dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch) ->
+    case masque:is_draining(maps:get(name, Dispatch, undefined)) of
+        true ->
+            reject(Conn, StreamId, overload);
+        false ->
+            dispatch_request_1(Conn, StreamId, Method, Path, Headers,
+                               Dispatch)
+    end.
+
+dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
     #{udp_template := UdpTpl, tcp_template := TcpTpl,
       udp_handler := UdpHandler, tcp_handler := TcpHandler,
       handler_opts := HandlerOpts, fallback := Fallback} = Dispatch,
