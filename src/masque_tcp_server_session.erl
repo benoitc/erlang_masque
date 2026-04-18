@@ -143,20 +143,24 @@ handle_info({'DOWN', _MRef, process, _Pid, _Reason}, S) ->
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
-terminate(Reason, #state{handler = Handler, h_state = HState})
+terminate(Reason, #state{conn = Conn, transport = Transport,
+                          handler = Handler, h_state = HState})
   when Reason =:= connection_closed;
        Reason =:= router_gone;
        Reason =:= peer_reset;
        Reason =:= peer_closed ->
-    %% Connection/router gone or peer already closed - no point
-    %% sending on the stream.
+    maybe_release_h2_tunnel(Transport, Conn),
     try_callback(Handler, terminate, [Reason, HState]),
     ok;
-terminate(Reason, #state{handler = Handler, h_state = HState} = S) ->
-    %% Signal TCP FIN to the client by sending END_STREAM.
+terminate(Reason, #state{conn = Conn, transport = Transport,
+                          handler = Handler, h_state = HState} = S) ->
+    maybe_release_h2_tunnel(Transport, Conn),
     _ = (catch transport_send_data(S, <<>>, true)),
     try_callback(Handler, terminate, [Reason, HState]),
     ok.
+
+maybe_release_h2_tunnel(h2, Conn) -> masque_h2_server:release_tunnel(Conn);
+maybe_release_h2_tunnel(_, _)     -> ok.
 
 code_change(_OldVsn, S, _Extra) ->
     {ok, S}.

@@ -9,7 +9,7 @@
 -module(masque_server_connection).
 -behaviour(gen_server).
 
--export([start_link/0,
+-export([start_link/1,
          start_session/2,
          cancel_pending/2,
          register_session/3,
@@ -25,20 +25,21 @@
     sessions = #{} :: #{non_neg_integer() => pid()},
     %% MonitorRef -> StreamId (for cleanup on session death)
     monitors = #{} :: #{reference() => non_neg_integer()},
-    %% StreamId -> {CallerFrom, [BufferedMsg]}
     %% StreamId -> {CallerFrom, WorkerPid, [BufferedMsg]}
     %% Streams being set up asynchronously; messages buffered here.
     pending  = #{} :: #{non_neg_integer() =>
-                        {gen_server:from(), pid(), [term()]}}
+                        {gen_server:from(), pid(), [term()]}},
+    %% 0 = unlimited
+    max_tunnels = 0 :: non_neg_integer()
 }).
 
 %%====================================================================
 %% API
 %%====================================================================
 
--spec start_link() -> {ok, pid()} | ignore | {error, term()}.
-start_link() ->
-    gen_server:start_link(?MODULE, [], []).
+-spec start_link(non_neg_integer()) -> {ok, pid()} | ignore | {error, term()}.
+start_link(MaxTunnels) ->
+    gen_server:start_link(?MODULE, [MaxTunnels], []).
 
 %% @doc Start a session process and register it. The router spawns the
 %% session asynchronously so it stays responsive for datagram routing.
@@ -75,24 +76,28 @@ session_module(_)                  -> masque_server_session.
 %% gen_server
 %%====================================================================
 
-init([]) ->
+init([MaxTunnels]) ->
     process_flag(trap_exit, true),
-    {ok, #state{}}.
+    {ok, #state{max_tunnels = MaxTunnels}}.
 
 handle_call({start_session, Args}, From, S) ->
-    #{stream_id := StreamId} = Args,
-    Mod = session_module(Args),
-    Self = self(),
-    %% Link: worker dies when router dies (even on kill).
-    %% Monitor: DOWN message for worker crash tracking.
-    WorkerPid = spawn_link(fun() ->
-        Self ! {session_init_done, StreamId,
-                gen_server:start(Mod, Args, [{timeout, 30000}])}
-    end),
-    erlang:monitor(process, WorkerPid),
-    {noreply,
-     S#state{pending = maps:put(
-         StreamId, {From, WorkerPid, []}, S#state.pending)}};
+    Active = maps:size(S#state.sessions) + maps:size(S#state.pending),
+    case S#state.max_tunnels > 0 andalso Active >= S#state.max_tunnels of
+        true ->
+            {reply, {error, too_many_tunnels}, S};
+        false ->
+            #{stream_id := StreamId} = Args,
+            Mod = session_module(Args),
+            Self = self(),
+            WorkerPid = spawn_link(fun() ->
+                Self ! {session_init_done, StreamId,
+                        gen_server:start(Mod, Args, [{timeout, 30000}])}
+            end),
+            erlang:monitor(process, WorkerPid),
+            {noreply,
+             S#state{pending = maps:put(
+                 StreamId, {From, WorkerPid, []}, S#state.pending)}}
+    end;
 handle_call({cancel_pending, StreamId}, _From, S) ->
     case maps:is_key(StreamId, S#state.pending) of
         true ->

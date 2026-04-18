@@ -14,7 +14,9 @@
 -export([
     start_listener/2,
     stop_listener/1,
-    h2_handlers/1
+    h2_handlers/1,
+    try_reserve_tunnel/2,
+    release_tunnel/1
 ]).
 
 -include("masque.hrl").
@@ -92,7 +94,8 @@ build_dispatch(Opts) ->
       udp_handler  => maps:get(handler, Opts),
       tcp_handler  => maps:get(tcp_handler, Opts),
       handler_opts => maps:get(handler_opts, Opts, #{}),
-      fallback     => maps:get(fallback, Opts, undefined)}.
+      fallback     => maps:get(fallback, Opts, undefined),
+      max_tunnels  => maps:get(max_tunnels_per_connection, Opts, 0)}.
 
 make_dispatch_fun(Dispatch) ->
     fun(Conn, StreamId, Method, Path, Headers) ->
@@ -111,7 +114,16 @@ dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch) ->
                 tcp -> TcpHandler
             end,
             Req = Req0#{handler_opts => HandlerOpts},
+            MaxT = maps:get(max_tunnels, Dispatch, 0),
             case accept_request(HandlerMod, Req) of
+                accept when MaxT > 0 ->
+                    case try_reserve_tunnel(Conn, MaxT) of
+                        true ->
+                            spawn_session(Conn, StreamId, Protocol,
+                                          HandlerMod, HandlerOpts, Req);
+                        false ->
+                            reject(Conn, StreamId, overload)
+                    end;
                 accept ->
                     spawn_session(Conn, StreamId, Protocol,
                                   HandlerMod, HandlerOpts, Req);
@@ -229,3 +241,26 @@ header(Name, Headers) ->
         {_, V} -> V;
         false  -> undefined
     end.
+
+%%====================================================================
+%% Per-connection tunnel counting
+%%====================================================================
+
+-spec try_reserve_tunnel(pid(), pos_integer()) -> boolean().
+try_reserve_tunnel(Conn, Max) ->
+    _ = ets:insert_new(masque_h2_tunnel_counts, {Conn, 0}),
+    New = ets:update_counter(masque_h2_tunnel_counts, Conn, {2, 1}),
+    case New > Max of
+        true ->
+            _ = ets:update_counter(masque_h2_tunnel_counts, Conn, {2, -1}),
+            false;
+        false ->
+            true
+    end.
+
+-spec release_tunnel(pid()) -> ok.
+release_tunnel(Conn) ->
+    _ = try ets:update_counter(masque_h2_tunnel_counts, Conn, {2, -1, 0, 0})
+        catch error:badarg -> ok
+        end,
+    ok.

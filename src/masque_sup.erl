@@ -11,6 +11,9 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
+    %% ETS table for H2 per-connection tunnel counting (Step 4).
+    _ = ets:new(masque_h2_tunnel_counts,
+                [set, public, named_table, {write_concurrency, true}]),
     SupFlags = #{strategy => one_for_one,
                  intensity => 10,
                  period => 10},

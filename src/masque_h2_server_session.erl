@@ -114,17 +114,20 @@ handle_info(Msg, S) ->
 
 terminate(normal, #state{conn = Conn, stream_id = StreamId,
                           handler = Handler, h_state = HState}) ->
+    masque_h2_server:release_tunnel(Conn),
     _ = (catch h2:send_data(Conn, StreamId, <<>>, true)),
     try_callback(Handler, terminate, [normal, HState]),
     ok;
-terminate(Reason, #state{handler = Handler, h_state = HState})
+terminate(Reason, #state{conn = Conn,
+                          handler = Handler, h_state = HState})
   when Reason =:= peer_reset;
        Reason =:= peer_closed ->
-    %% Stream already closed by peer - don't send reset.
+    masque_h2_server:release_tunnel(Conn),
     try_callback(Handler, terminate, [Reason, HState]),
     ok;
 terminate(Reason, #state{conn = Conn, stream_id = StreamId,
                           handler = Handler, h_state = HState}) ->
+    masque_h2_server:release_tunnel(Conn),
     _ = (catch h2:cancel(Conn, StreamId, protocol_error)),
     try_callback(Handler, terminate, [Reason, HState]),
     ok.

@@ -129,8 +129,9 @@ h3_handlers(Opts0) ->
     Dispatch = #{udp_template => UdpTemplate, tcp_template => TcpTemplate,
                  udp_handler => UdpHandler, tcp_handler => TcpHandler,
                  handler_opts => HandlerOpts, fallback => Fallback},
+    MaxTunnels = maps:get(max_tunnels_per_connection, Opts, 0),
     ConnectionHandler = fun(_ConnPid) ->
-        {ok, Router} = masque_server_connection:start_link(),
+        {ok, Router} = masque_server_connection:start_link(MaxTunnels),
         #{
             owner   => Router,
             handler => make_dispatch_fun(Dispatch, Router),
@@ -219,6 +220,7 @@ spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req) ->
             end
     end.
 
+map_init_error(too_many_tunnels)        -> overload;
 map_init_error({resolution_failed, _}) -> resolution_failed;
 map_init_error({reject, Err})          -> Err;
 map_init_error(_)                      -> resolution_failed.
