@@ -132,7 +132,8 @@ init_per_testcase(udp_source_spoofing_rejected, Config) ->
     ProxyBindPort = ephemeral_port(),
     ServerCtx = maps:merge(Certs, #{
         handler      => masque_udp_proxy_handler,
-        handler_opts => #{port => ProxyBindPort}
+        handler_opts => #{port => ProxyBindPort,
+                          allow_private => true}
     }),
     {ok, Server} = masque_test_helpers:start_masque_server(ServerCtx),
     [{server, Server},
@@ -155,11 +156,13 @@ init_per_testcase(Case, Config)
        Case =:= udp_proxy_policy_denies ->
     Certs = ?config(certs, Config),
     {UdpPid, UdpPort} = start_udp_echo(),
-    ServerCtx0 = maps:merge(Certs, #{handler => masque_udp_proxy_handler}),
+    ServerCtx0 = maps:merge(Certs, #{handler => masque_udp_proxy_handler,
+                                      handler_opts => #{allow_private => true}}),
     ServerCtx = case Case of
         udp_proxy_policy_denies ->
             ServerCtx0#{handler_opts =>
-                          #{allow => fun(_) -> false end}};
+                          #{allow => fun(_) -> false end,
+                            allow_private => true}};
         _ -> ServerCtx0
     end,
     {ok, Server} = masque_test_helpers:start_masque_server(ServerCtx),
@@ -169,7 +172,8 @@ init_per_testcase(chain_round_trip, Config) ->
     {UdpPid, UdpPort} = start_udp_echo(),
     %% Egress: a normal UDP proxy
     {ok, Egress} = masque_test_helpers:start_masque_server(
-        maps:merge(Certs, #{handler => masque_udp_proxy_handler})),
+        maps:merge(Certs, #{handler => masque_udp_proxy_handler,
+                            handler_opts => #{allow_private => true}})),
     EgressPort = maps:get(port, Egress),
     %% Ingress: chains to Egress
     {ok, Ingress} = masque_test_helpers:start_masque_server(
@@ -213,7 +217,8 @@ init_per_testcase(chain_capsule_forwarding, Config) ->
 init_per_testcase(tcp_chain_round_trip, Config) ->
     Certs = ?config(certs, Config),
     {TcpPid, TcpPort} = start_tcp_echo(),
-    {ok, Egress} = masque_test_helpers:start_masque_server(Certs),
+    {ok, Egress} = masque_test_helpers:start_masque_server(
+        Certs#{handler_opts => #{allow_private => true}}),
     EgressPort = maps:get(port, Egress),
     {ok, Ingress} = masque_test_helpers:start_masque_server(
         maps:merge(Certs, #{
@@ -267,19 +272,22 @@ init_per_testcase(Case, Config)
        Case =:= tcp_target_closes ->
     Certs = ?config(certs, Config),
     {TcpPid, TcpPort} = start_tcp_echo(),
-    {ok, Server} = masque_test_helpers:start_masque_server(Certs),
+    {ok, Server} = masque_test_helpers:start_masque_server(
+        Certs#{handler_opts => #{allow_private => true}}),
     [{server, Server}, {tcp_pid, TcpPid}, {tcp_port, TcpPort} | Config];
 init_per_testcase(tcp_and_udp_same_listener, Config) ->
     Certs = ?config(certs, Config),
     {TcpPid, TcpPort} = start_tcp_echo(),
     {UdpPid, UdpPort} = start_udp_echo(),
-    {ok, Server} = masque_test_helpers:start_masque_server(Certs),
+    {ok, Server} = masque_test_helpers:start_masque_server(
+        Certs#{handler_opts => #{allow_private => true}}),
     [{server, Server},
      {tcp_pid, TcpPid}, {tcp_port, TcpPort},
      {udp_pid, UdpPid}, {udp_port, UdpPort} | Config];
 init_per_testcase(_Case, Config) ->
     Certs = ?config(certs, Config),
-    {ok, Server} = masque_test_helpers:start_masque_server(Certs),
+    {ok, Server} = masque_test_helpers:start_masque_server(
+        Certs#{handler_opts => #{allow_private => true}}),
     [{server, Server} | Config].
 
 end_per_testcase(_Case, Config) ->
@@ -935,7 +943,8 @@ start_h2_proxy_server(#{cert_file := CertFile, key_file := KeyFile}) ->
         "h2_proxy_" ++ integer_to_list(erlang:unique_integer([positive]))),
     Opts = #{port => 0,
              cert => CertFile, key => KeyFile,
-             handler => masque_udp_proxy_handler},
+             handler => masque_udp_proxy_handler,
+             handler_opts => #{allow_private => true}},
     case masque_h2_server:start_listener(Name, Opts) of
         {ok, Ref} ->
             {_, _, BoundPort} = Ref,

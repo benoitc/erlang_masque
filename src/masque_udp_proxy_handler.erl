@@ -58,28 +58,17 @@ init(#{target_host := Host, target_port := Port} = Req, Opts) ->
     SocketOpts = [binary, {active, true}
                   | maps:get(socket_opts, Opts, [])],
     BindPort = maps:get(port, Opts, 0),
+    AllowPrivate = maps:get(allow_private, Opts, false),
     case resolve(ResolverFun, Host, Family) of
         {ok, IP, BindFamily} ->
-            case gen_udp:open(BindPort, [BindFamily | SocketOpts]) of
-                {ok, Socket} ->
-                    %% Connect the socket to the resolved target so
-                    %% the kernel rejects inbound datagrams from any
-                    %% other source (RFC 9298 §4 threat model).
-                    case gen_udp:connect(Socket, IP, Port) of
-                        ok ->
-                            {ok, #state{socket = Socket,
-                                        target_ip = IP,
-                                        target_port = Port}};
-                        {error, CReason} ->
-                            _ = gen_udp:close(Socket),
-                            {stop, {resolution_failed,
-                                    {connect, CReason}}}
-                    end;
-                {error, Reason} ->
-                    {stop, {resolution_failed, {udp_open, Reason}}}
+            case AllowPrivate orelse masque_ip:is_public(IP) of
+                false ->
+                    {stop, {resolution_failed, private_address}};
+                true ->
+                    open_udp(IP, Port, BindPort, BindFamily, SocketOpts)
             end;
         {error, Reason} ->
-            _ = Req,  %% silence unused warning when tracing disabled
+            _ = Req,
             {stop, {resolution_failed, {resolve, Reason}}}
     end.
 
@@ -146,6 +135,22 @@ default_resolver(Host) when is_list(Host) ->
                 {ok, IP}    -> {ok, IP};
                 {error, _}  -> inet:getaddr(Host, inet6)
             end
+    end.
+
+open_udp(IP, Port, BindPort, BindFamily, SocketOpts) ->
+    case gen_udp:open(BindPort, [BindFamily | SocketOpts]) of
+        {ok, Socket} ->
+            case gen_udp:connect(Socket, IP, Port) of
+                ok ->
+                    {ok, #state{socket = Socket,
+                                target_ip = IP,
+                                target_port = Port}};
+                {error, CReason} ->
+                    _ = gen_udp:close(Socket),
+                    {stop, {resolution_failed, {connect, CReason}}}
+            end;
+        {error, Reason} ->
+            {stop, {resolution_failed, {udp_open, Reason}}}
     end.
 
 %%====================================================================

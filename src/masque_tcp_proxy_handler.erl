@@ -16,10 +16,12 @@
 -module(masque_tcp_proxy_handler).
 -behaviour(masque_handler).
 
--export([accept/1, init/2, handle_data/2, handle_info/2, terminate/2]).
+-export([accept/1, init/2, handle_data/2, handle_eof/1,
+         handle_info/2, terminate/2]).
 
 -record(state, {
-    socket :: gen_tcp:socket()
+    socket    :: gen_tcp:socket(),
+    eof_timer :: reference() | undefined
 }).
 
 %%====================================================================
@@ -40,15 +42,21 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
     ResolverFun = maps:get(resolver, Opts, fun default_resolver/1),
     Family = pick_family(maps:get(family, Opts, auto), Host),
     ConnTimeout = maps:get(connect_timeout, Opts, 5000),
+    AllowPrivate = maps:get(allow_private, Opts, false),
     case resolve(ResolverFun, Host) of
         {ok, IP} ->
-            TcpOpts = [binary, {active, true}, Family
-                       | maps:get(socket_opts, Opts, [])],
-            case gen_tcp:connect(IP, Port, TcpOpts, ConnTimeout) of
-                {ok, Socket} ->
-                    {ok, #state{socket = Socket}};
-                {error, Reason} ->
-                    {stop, {resolution_failed, {tcp_connect, Reason}}}
+            case AllowPrivate orelse masque_ip:is_public(IP) of
+                false ->
+                    {stop, {resolution_failed, private_address}};
+                true ->
+                    TcpOpts = [binary, {active, true}, Family
+                               | maps:get(socket_opts, Opts, [])],
+                    case gen_tcp:connect(IP, Port, TcpOpts, ConnTimeout) of
+                        {ok, Socket} ->
+                            {ok, #state{socket = Socket}};
+                        {error, Reason} ->
+                            {stop, {resolution_failed, {tcp_connect, Reason}}}
+                    end
             end;
         {error, Reason} ->
             {stop, {resolution_failed, {resolve, Reason}}}
@@ -65,11 +73,24 @@ handle_data(Data, #state{socket = S} = State) ->
             {stop, {target_error, Reason}, State}
     end.
 
+-spec handle_eof(#state{}) -> {ok, #state{}} | {stop, term(), #state{}}.
+handle_eof(#state{socket = S} = State) ->
+    _ = gen_tcp:shutdown(S, write),
+    TRef = erlang:send_after(30000, self(), eof_timeout),
+    {ok, State#state{eof_timer = TRef}}.
+
 -spec handle_info(term(), #state{}) -> {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
 handle_info({tcp, Socket, Bytes}, #state{socket = Socket} = State) ->
     {ok, State, [{send_data, Bytes}]};
-handle_info({tcp_closed, Socket}, #state{socket = Socket} = State) ->
+handle_info({tcp_closed, Socket}, #state{socket = Socket,
+                                          eof_timer = TRef} = State) ->
+    _ = case TRef of
+            undefined -> ok;
+            _         -> erlang:cancel_timer(TRef)
+        end,
     {stop, target_closed, State};
+handle_info(eof_timeout, State) ->
+    {stop, eof_timeout, State};
 handle_info({tcp_error, Socket, Reason}, #state{socket = Socket} = State) ->
     {stop, {target_error, Reason}, State};
 handle_info(_Other, State) ->
