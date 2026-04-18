@@ -18,7 +18,9 @@
 
 -include("masque.hrl").
 
--dialyzer({nowarn_function, [do_connect/2, request_headers/1,
+%% quic_h3:connect_opts() is missing sync key. Fix tracked upstream.
+-dialyzer({nowarn_function, [do_connect/2, verify_h3_peer_settings/1,
+                              verify_h2_peer_settings/1, request_headers/1,
                               build_authority/2, is_ipv6_literal/1]}).
 
 -record(data, {
@@ -256,10 +258,17 @@ do_connect(#data{transport = h3} = Data, Opts) ->
     case quic_h3:connect(Data#data.proxy_host,
                          Data#data.proxy_port, ConnOpts1) of
         {ok, Conn} ->
-            ReqHeaders = request_headers(Data),
-            case quic_h3:request(Conn, ReqHeaders, #{end_stream => false}) of
-                {ok, StreamId} -> {ok, Conn, StreamId};
-                {error, R}     -> quic_h3:close(Conn), {error, {request, R}}
+            case verify_h3_peer_settings(Conn) of
+                ok ->
+                    ReqHeaders = request_headers(Data),
+                    case quic_h3:request(Conn, ReqHeaders,
+                                         #{end_stream => false}) of
+                        {ok, StreamId} -> {ok, Conn, StreamId};
+                        {error, R}     ->
+                            quic_h3:close(Conn), {error, {request, R}}
+                    end;
+                {error, _} = Err ->
+                    quic_h3:close(Conn), Err
             end;
         {error, Reason} -> {error, {connect, Reason}}
     end;
@@ -278,13 +287,38 @@ do_connect(#data{transport = h2} = Data, Opts) ->
     case h2:connect(Data#data.proxy_host,
                     Data#data.proxy_port, ConnOpts) of
         {ok, Conn} ->
-            ReqHeaders = request_headers(Data),
-            case h2:request(Conn, ReqHeaders,
-                            #{protocol => ?MASQUE_CONNECT_TCP_PROTOCOL}) of
-                {ok, StreamId} -> {ok, Conn, StreamId};
-                {error, R}     -> h2:close(Conn), {error, {request, R}}
+            case verify_h2_peer_settings(Conn) of
+                ok ->
+                    ReqHeaders = request_headers(Data),
+                    case h2:request(Conn, ReqHeaders,
+                                    #{protocol =>
+                                      ?MASQUE_CONNECT_TCP_PROTOCOL}) of
+                        {ok, StreamId} -> {ok, Conn, StreamId};
+                        {error, R}     ->
+                            h2:close(Conn), {error, {request, R}}
+                    end;
+                {error, _} = Err ->
+                    h2:close(Conn), Err
             end;
         {error, Reason} -> {error, {connect, Reason}}
+    end.
+
+verify_h3_peer_settings(Conn) ->
+    case quic_h3:get_peer_settings(Conn) of
+        undefined -> ok;
+        Settings when is_map(Settings) ->
+            case maps:get(enable_connect_protocol, Settings, 0) of
+                1 -> ok;
+                _ -> {error, no_extended_connect}
+            end
+    end.
+
+verify_h2_peer_settings(Conn) ->
+    Settings = h2:get_peer_settings(Conn),
+    case maps:get(enable_connect_protocol, Settings, false) of
+        true -> ok;
+        1    -> ok;
+        _    -> {error, no_extended_connect}
     end.
 
 send_out(#data{} = Data, Payload) ->

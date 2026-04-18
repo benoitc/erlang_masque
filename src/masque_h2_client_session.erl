@@ -253,14 +253,29 @@ do_connect(Data, Opts) ->
                     Data#data.proxy_port,
                     ConnOpts) of
         {ok, Conn} ->
-            ReqHeaders = request_headers(Data),
-            case h2:request(Conn, ReqHeaders,
-                            #{protocol => ?MASQUE_CONNECT_UDP_PROTOCOL}) of
-                {ok, StreamId} -> {ok, Conn, StreamId};
-                {error, R}     -> h2:close(Conn), {error, {request, R}}
+            case verify_h2_peer_settings(Conn) of
+                ok ->
+                    ReqHeaders = request_headers(Data),
+                    case h2:request(Conn, ReqHeaders,
+                                    #{protocol =>
+                                      ?MASQUE_CONNECT_UDP_PROTOCOL}) of
+                        {ok, StreamId} -> {ok, Conn, StreamId};
+                        {error, R}     ->
+                            h2:close(Conn), {error, {request, R}}
+                    end;
+                {error, _} = Err ->
+                    h2:close(Conn), Err
             end;
         {error, Reason} ->
             {error, {connect, Reason}}
+    end.
+
+verify_h2_peer_settings(Conn) ->
+    Settings = h2:get_peer_settings(Conn),
+    case maps:get(enable_connect_protocol, Settings, false) of
+        true -> ok;
+        1    -> ok;
+        _    -> {error, no_extended_connect}
     end.
 
 %% `h2:connect/3' merges `verify'/`cacerts' and `ssl_opts' into the

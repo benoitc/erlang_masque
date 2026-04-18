@@ -25,9 +25,10 @@
 %% `quic_h3:connect/3' has a narrower published type than its
 %% implementation accepts (e.g. `sync' and `h3_datagram_enabled' are
 %% used by the code but omitted from `quic_h3:connect_opts()'). The
-%% suppression is scoped to the single call site so every other
-%% type-check in this module remains strict.
--dialyzer({nowarn_function, [do_connect/2, request_headers/1,
+%% quic_h3:connect_opts() is missing sync and h3_datagram_enabled
+%% keys that connect/3 accepts. Fix tracked upstream.
+-dialyzer({nowarn_function, [do_connect/2, verify_peer_settings/1,
+                              request_headers/1,
                               build_authority/2, is_ipv6_literal/1]}).
 
 -record(data, {
@@ -405,15 +406,35 @@ do_connect(Data, Opts) ->
                          Data#data.proxy_port,
                          ConnOpts) of
         {ok, Conn} ->
-            ReqHeaders = request_headers(Data),
-            %% RFC 9298 tunnels - the request stream must remain open
-            %% for subsequent capsules, so suppress the default FIN.
-            case quic_h3:request(Conn, ReqHeaders, #{end_stream => false}) of
-                {ok, StreamId} -> {ok, Conn, StreamId};
-                {error, R}     -> quic_h3:close(Conn), {error, {request, R}}
+            case verify_peer_settings(Conn) of
+                ok ->
+                    ReqHeaders = request_headers(Data),
+                    case quic_h3:request(Conn, ReqHeaders,
+                                         #{end_stream => false}) of
+                        {ok, StreamId} -> {ok, Conn, StreamId};
+                        {error, R}     ->
+                            quic_h3:close(Conn), {error, {request, R}}
+                    end;
+                {error, _} = Err ->
+                    quic_h3:close(Conn), Err
             end;
         {error, Reason} ->
             {error, {connect, Reason}}
+    end.
+
+verify_peer_settings(Conn) ->
+    case quic_h3:get_peer_settings(Conn) of
+        undefined ->
+            %% SETTINGS not yet received - quic_h3 sync connect
+            %% should have waited, but be defensive.
+            ok;
+        Settings when is_map(Settings) ->
+            ECP = maps:get(enable_connect_protocol, Settings, 0),
+            H3D = maps:get(h3_datagram, Settings, 0),
+            if ECP =/= 1 -> {error, no_extended_connect};
+               H3D =/= 1 -> {error, no_h3_datagram};
+               true       -> ok
+            end
     end.
 
 request_headers(#data{proxy_host = ProxyHost, proxy_port = ProxyPort,
