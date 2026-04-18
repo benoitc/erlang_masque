@@ -49,10 +49,12 @@
 -callback handle_data(binary(), term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
 -callback handle_capsule(non_neg_integer(), binary(), term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
 -callback handle_info(term(), term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
+-callback handle_eof(term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
 -callback terminate(term(), term()) -> term().
 
 -optional_callbacks([accept/1, init/2, handle_packet/2, handle_data/2,
-                     handle_capsule/3, handle_info/2, terminate/2]).
+                     handle_capsule/3, handle_info/2, handle_eof/1,
+                     terminate/2]).
 
 %%====================================================================
 %% API

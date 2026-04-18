@@ -9,7 +9,7 @@
 -module(masque_tcp_client_session).
 -behaviour(gen_statem).
 
--export([start_link/3, stop/1, info/1]).
+-export([start_link/3, start/3, stop/1, info/1]).
 -export([send/2, recv/2, set_mode/2]).
 -export([send_capsule/3]).
 
@@ -36,7 +36,8 @@
     timeout_ref    :: reference() | undefined,
     mode           :: message | queue,
     rx_buf = queue:new() :: queue:queue(binary()),
-    rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()})
+    rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
+    write_closed = false :: boolean()
 }).
 
 %%====================================================================
@@ -45,6 +46,9 @@
 
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
+
+start(Target, Opts, Owner) ->
+    gen_statem:start(?MODULE, {Target, Opts, Owner}, []).
 
 stop(Pid) -> gen_statem:call(Pid, stop, 5000).
 info(Pid) -> gen_statem:call(Pid, info, 1000).
@@ -106,8 +110,13 @@ connecting(internal, {do_handshake, Opts}, Data) ->
     end;
 connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
+connecting({call, From}, shutdown_write, Data) ->
+    {keep_state, Data, [{reply, From, {error, not_ready}}]};
 connecting({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
+connecting(info, {h2, _Conn, closed}, Data) ->
+    reply_handshake(Data, {error, peer_closed}),
+    {stop, peer_closed};
 connecting(info, {Tag, _Conn, {response, StreamId, Status, _Headers}},
            #data{stream_id = StreamId} = Data)
   when Tag =:= quic_h3; Tag =:= h2 ->
@@ -138,6 +147,8 @@ connecting({call, From}, stop, Data) ->
 
 open({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, open)}]};
+open({call, From}, {send, _}, #data{write_closed = true} = Data) ->
+    {keep_state, Data, [{reply, From, {error, write_closed}}]};
 open({call, From}, {send, Payload}, Data) ->
     Reply = send_out(Data, Payload),
     {keep_state, Data, [{reply, From, Reply}]};
@@ -147,10 +158,22 @@ open({call, From}, {set_mode, Mode}, Data) ->
     {keep_state, Data#data{mode = Mode}, [{reply, From, ok}]};
 open({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
+open({call, From}, {send_capsule, _, _}, #data{write_closed = true} = Data) ->
+    {keep_state, Data, [{reply, From, {error, write_closed}}]};
 open({call, From}, {send_capsule, Type, Value}, Data) ->
     Enc = iolist_to_binary(masque_capsule:encode(Type, Value)),
     Reply = transport_send_data(Data, Enc, false),
     {keep_state, Data, [{reply, From, Reply}]};
+open({call, From}, shutdown_write, #data{write_closed = true} = Data) ->
+    {keep_state, Data, [{reply, From, {error, already_closed}}]};
+open({call, From}, shutdown_write, Data) ->
+    case transport_send_data(Data, <<>>, true) of
+        ok ->
+            {keep_state, Data#data{write_closed = true},
+             [{reply, From, ok}]};
+        Err ->
+            {keep_state, Data, [{reply, From, Err}]}
+    end;
 open({call, From}, stop, Data) ->
     {next_state, closing, Data,
      [{reply, From, ok},
@@ -183,6 +206,12 @@ open(info, {'DOWN', Ref, process, _, _},
 open(info, _Msg, Data) ->
     {keep_state, Data}.
 
+closing({call, From}, shutdown_write, Data) ->
+    {keep_state, Data, [{reply, From, {error, closing}}]};
+closing(internal, do_close, #data{write_closed = true} = Data) ->
+    %% Write FIN already sent. Just close the connection.
+    _ = (catch transport_close(Data)),
+    {stop, normal, Data};
 closing(internal, do_close, Data) ->
     case (catch transport_send_data(Data, <<>>, true)) of
         ok  -> ok;
@@ -201,8 +230,10 @@ terminate(_Reason, _State, Data) ->
     ok.
 
 cancel_all_waiters(#data{rx_waiters = Ws}) ->
-    _ = queue:fold(fun({_From, TRef}, _) ->
-        _ = erlang:cancel_timer(TRef), ok
+    _ = queue:fold(fun({From, TRef}, _) ->
+        _ = erlang:cancel_timer(TRef),
+        gen_statem:reply(From, {error, closed}),
+        ok
     end, ok, Ws),
     ok.
 
@@ -314,7 +345,10 @@ deliver(Bytes, #data{mode = queue, rx_waiters = Ws, rx_buf = Buf} = Data) ->
             gen_statem:reply(From, {ok, Bytes}),
             Data#data{rx_waiters = Ws2};
         {empty, _} ->
-            Data#data{rx_buf = queue:in(Bytes, Buf)}
+            case queue:len(Buf) < 1000 of
+                true  -> Data#data{rx_buf = queue:in(Bytes, Buf)};
+                false -> Data
+            end
     end.
 
 drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->

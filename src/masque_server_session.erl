@@ -24,7 +24,9 @@
     req        :: map(),
     cap_buf = <<>> :: binary(),
     max_cap    :: pos_integer(),
-    cap_fin_seen = false :: boolean()
+    cap_fin_seen = false :: boolean(),
+    %% Actions from handler init, applied after finalize
+    pending_actions :: [term()] | undefined
 }).
 
 %%====================================================================
@@ -42,26 +44,26 @@ start_link(Args) ->
 init(#{conn := Conn, stream_id := StreamId, router := Router,
        handler := Handler, handler_opts := HOpts, req := Req}) ->
     process_flag(trap_exit, true),
+    %% Monitor router so we stop if it dies during or after init.
+    erlang:monitor(process, Router),
     %% RFC 9298 §3: a 2xx response means the tunnel is set up and the
     %% proxy is ready to forward UDP. So the user's `init/2' (which
     %% for the built-in proxy opens the gen_udp socket and validates
     %% the target) MUST run to completion before we commit to 200.
+    %%
+    %% The 200 response and stream claiming are deferred to finalize/0,
+    %% called by the router after registration, so the router stays
+    %% responsive during handler init.
     MaxCap = maps:get(max_capsule_size, HOpts,
                       ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE),
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, Actions} ->
-            State0 = #state{conn = Conn, stream_id = StreamId,
-                            router = Router, handler = Handler,
-                            h_state = HState, req = Req,
-                            max_cap = MaxCap},
-            ok = quic_h3:send_response(Conn, StreamId, 200,
-                                       response_headers()),
-            %% Claim the request stream so its body bytes (capsules)
-            %% are delivered here instead of being buffered inside
-            %% `quic_h3'. Any already-buffered bytes are returned
-            %% synchronously and fed into the capsule decoder.
-            State = claim_stream(State0),
-            apply_actions(Actions, State);
+            State = #state{conn = Conn, stream_id = StreamId,
+                           router = Router, handler = Handler,
+                           h_state = HState, req = Req,
+                           max_cap = MaxCap,
+                           pending_actions = Actions},
+            {ok, State};
         {stop, Reason} ->
             {stop, Reason}
     end.
@@ -73,17 +75,35 @@ claim_stream(#state{conn = Conn, stream_id = StreamId,
                     cap_buf = Buf} = S) ->
     case quic_h3:set_stream_handler(Conn, StreamId, self()) of
         ok ->
-            S;
+            {ok, S};
         {ok, Chunks} ->
             More = iolist_to_binary([D || {D, _Fin} <- Chunks]),
-            S#state{cap_buf = <<Buf/binary, More/binary>>};
-        _ ->
-            S
+            {ok, S#state{cap_buf = <<Buf/binary, More/binary>>}};
+        {error, _} = Err ->
+            Err
     end.
 
+handle_call(finalize, _From,
+            #state{pending_actions = Actions, conn = Conn,
+                   stream_id = StreamId} = S)
+  when Actions =/= undefined ->
+    case quic_h3:send_response(Conn, StreamId, 200,
+                                response_headers()) of
+        ok ->
+            case claim_stream(S#state{pending_actions = undefined}) of
+                {ok, State} ->
+                    {reply, ok, run_init_actions(Actions, State)};
+                {error, _} ->
+                    {reply, {error, stream_dead}, S}
+            end;
+        {error, _} ->
+            {reply, {error, stream_dead}, S}
+    end;
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
+handle_cast(connection_closed, S) ->
+    {stop, connection_closed, S};
 handle_cast(_Msg, S) ->
     {noreply, S}.
 
@@ -111,11 +131,41 @@ handle_info({quic_h3, _Conn, {data, StreamId, Data, Fin}},
 handle_info({masque_stream_reset, StreamId, _ErrorCode},
             #state{stream_id = StreamId} = S) ->
     {stop, peer_reset, S};
+handle_info({'DOWN', _MRef, process, _Pid, _Reason}, S) ->
+    %% Router died - clean up
+    {stop, router_gone, S};
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
-terminate(Reason, #state{router = Router, stream_id = StreamId,
+terminate(normal, #state{conn = Conn, stream_id = StreamId,
+                          router = Router,
                           handler = Handler, h_state = HState}) ->
+    _ = (catch quic_h3:send_data(Conn, StreamId, <<>>, true)),
+    _ = (catch masque_server_connection:unregister_session(Router, StreamId)),
+    try_callback(Handler, terminate, [normal, HState]),
+    ok;
+terminate(Reason, #state{router = Router, stream_id = StreamId,
+                          handler = Handler, h_state = HState})
+  when Reason =:= connection_closed;
+       Reason =:= router_gone;
+       Reason =:= peer_reset ->
+    %% Connection/router is gone or peer already reset - no point
+    %% sending anything on the stream. Just clean up locally.
+    _ = (catch masque_server_connection:unregister_session(Router, StreamId)),
+    try_callback(Handler, terminate, [Reason, HState]),
+    ok;
+terminate(Reason, #state{router = Router, stream_id = StreamId,
+                          handler = Handler, h_state = HState})
+  when Reason =:= truncated_capsule;
+       Reason =:= capsule_buffer_overflow ->
+    %% reset_and_stop already sent cancel - don't double-reset.
+    _ = (catch masque_server_connection:unregister_session(Router, StreamId)),
+    try_callback(Handler, terminate, [Reason, HState]),
+    ok;
+terminate(Reason, #state{conn = Conn, stream_id = StreamId,
+                          router = Router,
+                          handler = Handler, h_state = HState}) ->
+    _ = (catch quic_h3:cancel(Conn, StreamId, ?MASQUE_H3_MESSAGE_ERROR)),
     _ = (catch masque_server_connection:unregister_session(Router, StreamId)),
     try_callback(Handler, terminate, [Reason, HState]),
     ok.
@@ -162,16 +212,17 @@ exported(Mod, Fun, Arity) ->
     _ = code:ensure_loaded(Mod),
     erlang:function_exported(Mod, Fun, Arity).
 
-apply_actions(Actions, State) ->
-    case do_actions(Actions, State) of
-        {ok, S2}          -> {ok, S2};
-        {stop, Reason, _} -> {stop, Reason}
-    end.
-
 apply_actions_noreply(Actions, State) ->
     case do_actions(Actions, State) of
         {ok, S2}          -> {noreply, S2};
         {stop, Reason, S2} -> {stop, Reason, S2}
+    end.
+
+run_init_actions([], S) -> S;
+run_init_actions(Actions, S) ->
+    case do_actions(Actions, S) of
+        {ok, S2}          -> S2;
+        {stop, Reason, _} -> exit(Reason)
     end.
 
 do_actions([], S) -> {ok, S};

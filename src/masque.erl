@@ -13,7 +13,7 @@
 -export([version/0]).
 -export([connect/3, connect/2, close/1, info/1]).
 -export([send/2, send/3, recv/2, set_mode/2]).
--export([send_capsule/3]).
+-export([send_capsule/3, shutdown_write/1]).
 -export([start_listener/2, stop_listener/1]).
 -export([start_listener_h2/2, stop_listener_h2/1]).
 -export([start_chain_listener/2]).
@@ -107,9 +107,9 @@ connect(ProxyURI, Target, Opts) when is_map(Opts) ->
     end.
 
 connect_via([h3], Target, Opts, Owner) ->
-    dial_single(session_mod(Opts, h3), Target, Opts, Owner);
+    dial_single(session_mod(Opts, h3), Target, Opts#{transport => h3}, Owner);
 connect_via([h2], Target, Opts, Owner) ->
-    dial_single(session_mod(Opts, h2), Target, Opts, Owner);
+    dial_single(session_mod(Opts, h2), Target, Opts#{transport => h2}, Owner);
 connect_via(Transports, Target, Opts, Owner)
   when length(Transports) >= 2 ->
     masque_racer:race(Transports, Target, Opts, Owner).
@@ -126,15 +126,25 @@ session_mod(Opts, h2) ->
     end.
 
 %% Direct (non-racing) dial via a single transport module.
+%% Uses start (not start_link) + monitor so a fast session failure
+%% returns {error, _} instead of crashing the caller with an EXIT.
 dial_single(Mod, Target, Opts, Owner) ->
-    case Mod:start_link(Target, Opts, Owner) of
+    case Mod:start(Target, Opts, Owner) of
         {ok, Pid} ->
+            MRef = erlang:monitor(process, Pid),
             Timeout = maps:get(timeout, Opts, 5000),
-            case gen_statem:call(Pid, handshake_await, Timeout + 1000) of
+            Result = try gen_statem:call(Pid, handshake_await,
+                                        Timeout + 1000)
+                     catch
+                         exit:{noproc, _}      -> {error, session_died};
+                         exit:{normal, _}      -> {error, session_died};
+                         exit:{{shutdown,_}, _} -> {error, session_died}
+                     end,
+            erlang:demonitor(MRef, [flush]),
+            case Result of
                 ok ->
                     {ok, Pid};
                 {error, Reason} ->
-                    catch unlink(Pid),
                     catch exit(Pid, kill),
                     {error, Reason}
             end;
@@ -200,6 +210,15 @@ send_capsule(Sess, Type, Value) ->
 -spec set_mode(session(), message | queue) -> ok.
 set_mode(Sess, Mode) ->
     gen_statem:call(Sess, {set_mode, Mode}).
+
+%% @doc Half-close the write side of a TCP tunnel.
+%%
+%% Sends END_STREAM and prevents further writes. The session stays
+%% open for receiving data. Returns `{error, not_supported}' on UDP
+%% sessions. Returns `{error, not_ready}' if still connecting.
+-spec shutdown_write(session()) -> ok | {error, term()}.
+shutdown_write(Sess) when is_pid(Sess) ->
+    gen_statem:call(Sess, shutdown_write).
 
 %%====================================================================
 %% Server facade

@@ -1,0 +1,457 @@
+# API Reference
+
+Complete reference for the `masque` public API. All functions are
+exported from the `masque` module unless noted otherwise.
+
+## Types
+
+```erlang
+-type session()       :: pid().
+-type proxy_uri()     :: binary() | string().
+-type target()        :: {binary() | inet:hostname() | inet:ip_address(),
+                          inet:port_number()}.
+-type transport()     :: h3 | h2.
+```
+
+### connect_opts()
+
+Options for `connect/3`:
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `protocol` | `udp \| tcp` | `udp` | Tunnel protocol. `udp` opens a CONNECT-UDP tunnel (RFC 9298). `tcp` opens a CONNECT-TCP tunnel. |
+| `transports` | `[transport()]` | `[h3, h2]` | Transport preference. When both are listed, h3 and h2 race with h3 getting a head start. |
+| `prefer_timeout_ms` | `non_neg_integer()` | `250` | Milliseconds h3 gets before h2 starts racing. |
+| `timeout` | `pos_integer()` | `5000` | Handshake timeout in milliseconds. |
+| `verify` | `verify_peer \| verify_none` | `verify_peer` | TLS certificate verification. |
+| `cacerts` | `[der_encoded()]` | system CAs | Custom CA certificates for `verify_peer`. |
+| `ssl_opts` | `[ssl:tls_client_option()]` | `[]` | Extra TLS options passed to the transport. |
+| `uri_template` | `binary()` | `/.well-known/masque/udp/{target_host}/{target_port}/` | URI template for the CONNECT request. |
+| `capsule_protocol` | `boolean()` | `true` | Whether to validate the `capsule-protocol: ?1` response header. |
+| `owner` | `pid()` | `self()` | Process that receives `{masque_data, ...}` messages. |
+| `mode` | `message \| queue` | `message` | Initial delivery mode. |
+
+### listener_opts()
+
+Options for `start_listener/2`:
+
+| Key | Type | Required | Description |
+| --- | --- | --- | --- |
+| `port` | `inet:port_number()` | yes | Listen port. |
+| `cert` | `binary()` | yes | DER-encoded server certificate. |
+| `key` | `binary()` | yes | DER-encoded private key. |
+| `certfile` | `file:filename()` | alt | PEM certificate file (alternative to `cert`). |
+| `keyfile` | `file:filename()` | alt | PEM key file (alternative to `key`). |
+| `handler` | `module()` | no | Handler module implementing `masque_handler`. Default: `masque_udp_proxy_handler`. |
+| `handler_opts` | `term()` | no | Passed to handler `init/2`. Default: `#{}`. |
+| `tcp_handler` | `module()` | no | Handler for CONNECT-TCP tunnels. Default: `masque_tcp_proxy_handler`. |
+| `uri_template` | `binary()` | no | Custom URI template for UDP. |
+| `tcp_uri_template` | `binary()` | no | Custom URI template for TCP. |
+| `fallback` | `fun/5` | no | Called for non-MASQUE requests. Signature: `fun(Conn, StreamId, Method, Path, Headers)`. |
+| `reuseport` | `boolean()` | no | Enable `SO_REUSEPORT` for kernel-level scaling. Default: `false`. |
+| `allow` | `fun(target()) -> boolean()` | no | Policy gate - reject targets that return `false`. |
+| `resolver` | `fun(hostname()) -> {ok, ip()} \| {error, _}` | no | Custom DNS resolver. |
+
+---
+
+## Client API
+
+### connect/2,3
+
+```erlang
+-spec connect(proxy_uri(), target()) -> {ok, session()} | {error, term()}.
+-spec connect(proxy_uri(), target(), connect_opts()) ->
+    {ok, session()} | {error, term()}.
+```
+
+Open a MASQUE tunnel through a proxy to the given target.
+
+`ProxyURI` is an `https://host:port` URL. `Target` is `{Host, Port}`
+naming the endpoint to reach. Returns `{ok, Session}` after the proxy
+responds with 2xx.
+
+```erlang
+{ok, Sess} = masque:connect(<<"https://proxy.example:4433">>,
+                            {<<"1.1.1.1">>, 53},
+                            #{verify => verify_none}).
+```
+
+For TCP tunnels:
+
+```erlang
+{ok, Sess} = masque:connect(ProxyURI, {<<"example.com">>, 80},
+                            #{protocol => tcp, verify => verify_none}).
+```
+
+### send/2,3
+
+```erlang
+-spec send(session(), iodata()) -> ok | {error, term()}.
+-spec send(session(), non_neg_integer(), iodata()) -> ok | {error, term()}.
+```
+
+Send data through the tunnel.
+
+- UDP tunnels: sends a UDP packet. Payloads over 65527 bytes are
+  silently dropped (HTTP Datagrams are unreliable by design).
+- TCP tunnels: sends raw bytes on the stream.
+
+The 3-arity form sends under an explicit context-ID (UDP extension
+use only; context 0 is the default).
+
+### recv/2
+
+```erlang
+-spec recv(session(), pos_integer()) ->
+    {ok, binary()} | {error, timeout | closed | term()}.
+```
+
+Block until data arrives or `Timeout` milliseconds elapse. Requires
+the session to be in `queue` delivery mode.
+
+```erlang
+ok = masque:set_mode(Sess, queue),
+ok = masque:send(Sess, <<"ping">>),
+{ok, Reply} = masque:recv(Sess, 5000).
+```
+
+### set_mode/2
+
+```erlang
+-spec set_mode(session(), message | queue) -> ok.
+```
+
+Switch the delivery mode of a session:
+
+- `message` (default): the owner process receives
+  `{masque_data, Sess, Data}` for each inbound packet.
+- `queue`: packets are buffered internally; pull with `recv/2`.
+
+Can be called at any time while the session is open.
+
+### send_capsule/3
+
+```erlang
+-spec send_capsule(session(), non_neg_integer(), iodata()) ->
+    ok | {error, term()}.
+```
+
+Send an RFC 9297 capsule on the tunnel's request stream. The capsule
+`Type` is a varint-encoded capsule type; `Value` is the capsule body.
+
+The peer receives it as `{masque_capsule, Sess, Type, Value}` in
+message mode.
+
+### shutdown_write/1
+
+```erlang
+-spec shutdown_write(session()) -> ok | {error, term()}.
+```
+
+Half-close the write side of a TCP tunnel. Sends END_STREAM and
+prevents further writes. The session stays open for receiving data.
+
+Returns:
+- `ok` - FIN sent successfully.
+- `{error, not_supported}` - called on a UDP session.
+- `{error, not_ready}` - session still connecting.
+- `{error, write_closed}` - already shut down.
+- `{error, closing}` - session is closing.
+
+### close/1
+
+```erlang
+-spec close(session()) -> ok.
+```
+
+Close a session. Best-effort: if the session is stuck, `close`
+returns `ok` after a 5-second timeout without blocking indefinitely.
+
+### info/1
+
+```erlang
+-spec info(session()) -> map().
+```
+
+Return a map describing the session's current state and peers.
+
+### version/0
+
+```erlang
+-spec version() -> binary().
+```
+
+Return the library version from the application resource file.
+
+---
+
+## Owner Messages
+
+In `message` delivery mode (the default), the owner process receives
+these messages from an active session:
+
+| Message | Meaning |
+| --- | --- |
+| `{masque_data, Sess, Data}` | Inbound UDP packet or TCP bytes. |
+| `{masque_capsule, Sess, Type, Value}` | Inbound RFC 9297 capsule. |
+| `{masque_closed, Sess, Reason}` | Session closed (peer reset, timeout, etc.). |
+
+Monitor the session pid for definitive shutdown notification:
+
+```erlang
+MRef = erlang:monitor(process, Sess),
+receive
+    {'DOWN', MRef, process, Sess, Reason} -> handle_down(Reason)
+end.
+```
+
+---
+
+## Server API
+
+### start_listener/2
+
+```erlang
+-spec start_listener(atom(), listener_opts()) ->
+    {ok, pid()} | {error, term()}.
+```
+
+Start an HTTP/3 MASQUE listener. The listener accepts CONNECT-UDP
+and CONNECT-TCP requests, dispatching them to the configured handler
+module.
+
+```erlang
+{ok, _} = masque:start_listener(my_proxy, #{
+    port => 4433,
+    cert => CertDer,
+    key  => KeyDer,
+    handler => masque_udp_proxy_handler,
+    handler_opts => #{
+        allow => fun({_Host, 53}) -> true; ({_, _}) -> false end
+    }
+}).
+```
+
+### stop_listener/1
+
+```erlang
+-spec stop_listener(atom()) -> ok | {error, term()}.
+```
+
+Stop a running H3 listener by name.
+
+### start_listener_h2/2
+
+```erlang
+-spec start_listener_h2(atom(), map()) ->
+    {ok, h2:server_ref()} | {error, term()}.
+```
+
+Start an HTTP/2 MASQUE listener. Options are similar to the H3
+listener but use PEM file paths:
+
+```erlang
+{ok, _} = masque:start_listener_h2(my_h2_proxy, #{
+    port => 4434,
+    cert => "cert.pem",
+    key  => "key.pem"
+}).
+```
+
+### stop_listener_h2/1
+
+```erlang
+-spec stop_listener_h2(h2:server_ref()) -> ok | {error, term()}.
+```
+
+### start_chain_listener/2
+
+```erlang
+-spec start_chain_listener(atom(), map()) ->
+    {ok, pid()} | {error, term()}.
+```
+
+Start a chaining (two-hop) listener. Convenience wrapper that uses
+`masque_chain_handler` as the handler. Every accepted tunnel is
+relayed to the upstream proxy specified in
+`handler_opts.upstream_proxy`.
+
+```erlang
+{ok, _} = masque:start_chain_listener(ingress, #{
+    port => 4433,
+    cert => CertDer,
+    key  => KeyDer,
+    handler_opts => #{
+        upstream_proxy => <<"https://egress.example:4434">>,
+        upstream_opts  => #{verify => verify_none}
+    }
+}).
+```
+
+### h3_handlers/1
+
+```erlang
+-spec h3_handlers(map()) ->
+    #{handler := fun(), connection_handler := fun()}.
+```
+
+Return the `handler` and `connection_handler` funs for integrating
+MASQUE into a user-owned `quic_h3:start_server/3` call. Non-MASQUE
+requests fall through to the `fallback` fun if provided.
+
+### h2_handlers/1
+
+```erlang
+-spec h2_handlers(map()) -> #{handler := fun()}.
+```
+
+Return the `handler` fun for integrating MASQUE into a user-owned
+`h2` server.
+
+---
+
+## Handler Behaviour
+
+`masque_handler` defines the server-side callback interface. All
+callbacks are optional.
+
+### Callbacks
+
+```erlang
+-callback accept(req()) -> accept | {reject, handshake_error()}.
+```
+
+Synchronous accept/reject gate. Runs before the 200 response.
+
+```erlang
+-callback init(req(), Opts :: term()) ->
+    {ok, State} | {ok, State, [action()]} | {stop, Reason}.
+```
+
+Session start. Opens resources (sockets, upstream connections).
+
+```erlang
+-callback handle_packet(binary(), State) ->
+    {ok, State} | {ok, State, [action()]} | {stop, Reason, State}.
+```
+
+Inbound UDP payload (CONNECT-UDP tunnels only).
+
+```erlang
+-callback handle_data(binary(), State) ->
+    {ok, State} | {ok, State, [action()]} | {stop, Reason, State}.
+```
+
+Inbound TCP bytes (CONNECT-TCP tunnels only).
+
+```erlang
+-callback handle_capsule(Type :: non_neg_integer(), Value :: binary(), State) ->
+    {ok, State} | {ok, State, [action()]} | {stop, Reason, State}.
+```
+
+Inbound capsule on the request body stream.
+
+```erlang
+-callback handle_eof(State) ->
+    {ok, State} | {ok, State, [action()]} | {stop, Reason, State}.
+```
+
+Peer half-closed the write side (TCP FIN received). Only relevant
+for CONNECT-TCP handlers. If not exported, the session stops
+normally.
+
+```erlang
+-callback handle_info(Msg :: term(), State) ->
+    {ok, State} | {ok, State, [action()]} | {stop, Reason, State}.
+```
+
+Any other Erlang message (e.g. `{udp, Socket, ...}`).
+
+```erlang
+-callback terminate(Reason :: term(), State) -> term().
+```
+
+Session shutdown. Return value ignored.
+
+### Actions
+
+Callbacks may return a list of actions:
+
+| Action | Protocol | Description |
+| --- | --- | --- |
+| `{send, Data}` | UDP | Send a UDP payload back to the client (context 0). |
+| `{send, ContextId, Data}` | UDP | Send under an explicit context-ID. |
+| `{send_data, Data}` | TCP | Send raw bytes to the client. |
+| `{send_data, Data, Fin}` | TCP | Send bytes, optionally with END_STREAM. |
+| `{send_capsule, Type, Value}` | Both | Send an RFC 9297 capsule. |
+| `close_session` | Both | Graceful tunnel close. |
+| `{close_session, Code, Msg}` | Both | Close with error code and message. |
+
+### Request Map
+
+`accept/1` and `init/2` receive a request map:
+
+```erlang
+#{
+    method      := binary(),       %% <<"CONNECT">>
+    protocol    => udp | tcp,      %% tunnel protocol
+    path        := binary(),       %% request path
+    authority   := binary(),       %% :authority header
+    scheme      := binary(),       %% <<"https">>
+    target_host := binary(),       %% extracted from URI template
+    target_port := 1..65535,       %% extracted from URI template
+    headers     := [{binary(), binary()}],
+    handler_opts => term()         %% from listener config
+}
+```
+
+---
+
+## Built-in Handlers
+
+### masque_udp_proxy_handler
+
+Bridges CONNECT-UDP tunnels to real UDP sockets. Opens a connected
+`gen_udp` socket per tunnel for kernel-level spoofing protection.
+
+Handler options:
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `allow` | `fun(target()) -> boolean()` | Policy gate. Default: allow all. |
+| `resolver` | `fun(hostname()) -> {ok, ip()} \| {error, _}` | Custom resolver. |
+| `family` | `inet \| inet6 \| auto` | Address family. Default: `auto`. |
+| `socket_opts` | `[gen_udp:option()]` | Extra socket options. |
+
+### masque_tcp_proxy_handler
+
+Bridges CONNECT-TCP tunnels to real TCP connections via `gen_tcp`.
+
+Handler options: same as UDP proxy, plus:
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `connect_timeout` | `pos_integer()` | TCP connect timeout in ms. Default: `5000`. |
+
+### masque_chain_handler
+
+Relays tunnels to an upstream MASQUE proxy (two-hop chaining).
+Used for Private Relay-style architectures.
+
+Handler options:
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `upstream_proxy` | `binary()` | URI of the upstream proxy (required). |
+| `upstream_opts` | `map()` | Options forwarded to `masque:connect/3` for the upstream leg. |
+| `upstream_timeout` | `pos_integer()` | Upstream connect timeout in ms. Default: `5000`. |
+| `allow` | `fun(target()) -> boolean()` | Policy gate. |
+
+---
+
+## Dependencies
+
+| Dependency | Version | Role |
+| --- | --- | --- |
+| [erlang_quic](https://github.com/benoitc/erlang_quic) | v1.1.0 | QUIC + HTTP/3 transport |
+| [erlang_h2](https://github.com/benoitc/erlang_h2) | 0.4.0 | HTTP/2 transport |

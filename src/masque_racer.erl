@@ -88,10 +88,16 @@ loop(S) ->
 handle_attempt_ready(Pid, Transport, Sess, S) ->
     %% First success wins.
     RealOwner = maps:get(real_owner, S),
-    _ = transfer_owner(Transport, Sess, RealOwner),
-    _ = notify_result(Pid, win),
-    cleanup_others(Pid, S),
-    {ok, Sess}.
+    case transfer_owner(Transport, Sess, RealOwner) of
+        ok ->
+            _ = notify_result(Pid, win),
+            cleanup_others(Pid, S),
+            {ok, Sess};
+        {error, Reason} ->
+            %% Session is dead (killed by transfer_owner).
+            %% Treat as attempt failure and continue racing.
+            handle_attempt_failed(Pid, Transport, Reason, S)
+    end.
 
 handle_attempt_failed(Pid, _Transport, Reason, S) ->
     S1 = S#{last_error := Reason},
@@ -136,21 +142,25 @@ attempt(Racer, Transport, Target, Opts) ->
     Mod = transport_mod(Transport, Opts),
     %% Owner = self() (the worker) so the losing session's incoming
     %% messages die with the worker when we kill it.
-    case Mod:start_link(Target, Opts#{transport => Transport}, self()) of
+    %% Use start (not start_link) + monitor so a fast session failure
+    %% reports {attempt_failed,...} instead of crashing the worker.
+    case Mod:start(Target, Opts#{transport => Transport}, self()) of
         {ok, Pid} ->
+            MRef = erlang:monitor(process, Pid),
             T = maps:get(timeout, Opts, 5000),
-            case gen_statem:call(Pid, handshake_await, T + 1000) of
+            Result = try gen_statem:call(Pid, handshake_await, T + 1000)
+                     catch exit:_ -> {error, session_died}
+                     end,
+            erlang:demonitor(MRef, [flush]),
+            case Result of
                 ok ->
                     Racer ! {attempt_ready, self(), Transport, Pid},
                     receive
-                        win ->
-                            _ = catch unlink(Pid),
-                            ok;
-                        lose ->
-                            _ = catch Mod:stop(Pid),
-                            ok
+                        win  -> ok;
+                        lose -> _ = catch Mod:stop(Pid), ok
                     end;
                 {error, Reason} ->
+                    catch exit(Pid, kill),
                     Racer ! {attempt_failed, self(), Transport, Reason},
                     ok
             end;
@@ -170,18 +180,13 @@ transport_mod(h2, Opts) ->
         _   -> masque_h2_client_session
     end.
 
-transfer_owner(h3, Pid, Owner) ->
-    %% Session doesn't (yet) expose a live owner-swap. Use the
-    %% `controlling_process'-style call if it ever lands. For now
-    %% we send a best-effort internal call and ignore errors -
-    %% sessions are built to tolerate an unaware owner (message-mode
-    %% delivery targets the stored owner; the winner starts at
-    %% handshake success with an empty mailbox).
-    _ = (catch gen_statem:call(Pid, {set_owner, Owner}, 1000)),
-    ok;
-transfer_owner(h2, Pid, Owner) ->
-    _ = (catch gen_statem:call(Pid, {set_owner, Owner}, 1000)),
-    ok.
+transfer_owner(_Transport, Pid, Owner) ->
+    case (catch gen_statem:call(Pid, {set_owner, Owner}, 2000)) of
+        ok -> ok;
+        _  ->
+            catch exit(Pid, kill),
+            {error, owner_transfer_failed}
+    end.
 
 notify_result(Pid, Tag) ->
     Pid ! Tag.

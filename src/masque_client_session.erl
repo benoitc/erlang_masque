@@ -13,7 +13,7 @@
 -module(masque_client_session).
 -behaviour(gen_statem).
 
--export([start_link/3, stop/1, info/1]).
+-export([start_link/3, start/3, stop/1, info/1]).
 -export([send/2, send/3, recv/2, set_mode/2]).
 -export([send_capsule/3]).
 
@@ -62,6 +62,9 @@
 
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
+
+start(Target, Opts, Owner) ->
+    gen_statem:start(?MODULE, {Target, Opts, Owner}, []).
 
 stop(Pid) ->
     gen_statem:call(Pid, stop, 5000).
@@ -131,6 +134,8 @@ connecting(internal, {do_handshake, Opts}, Data) ->
     end;
 connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
+connecting({call, From}, shutdown_write, Data) ->
+    {keep_state, Data, [{reply, From, {error, not_ready}}]};
 connecting({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 connecting(info, {quic_h3, _Conn, {response, StreamId, Status, Headers}},
@@ -179,6 +184,8 @@ open({call, From}, {recv, Timeout}, Data) ->
     handle_recv_call(From, Timeout, Data);
 open({call, From}, {set_mode, Mode}, Data) ->
     {keep_state, Data#data{mode = Mode}, [{reply, From, ok}]};
+open({call, From}, shutdown_write, Data) ->
+    {keep_state, Data, [{reply, From, {error, not_supported}}]};
 open({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 open({call, From}, {send_capsule, Type, Value}, Data) ->
@@ -312,7 +319,10 @@ deliver_packet(UdpBytes, #data{mode = queue,
             gen_statem:reply(From, {ok, UdpBytes}),
             Data#data{rx_waiters = Ws2};
         {empty, _} ->
-            Data#data{rx_buf = queue:in(UdpBytes, Buf)}
+            case queue:len(Buf) < 1000 of
+                true  -> Data#data{rx_buf = queue:in(UdpBytes, Buf)};
+                false -> Data
+            end
     end.
 
 drain_client_capsules(Buf, Fin, #data{owner = Owner} = Data) ->
@@ -366,8 +376,10 @@ terminate(_Reason, _State, #data{conn = Conn} = D) ->
     ok.
 
 cancel_all_waiters(#data{rx_waiters = Ws}) ->
-    _ = queue:fold(fun({_From, TRef}, _) ->
-        _ = erlang:cancel_timer(TRef), ok
+    _ = queue:fold(fun({From, TRef}, _) ->
+        _ = erlang:cancel_timer(TRef),
+        gen_statem:reply(From, {error, closed}),
+        ok
     end, ok, Ws),
     ok.
 

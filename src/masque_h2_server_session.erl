@@ -112,7 +112,20 @@ handle_info({h2, _Conn, closed}, S) ->
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
-terminate(Reason, #state{handler = Handler, h_state = HState}) ->
+terminate(normal, #state{conn = Conn, stream_id = StreamId,
+                          handler = Handler, h_state = HState}) ->
+    _ = (catch h2:send_data(Conn, StreamId, <<>>, true)),
+    try_callback(Handler, terminate, [normal, HState]),
+    ok;
+terminate(Reason, #state{handler = Handler, h_state = HState})
+  when Reason =:= peer_reset;
+       Reason =:= peer_closed ->
+    %% Stream already closed by peer - don't send reset.
+    try_callback(Handler, terminate, [Reason, HState]),
+    ok;
+terminate(Reason, #state{conn = Conn, stream_id = StreamId,
+                          handler = Handler, h_state = HState}) ->
+    _ = (catch h2:cancel(Conn, StreamId, protocol_error)),
     try_callback(Handler, terminate, [Reason, HState]),
     ok.
 

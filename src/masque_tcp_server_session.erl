@@ -19,7 +19,9 @@
     transport  :: h3 | h2,
     handler    :: module(),
     h_state    :: term(),
-    req        :: map()
+    req        :: map(),
+    %% Actions from handler init, applied after finalize (H3 path)
+    pending_actions :: [term()] | undefined
 }).
 
 %%====================================================================
@@ -35,16 +37,39 @@ start_link(Args) ->
 %%====================================================================
 
 init(#{conn := Conn, stream_id := StreamId, transport := Transport,
-       handler := Handler, handler_opts := HOpts, req := Req}) ->
+       handler := Handler, handler_opts := HOpts, req := Req} = Args) ->
     process_flag(trap_exit, true),
+    %% Monitor router (H3 path) so we stop if it dies.
+    _ = case maps:find(router, Args) of
+        {ok, Router} -> erlang:monitor(process, Router);
+        error        -> ok
+    end,
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, Actions} ->
             State = #state{conn = Conn, stream_id = StreamId,
                            transport = Transport, handler = Handler,
                            h_state = HState, req = Req},
-            _ = send_response(State, 200, [{<<"capsule-protocol">>, <<"?1">>}]),
-            _ = claim_stream(State),
-            apply_actions(Actions, State);
+            case maps:is_key(router, Args) of
+                true ->
+                    %% H3 path: defer 200 + claim to finalize
+                    {ok, State#state{pending_actions = Actions}};
+                false ->
+                    %% H2 path: immediate finalize
+                    case send_response(State, 200,
+                                       [{<<"capsule-protocol">>, <<"?1">>}]) of
+                        ok ->
+                            case claim_stream(State) of
+                                ok ->
+                                    apply_actions(Actions, State);
+                                {ok, _} ->
+                                    apply_actions(Actions, State);
+                                {error, _} ->
+                                    {stop, stream_dead}
+                            end;
+                        {error, _} ->
+                            {stop, stream_dead}
+                    end
+            end;
         {stop, Reason} ->
             {stop, Reason}
     end.
@@ -59,9 +84,31 @@ claim_stream(#state{transport = h3, conn = C, stream_id = S}) ->
 claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
     h2:set_stream_handler(C, S, self()).
 
+handle_call(finalize, _From,
+            #state{pending_actions = Actions} = S)
+  when Actions =/= undefined ->
+    case send_response(S, 200, [{<<"capsule-protocol">>, <<"?1">>}]) of
+        ok ->
+            case claim_stream(S) of
+                ok ->
+                    {reply, ok,
+                     run_init_actions(Actions,
+                         S#state{pending_actions = undefined})};
+                {ok, _} ->
+                    {reply, ok,
+                     run_init_actions(Actions,
+                         S#state{pending_actions = undefined})};
+                {error, _} ->
+                    {reply, {error, stream_dead}, S}
+            end;
+        {error, _} ->
+            {reply, {error, stream_dead}, S}
+    end;
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
+handle_cast(connection_closed, S) ->
+    {stop, connection_closed, S};
 handle_cast(_Msg, S) ->
     {noreply, S}.
 
@@ -70,15 +117,13 @@ handle_info({Tag, _Conn, {data, StreamId, Bytes, Fin}},
             #state{stream_id = StreamId} = S)
   when Tag =:= quic_h3; Tag =:= h2 ->
     case dispatch(handle_data, [Bytes], S) of
-        {noreply, S2} when Fin ->
-            {stop, normal, S2};
-        Result ->
-            Result
+        {noreply, S2} when Fin -> dispatch_eof(S2);
+        Result                 -> Result
     end;
 handle_info({masque_stream_data, StreamId, Bytes, Fin},
             #state{stream_id = StreamId} = S) ->
     case dispatch(handle_data, [Bytes], S) of
-        {noreply, S2} when Fin -> {stop, normal, S2};
+        {noreply, S2} when Fin -> dispatch_eof(S2);
         Result                 -> Result
     end;
 handle_info({Tag, _Conn, {stream_reset, StreamId, _}},
@@ -92,9 +137,21 @@ handle_info({h2, _Conn, closed}, S) ->
     {stop, peer_closed, S};
 handle_info({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
+handle_info({'DOWN', _MRef, process, _Pid, _Reason}, S) ->
+    %% Router died - clean up
+    {stop, router_gone, S};
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
+terminate(Reason, #state{handler = Handler, h_state = HState})
+  when Reason =:= connection_closed;
+       Reason =:= router_gone;
+       Reason =:= peer_reset;
+       Reason =:= peer_closed ->
+    %% Connection/router gone or peer already closed - no point
+    %% sending on the stream.
+    try_callback(Handler, terminate, [Reason, HState]),
+    ok;
 terminate(Reason, #state{handler = Handler, h_state = HState} = S) ->
     %% Signal TCP FIN to the client by sending END_STREAM.
     _ = (catch transport_send_data(S, <<>>, true)),
@@ -136,6 +193,12 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
             {noreply, S}
     end.
 
+dispatch_eof(#state{handler = Handler} = S) ->
+    case exported(Handler, handle_eof, 1) of
+        true  -> dispatch(handle_eof, [], S);
+        false -> {stop, normal, S}
+    end.
+
 exported(Mod, Fun, Arity) ->
     _ = code:ensure_loaded(Mod),
     erlang:function_exported(Mod, Fun, Arity).
@@ -150,6 +213,13 @@ apply_actions_noreply(Actions, State) ->
     case do_actions(Actions, State) of
         {ok, S2}           -> {noreply, S2};
         {stop, Reason, S2} -> {stop, Reason, S2}
+    end.
+
+run_init_actions([], S) -> S;
+run_init_actions(Actions, S) ->
+    case do_actions(Actions, S) of
+        {ok, S2}          -> S2;
+        {stop, Reason, _} -> exit(Reason)
     end.
 
 do_actions([], S) -> {ok, S};

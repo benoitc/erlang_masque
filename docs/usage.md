@@ -375,9 +375,8 @@ RFC 9298 failure modes are rendered as HTTP status codes by
 - **One QUIC connection per client session.** Multiple tunnels to the
   same proxy today mean multiple QUIC handshakes. Tunnel multiplexing
   over a single client connection is on the roadmap (phase 2).
-- **No proxy chaining / authorization hooks yet.** The design is
-  sketched for v0.3; track
-  [`docs/features.md`](features.md#deferred-to-follow-up-releases).
+- **No per-tunnel authorization hooks beyond accept/1.** Pluggable
+  auth (e.g. Privacy Pass) is on the roadmap.
 - **HTTP/2 datagrams are reliable.** On h2, UDP payloads travel as
   capsules on a TCP stream, so they gain ordering and reliability
   that raw UDP lacks. Applications depending on packet loss or

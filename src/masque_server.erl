@@ -205,9 +205,18 @@ spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req) ->
     Args = #{conn => Conn, stream_id => StreamId, router => Router,
              protocol => Protocol, transport => h3,
              handler => Handler, handler_opts => HOpts, req => Req},
-    case masque_server_connection:start_session(Router, Args) of
+    try masque_server_connection:start_session(Router, Args) of
         {ok, _Pid} -> ok;
         {error, Reason} -> reject(Conn, StreamId, map_init_error(Reason))
+    catch
+        exit:{timeout, _} ->
+            case masque_server_connection:cancel_pending(Router, StreamId) of
+                ok ->
+                    reject(Conn, StreamId, resolution_failed);
+                {error, already_activated} ->
+                    %% Session started after timeout. Tunnel is live.
+                    ok
+            end
     end.
 
 map_init_error({resolution_failed, _}) -> resolution_failed;

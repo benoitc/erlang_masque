@@ -27,7 +27,7 @@
 -behaviour(masque_handler).
 
 -export([accept/1, init/2, handle_packet/2, handle_data/2,
-         handle_capsule/3, handle_info/2, terminate/2]).
+         handle_capsule/3, handle_eof/1, handle_info/2, terminate/2]).
 
 -record(state, {
     upstream :: pid(),
@@ -75,6 +75,11 @@ handle_data(Data, #state{upstream = Sess} = State) ->
 -spec handle_capsule(non_neg_integer(), binary(), #state{}) -> {ok, #state{}}.
 handle_capsule(Type, Value, #state{upstream = Sess} = State) ->
     _ = masque:send_capsule(Sess, Type, Value),
+    {ok, State}.
+
+-spec handle_eof(#state{}) -> {ok, #state{}} | {stop, term(), #state{}}.
+handle_eof(#state{upstream = Sess} = State) ->
+    _ = (catch masque:shutdown_write(Sess)),
     {ok, State}.
 
 -spec handle_info(term(), #state{}) -> {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
