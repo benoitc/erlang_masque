@@ -15,7 +15,8 @@ and the server-side handler module lifecycle.
 6. [Handler behaviour lifecycle](#6-handler-behaviour-lifecycle)
 7. [Capsule protocol](#7-capsule-protocol)
 8. [Error mapping](#8-error-mapping)
-9. [Known limitations](#9-known-limitations)
+9. [Two-hop relay](#9-two-hop-relay)
+10. [Known limitations](#10-known-limitations)
 
 ---
 
@@ -366,7 +367,54 @@ RFC 9298 failure modes are rendered as HTTP status codes by
 
 ---
 
-## 9. Known limitations
+## 9. Two-hop relay
+
+`masque_chain_handler` turns a listener into a relay hop: every
+accepted tunnel is forwarded to an upstream MASQUE proxy instead of
+connecting directly to the target. Wired up on all three transports
+this is the Apple-Private-Relay shape (Ingress on one host, Egress
+on another).
+
+Wire a listener per transport via the chain facades:
+
+```erlang
+%% ingress, listening on all three transports, chains to egress
+IngressOpts = #{
+    port => 4443,
+    cert => CertDer,
+    key  => KeyDer,
+    handler_opts => #{
+        upstream_proxy => <<"https://egress.example:4434">>,
+        upstream_opts  => #{verify => verify_peer,
+                             transports => [h3, h2, h1]}
+    }
+},
+{ok, _} = masque:start_chain_listener(ingress_h3, IngressOpts),
+{ok, _} = masque:start_chain_listener_h2(
+            ingress_h2,
+            IngressOpts#{cert => CertPemPath,
+                         key  => KeyPemPath}),
+{ok, _} = masque:start_chain_listener_h1(
+            ingress_h1,
+            IngressOpts#{cert => CertPemPath,
+                         key  => KeyPemPath}).
+```
+
+The convenience wrappers set `masque_chain_handler` as the UDP,
+TCP, and IP handler; a tunnel of any protocol the client chooses is
+chained upstream. The egress on the other end runs the regular
+`masque_udp_proxy_handler` / `masque_tcp_proxy_handler` /
+`masque_ip_proxy_handler` (the default for `start_listener/2`).
+
+See `examples/two_hop_relay.erl` for a standalone runnable version
+that spins up an ingress + egress on loopback with self-signed
+certs and round-trips a UDP / TCP payload through the chain.
+
+Authentication (Privacy Pass, mTLS, etc.) is layered on top by
+replacing or wrapping the chain handler's `accept/1`; that is an
+application concern, not a library one.
+
+## 10. Known limitations
 
 - **One owner per QUIC connection.** MASQUE takes the `owner` slot;
   running it alongside another extension that also needs `owner`

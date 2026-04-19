@@ -470,9 +470,13 @@ is_draining(Name) ->
 %% @doc Start a chaining (two-hop) listener on HTTP/3.
 %%
 %% Convenience wrapper: starts an h3 listener with
-%% `masque_chain_handler' as the handler module. Every accepted
-%% tunnel is relayed to the upstream proxy specified in
-%% `handler_opts.upstream_proxy'.
+%% `masque_chain_handler' wired up for all three tunnel protocols
+%% (UDP, TCP, IP). Every accepted tunnel is relayed to the upstream
+%% proxy specified in `handler_opts.upstream_proxy'.
+%%
+%% Callers that want only a subset of protocols to chain can still
+%% call {@link start_listener/2} directly and set `handler',
+%% `tcp_handler', `ip_handler' individually.
 %%
 %% See {@link start_chain_listener_h2/2} and
 %% {@link start_chain_listener_h1/2} for the HTTP/2 and HTTP/1.1
@@ -480,27 +484,32 @@ is_draining(Name) ->
 %% so the client can race them.
 -spec start_chain_listener(atom(), map()) -> {ok, pid()} | {error, term()}.
 start_chain_listener(Name, Opts) ->
-    start_listener(Name, Opts#{handler => masque_chain_handler}).
+    start_listener(Name, chain_all(Opts)).
 
 %% @doc Start a chaining (two-hop) listener on HTTP/2.
 %%
 %% Same shape as {@link start_chain_listener/2}; only the outer
-%% transport differs. Handler is `masque_chain_handler'; upstream
+%% transport differs. All three tunnel protocols chain; upstream
 %% proxy URI goes in `handler_opts.upstream_proxy'.
 -spec start_chain_listener_h2(atom(), map()) ->
     {ok, h2:server_ref()} | {error, term()}.
 start_chain_listener_h2(Name, Opts) ->
-    start_listener_h2(Name, Opts#{handler => masque_chain_handler}).
+    start_listener_h2(Name, chain_all(Opts)).
 
 %% @doc Start a chaining (two-hop) listener on HTTP/1.1.
 %%
 %% Same shape as {@link start_chain_listener/2}; only the outer
-%% transport differs. Handler is `masque_chain_handler'; upstream
+%% transport differs. All three tunnel protocols chain; upstream
 %% proxy URI goes in `handler_opts.upstream_proxy'.
 -spec start_chain_listener_h1(atom(), map()) ->
     {ok, h1:server_ref()} | {error, term()}.
 start_chain_listener_h1(Name, Opts) ->
-    start_listener_h1(Name, Opts#{handler => masque_chain_handler}).
+    start_listener_h1(Name, chain_all(Opts)).
+
+chain_all(Opts) ->
+    Opts#{handler     => masque_chain_handler,
+          tcp_handler => masque_chain_handler,
+          ip_handler  => masque_chain_handler}.
 
 -spec h2_handlers(map()) ->
     #{handler := fun((pid(), non_neg_integer(), binary(), binary(),

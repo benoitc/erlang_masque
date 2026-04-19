@@ -33,6 +33,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
   forwarding requires request-id remapping and stays out of this
   change; a client that expects the chain to round-trip a
   client-initiated `ADDRESS_REQUEST` has to wait for that follow-up.
+- `examples/two_hop_relay.erl`: a standalone runnable two-hop relay
+  (ingress + egress on loopback, self-signed certs, all three
+  transports, UDP + TCP round-trip helpers). Demonstrates the
+  Apple-Private-Relay shape as a 300-line reference.
+
+### Changed
+
+- `masque:start_chain_listener/2` now also sets the `tcp_handler`
+  and `ip_handler` to `masque_chain_handler` so every protocol the
+  client might pick is chained upstream. Previously only the UDP
+  path was chained and TCP / IP fell through to the direct
+  proxy handlers; callers that want the old split behaviour can
+  still call `masque:start_listener/2` directly and set each
+  handler. Same change applies to the new `_h2' and `_h1'
+  wrappers.
 
 ## [0.5.0] - 2026-04-19
 
