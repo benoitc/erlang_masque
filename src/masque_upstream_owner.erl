@@ -116,11 +116,10 @@ stop(Owner) ->
 
 %% @doc Open a new tunnel stream on this pooled conn. Issues the
 %% CONNECT request synchronously and registers the session as the
-%% stream's handler so subsequent `{h2|quic_h3, _, {data, ...}}`
-%% events flow directly to the session's mailbox. Returns the
-%% transport's `Conn` pid too so the session can issue its own
-%% outbound calls (`h2:send_data/4`, `quic_h3:send_datagram/3`,
-%% etc.).
+%% stream's handler so subsequent stream-data events flow directly
+%% to the session's mailbox. Returns the transport's conn pid too
+%% so the session can issue its own outbound calls (send_data,
+%% send_datagram, etc.).
 -spec acquire_stream(pid(), [{binary(), binary()}], pid(), map()) ->
     {ok, non_neg_integer(), pid()} | {error, term()}.
 acquire_stream(Owner, Headers, SessionPid, ReqOpts) ->

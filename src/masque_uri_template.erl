@@ -1,24 +1,19 @@
 %%% @doc Generic URI-template engine used by MASQUE protocol facades
 %%% (UDP, TCP, IP). Implements the subset of RFC 6570 that RFC 9298
-%%% and RFC 9484 require: literal segments, Level-1 `{name}` path
-%%% placeholders, and the Level-3 `{?name1,name2}` form operator for
-%%% query strings.
+%%% and RFC 9484 require: literal segments, Level-1 name path
+%%% placeholders, and the Level-3 form operator for query strings.
 %%%
-%%% Two entry shapes:
+%%% Two entry shapes. parse_absolute/1 accepts only absolute URI
+%%% templates (scheme + authority + path), used by the CONNECT-IP
+%%% client where RFC 9484 section 3 requires an absolute template.
+%%% parse_pattern/1 accepts either a path+query pattern or an
+%%% absolute URI (in which case only the path+query portion is
+%%% used), used by servers that match against the :path
+%%% pseudo-header and by legacy UDP/TCP callers that have always
+%%% accepted path-only templates.
 %%%
-%%% <ul>
-%%%  <li>`parse_absolute/1' — accepts only absolute URI templates
-%%%      (scheme + authority + path). Used by the CONNECT-IP
-%%%      **client**, where RFC 9484 §3 requires an absolute template.</li>
-%%%  <li>`parse_pattern/1' — accepts either a path+query pattern or
-%%%      an absolute URI (in which case only the path+query portion
-%%%      is used). Used by **servers** that match against the
-%%%      `:path' pseudo-header and by legacy UDP/TCP callers that
-%%%      have always accepted path-only templates.</li>
-%%% </ul>
-%%%
-%%% The parsed result is a `template()' record that can be fed to
-%%% `expand/2' and `match/2'. Variable names are atoms; variable
+%%% The parsed result is a template() record that can be fed to
+%%% expand/2 and match/2. Variable names are atoms; variable
 %%% values are always returned as binaries (percent-decoded).
 -module(masque_uri_template).
 
@@ -53,8 +48,8 @@
 %% Parsing
 %%====================================================================
 
-%% @doc Parse an absolute URI template (`scheme://authority/path`).
-%% Returns `{error, not_absolute}` if the template has no scheme or
+%% @doc Parse an absolute URI template (`scheme://authority/path').
+%% Returns `{error, not_absolute}' if the template has no scheme or
 %% authority.
 -spec parse_absolute(binary()) -> {ok, template()} | {error, parse_error()}.
 parse_absolute(Bin) when is_binary(Bin) ->
@@ -99,7 +94,7 @@ authority(#tpl{authority = A}) -> A.
 %% Expansion and matching
 %%====================================================================
 
-%% @doc Expand a template with `Vars`. Returns a binary — the full
+%% @doc Expand a template with `Vars'. Returns a binary: the full
 %% URI for absolute templates, just the path+query for patterns.
 -spec expand(template(), vars()) -> binary().
 expand(#tpl{absolute = Absolute, scheme = Scheme,
@@ -111,7 +106,7 @@ expand(#tpl{absolute = Absolute, scheme = Scheme,
         false -> PathQuery
     end.
 
-%% @doc Match a request `:path` against a template. Returns the
+%% @doc Match a request `:path' against a template. Returns the
 %% captured variables on success.
 -spec match(template(), binary()) ->
     {ok, vars()} | {error, no_match | bad_pct}.

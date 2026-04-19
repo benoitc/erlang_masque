@@ -53,7 +53,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (Privacy Pass `Authorization: PrivateToken ...`, proxy metadata)
   have a library-native hook. Reserved pseudo-headers are dropped
   and CR/LF in h1 values is refused to prevent header injection.
-- Handler-side `{reject, Error, ExtraHeaders}' return form from
+- Handler-side `{reject, Error, ExtraHeaders}` return form from
   `accept/1`. Lets an ingress attach challenge headers to rejected
   handshakes (`WWW-Authenticate: PrivateToken ...`, `Retry-After`,
   etc.) without leaving the library contract. Caller-supplied
@@ -260,3 +260,4 @@ First release. RFC 9298 CONNECT-UDP over HTTP/3, client + server.
   v0.2.
 - RFC 9484 (Proxying IP) will live in a separate library on top of
   `masque`, not here.
+

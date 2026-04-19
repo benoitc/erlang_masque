@@ -1,7 +1,7 @@
-%%% @doc RFC 9298 §5 - inner framing for HTTP Datagrams.
+%%% @doc RFC 9298 section 5 - inner framing for HTTP Datagrams.
 %%%
 %%% On top of the HTTP/3 datagram delivery (RFC 9297, already handled
-%%% by `quic_h3`), each MASQUE payload is preceded by a Context ID
+%%% by `quic_h3'), each MASQUE payload is preceded by a Context ID
 %%% varint. Context 0 carries raw UDP payloads; non-zero contexts are
 %%% reserved for future extensions (compression, ICMP, QUIC-aware
 %%% proxying).
@@ -15,8 +15,8 @@
 
 -include("masque.hrl").
 
-%% @doc Build the HTTP Datagram payload for `Payload` carried under
-%% context `ContextId`. Returns an iolist.
+%% @doc Build the HTTP Datagram payload for `Payload' carried under
+%% context `ContextId'. Returns an iolist.
 -spec encode(context_id(), iodata()) -> iodata().
 encode(ContextId, Payload) when is_integer(ContextId), ContextId >= 0 ->
     [quic_varint:encode(ContextId), Payload].

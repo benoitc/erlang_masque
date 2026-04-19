@@ -70,7 +70,7 @@ encode(route_advertisement, Entries) ->
 
 %% @doc Decode the body bytes of a CONNECT-IP capsule into typed
 %% entries. The capsule type is determined by the caller from the
-%% capsule frame (e.g. via `masque_capsule:decode/1`).
+%% capsule frame (e.g. via `masque_capsule:decode/1').
 -spec decode_body(non_neg_integer(), binary()) ->
     {ok, [address_entry() | request_entry() | route_entry()]}
   | {error, decode_error()}.

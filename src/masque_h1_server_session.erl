@@ -3,8 +3,8 @@
 %%% Spawned by the h1 request-handler after a `GET' with
 %%% `Upgrade: connect-udp' passes validation. The session itself calls
 %%% `h1:accept_upgrade/3' so that socket ownership lands on this
-%%% process (per `h1_connection:handle_accept_upgrade/4' which
-%%% transfers controlling_process to the caller of accept_upgrade).
+%%% process (the h1 connection transfers controlling_process to the
+%%% caller of accept_upgrade).
 %%%
 %%% After the 101 response the raw TLS socket becomes the tunnel.
 %%% Datagrams flow as RFC 9297 DATAGRAM capsules; the capsule wire

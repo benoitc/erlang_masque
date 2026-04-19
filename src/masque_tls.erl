@@ -1,12 +1,12 @@
 %%% @doc Safe TLS client options for MASQUE's HTTP/1.1 rung.
 %%%
 %%% Centralises the TLS options every h1 client session sends to
-%%% `ssl:connect/4'. Defaults match the posture of `erlang_h1''s own
-%%% `h1_client:connect_ssl/4': verify the peer, trust the system CA
-%%% store, check the hostname against the certificate, and advertise
+%%% `ssl:connect/4'. Defaults match the posture `erlang_h1' uses on
+%%% its own TLS client: verify the peer, trust the system CA store,
+%%% check the hostname against the certificate, and advertise
 %%% `http/1.1' in ALPN. IPv6 literals are not valid SNI values
-%%% (RFC 6066 §3), so SNI is omitted when the proxy host is an IP
-%%% literal.
+%%% (RFC 6066 section 3), so SNI is omitted when the proxy host is
+%%% an IP literal.
 %%%
 %%% Caller overrides win: anything on `ssl_opts' in the session opts
 %%% is merged on top of the defaults, and the top-level `verify' opt

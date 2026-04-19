@@ -37,14 +37,12 @@
 %%====================================================================
 
 %% @doc Build a Destination Unreachable ICMP packet.
-%% `Code` maps to the RFC type/code tables:
-%% <ul>
-%%   <li>IPv4 (type 3): 0 = net unreachable, 1 = host unreachable,
-%%       3 = port unreachable, 4 = frag needed. RFC 792 / RFC 1812.</li>
-%%   <li>IPv6 (type 1): 0 = no route, 1 = admin prohibited, 3 = addr
-%%       unreachable, 4 = port unreachable, 5 = src addr failed
-%%       ingress/egress policy. RFC 4443 §3.1.</li>
-%% </ul>
+%% Code maps to the RFC type/code tables.
+%% For IPv4 (type 3): 0 = net unreachable, 1 = host unreachable,
+%% 3 = port unreachable, 4 = frag needed (RFC 792 / RFC 1812).
+%% For IPv6 (type 1): 0 = no route, 1 = admin prohibited, 3 = addr
+%% unreachable, 4 = port unreachable, 5 = src addr failed
+%% ingress/egress policy (RFC 4443 section 3.1).
 -spec dest_unreachable(v4 | v6, non_neg_integer(), binary()) -> binary().
 dest_unreachable(v4, Code, Invoking) ->
     build_v4(3, Code, <<0:32>>, Invoking);

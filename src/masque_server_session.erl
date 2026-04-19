@@ -2,7 +2,7 @@
 %%%
 %%% One of these is spawned by the listener's handler fun after a
 %%% CONNECT-UDP request passes validation. It receives routed
-%%% datagrams from the connection router (`masque_server_connection`)
+%%% datagrams from the connection router (`masque_server_connection')
 %%% and invokes the configured user handler module to produce reply
 %%% datagrams or close the session.
 -module(masque_server_session).

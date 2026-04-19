@@ -26,8 +26,8 @@
 %% API
 %%====================================================================
 
-%% @doc Expand a URI template using `Vars`. Returns the absolute path
-%% to place in the `:path` pseudo-header. Absolute `http(s)://…`
+%% @doc Expand a URI template using `Vars'. Returns the absolute path
+%% to place in the `:path' pseudo-header. Absolute `http(s)://...'
 %% templates are accepted - only the path-and-onwards portion is
 %% expanded, mirroring what servers actually match at runtime.
 -spec expand(template(), vars()) -> binary().
@@ -42,9 +42,9 @@ expand(Template, Vars) when is_binary(Template), is_map(Vars) ->
 
 %% @doc Match a request path against a template.
 %%
-%% Returns `{ok, #{target_host := Host, target_port := Port}}` on
-%% success with `Host` as a binary (percent-decoded) and `Port` as an
-%% integer in `1..65535`. Returns `{error, Reason}` otherwise.
+%% Returns `{ok, #{target_host := Host, target_port := Port}}' on
+%% success with `Host' as a binary (percent-decoded) and `Port' as an
+%% integer in `1..65535'. Returns `{error, Reason}' otherwise.
 -spec match(template(), binary()) ->
     {ok, #{target_host := binary(), target_port := 1..65535}}
   | {error, no_match | bad_port | bad_host | bad_template}.

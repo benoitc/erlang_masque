@@ -101,8 +101,8 @@ stop_listener(Name) ->
 %%
 %% Accepted keys (all optional unless noted):
 %% <ul>
-%%   <li>`uri_template' - RFC 6570 template, default
-%%       {@link masque:connect_udp_template/0}.</li>
+%%   <li>`uri_template' - RFC 6570 template, default the RFC 9298
+%%       well-known path template.</li>
 %%   <li>`handler' - module implementing the {@link masque_handler}
 %%       behaviour, default `masque_udp_proxy_handler'.</li>
 %%   <li>`handler_opts' - arbitrary term passed to the handler module's

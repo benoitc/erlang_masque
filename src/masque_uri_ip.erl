@@ -1,32 +1,23 @@
 %%% @doc URI template handling for RFC 9484 CONNECT-IP.
 %%%
-%%% RFC 9484 §3 defines the request path as the expansion of a URI
-%%% Template with two variables: `target` and `ipproto`.
+%%% RFC 9484 section 3 defines the request path as the expansion of
+%%% a URI Template with two variables, target and ipproto.
 %%%
-%%% `target' values:
-%%% <ul>
-%%%  <li>`<<"*">>` — any destination (wildcard).</li>
-%%%  <li>An IPv4 literal (e.g. `<<"192.0.2.1">>`).</li>
-%%%  <li>An IPv6 literal (e.g. `<<"2001:db8::1">>`, colons
-%%%      percent-encoded on the wire).</li>
-%%%  <li>A DNS name (reg-name per RFC 3986).</li>
-%%%  <li>A prefix `<<"addr/len">>` (e.g. `<<"10.0.0.0/24">>` — the
-%%%      slash appears as `%2F` inside the single path segment and
-%%%      is percent-decoded by the engine).</li>
-%%% </ul>
+%%% Target values: the wildcard `<<"*">>', an IPv4 literal
+%%% (`<<"192.0.2.1">>'), an IPv6 literal (colons percent-encoded on
+%%% the wire), a DNS reg-name per RFC 3986, or a prefix
+%%% `<<"addr/len">>' (the slash appears as `%2F' inside the path
+%%% segment and is percent-decoded by the engine).
 %%%
-%%% `ipproto' values: `<<"*">>` or an integer `0..255` (decimal,
-%%% with no leading zeros other than the digit itself).
+%%% ipproto values: the wildcard `<<"*">>' or a decimal integer in
+%%% the range 0..255 with no leading zeros other than the digit
+%%% itself.
 %%%
 %%% The module distinguishes client-side and server-side template
-%%% inputs:
-%%% <ul>
-%%%  <li>Client-side (`parse_client_template/1`) requires an absolute
-%%%      URI template per RFC 9484 §3.</li>
-%%%  <li>Server-side (`parse_server_template/1`) accepts either a
-%%%      path+query match pattern or an absolute URI (whose
-%%%      path+query portion is used).</li>
-%%% </ul>
+%%% inputs. `parse_client_template/1' requires an absolute URI
+%%% template per RFC 9484 section 3. `parse_server_template/1'
+%%% accepts either a path+query match pattern or an absolute URI
+%%% (whose path+query portion is used).
 -module(masque_uri_ip).
 
 -export([parse_client_template/1, parse_server_template/1]).
