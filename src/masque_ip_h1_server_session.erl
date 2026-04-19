@@ -31,7 +31,9 @@
     cap_buf = <<>>       :: binary(),
     max_cap              :: pos_integer(),
     peer_pending = #{}   :: #{pos_integer() => true},
-    start_time           :: integer() | undefined
+    start_time           :: integer() | undefined,
+    idle_ms              :: non_neg_integer() | infinity,
+    idle_ref             :: reference() | undefined
 }).
 
 %%====================================================================
@@ -51,6 +53,7 @@ init(#{conn := Conn, stream_id := StreamId,
     process_flag(trap_exit, true),
     MaxCap = maps:get(max_capsule_size, HOpts,
                       ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE),
+    IdleMs = maps:get(idle_timeout_ms, HOpts, 300000),
     %% init_handler before accept_upgrade: a handler rejection (e.g.
     %% address pool exhausted) becomes a 502 on the as-yet-unupgraded
     %% connection, not a "101 + immediate close".
@@ -60,7 +63,7 @@ init(#{conn := Conn, stream_id := StreamId,
                                     [{<<"capsule-protocol">>, <<"?1">>}]) of
                 {ok, Socket, Buffer} ->
                     Transport = socket_transport(Socket),
-                    State0 = #state{
+                    State0 = arm_idle(#state{
                         transport = Transport,
                         socket    = Socket,
                         handler   = Handler,
@@ -68,8 +71,9 @@ init(#{conn := Conn, stream_id := StreamId,
                         req       = Req,
                         cap_buf   = Buffer,
                         max_cap   = MaxCap,
-                        start_time = erlang:monotonic_time(millisecond)
-                    },
+                        start_time = erlang:monotonic_time(millisecond),
+                        idle_ms   = IdleMs
+                    }),
                     case drain_and_arm(State0) of
                         {ok, State1} ->
                             apply_init_actions(Actions, State1);
@@ -94,18 +98,23 @@ handle_cast(_Msg, S) ->
 
 handle_info({ssl, Sock, Bytes},
             #state{socket = Sock, cap_buf = Buf, max_cap = Max} = S) ->
+    S1 = arm_idle(S),
     New = <<Buf/binary, Bytes/binary>>,
     case byte_size(New) > Max of
-        true  -> {stop, capsule_buffer_overflow, S};
-        false -> step(S#state{cap_buf = New})
+        true  -> {stop, capsule_buffer_overflow, S1};
+        false -> step(S1#state{cap_buf = New})
     end;
 handle_info({tcp, Sock, Bytes},
             #state{socket = Sock, cap_buf = Buf, max_cap = Max} = S) ->
+    S1 = arm_idle(S),
     New = <<Buf/binary, Bytes/binary>>,
     case byte_size(New) > Max of
-        true  -> {stop, capsule_buffer_overflow, S};
-        false -> step(S#state{cap_buf = New})
+        true  -> {stop, capsule_buffer_overflow, S1};
+        false -> step(S1#state{cap_buf = New})
     end;
+handle_info({timeout, Ref, idle},
+            #state{idle_ref = Ref} = S) ->
+    {stop, idle_timeout, S};
 handle_info({ssl_closed, Sock}, #state{socket = Sock} = S) ->
     {stop, peer_closed, S};
 handle_info({tcp_closed, Sock}, #state{socket = Sock} = S) ->
@@ -121,6 +130,7 @@ handle_info(Msg, S) ->
 
 terminate(Reason, #state{handler = Handler, h_state = HState,
                           start_time = Start} = S) ->
+    _ = cancel_idle(S),
     _ = close_socket(S),
     try_callback(Handler, terminate, [Reason, HState]),
     _ = emit_tunnel_closed(Start),
@@ -392,3 +402,22 @@ try_callback(Mod, Fun, Args) ->
         true  -> (catch apply(Mod, Fun, Args));
         false -> ok
     end.
+
+%%====================================================================
+%% Idle timer
+%%====================================================================
+
+arm_idle(#state{idle_ms = infinity} = S) -> S;
+arm_idle(#state{idle_ms = 0}        = S) -> S;
+arm_idle(#state{idle_ref = OldRef, idle_ms = Ms} = S) ->
+    case OldRef of
+        undefined -> ok;
+        _         -> _ = erlang:cancel_timer(OldRef), ok
+    end,
+    Ref = erlang:start_timer(Ms, self(), idle),
+    S#state{idle_ref = Ref}.
+
+cancel_idle(#state{idle_ref = undefined}) -> ok;
+cancel_idle(#state{idle_ref = Ref}) ->
+    _ = erlang:cancel_timer(Ref),
+    ok.

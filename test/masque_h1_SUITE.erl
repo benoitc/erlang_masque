@@ -24,6 +24,7 @@
          handshake_rejected_wrong_upgrade/1,
          handshake_rejected_no_host_header/1,
          init_handler_stop_produces_502_not_101/1,
+         idle_timeout_closes_tunnel/1,
          drain_flag_rejects_new_tunnels/1,
          connect_via_masque_facade/1,
          one_tunnel_per_connection/1]).
@@ -39,6 +40,7 @@ all() ->
      handshake_rejected_wrong_upgrade,
      handshake_rejected_no_host_header,
      init_handler_stop_produces_502_not_101,
+     idle_timeout_closes_tunnel,
      drain_flag_rejects_new_tunnels,
      connect_via_masque_facade,
      one_tunnel_per_connection].
@@ -246,6 +248,49 @@ init_handler_stop_produces_502_not_101(Config) ->
                                    {<<"capsule-protocol">>, <<"?1">>}]),
         ?assert(Status >= 400 andalso Status < 600,
                 "expected a reject status, got " ++ integer_to_list(Status))
+    after
+        K ! stop
+    end.
+
+idle_timeout_closes_tunnel(Config) ->
+    %% Start a dedicated listener with a tight idle timeout so the
+    %% case finishes quickly. After the tunnel handshake succeeds,
+    %% do nothing; within ~idle_timeout_ms the server-side session
+    %% closes the tunnel and the client notices.
+    Certs = ?config(certs, Config),
+    Name = list_to_atom("masque_h1_idle_" ++
+                        integer_to_list(erlang:unique_integer([positive]))),
+    Opts = #{
+        port => 0,
+        cert => maps:get(cert_file, Certs),
+        key  => maps:get(key_file, Certs),
+        handler => masque_echo_handler,
+        handler_opts => #{idle_timeout_ms => 200}
+    },
+    Parent = self(),
+    K = erlang:spawn(fun() ->
+        case masque:start_listener_h1(Name, Opts) of
+            {ok, R} -> Parent ! {self(), started, h1:server_port(R)},
+                       receive stop -> _ = masque:stop_listener_h1(Name) end;
+            {error, E} -> Parent ! {self(), failed, E}
+        end
+    end),
+    Port = receive {K, started, P} -> P after 5000 -> ct:fail(keeper) end,
+    try
+        ProxyURI = iolist_to_binary(
+                     ["https://127.0.0.1:", integer_to_list(Port)]),
+        {ok, Sess} = masque:connect(ProxyURI, {<<"127.0.0.1">>, 5353},
+                      #{transports => [h1], protocol => udp,
+                        owner => self(),
+                        verify => verify_none,
+                        ssl_opts => [{verify, verify_none}]}),
+        MRef = erlang:monitor(process, Sess),
+        receive
+            {'DOWN', MRef, process, Sess, _Reason} -> ok;
+            {masque_closed, Sess, _Reason} -> ok
+        after 2000 ->
+            ct:fail(tunnel_did_not_close_on_idle)
+        end
     after
         K ! stop
     end.
