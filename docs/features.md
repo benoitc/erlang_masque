@@ -23,6 +23,7 @@ Current coverage of the `masque` library against the relevant RFCs.
 | 9298 + 9484 over HTTP/1.1 | `Upgrade: connect-udp` / `Upgrade: connect-ip` + capsule-protocol handshake; RFC 9297 capsules on the upgraded TLS socket | Implemented (`masque_h1_client_session`, `masque_ip_h1_client_session`, `masque_h1_server`, session-sup) |
 | 9110 §9.3.6 - Classic CONNECT-TCP over HTTP/1.1 | `CONNECT host:port HTTP/1.1` + `200 Connection Established`; IPv6 authority (`[::1]:443`); `Proxy-Authorization` passthrough | Implemented (`masque_tcp_h1_client_session`, `masque_tcp_h1_server_session`) |
 | Apple-style transport race | h3 -> h2 -> h1 with staggered head-starts (`prefer_timeout_ms`, `h1_prefer_timeout_ms`) | Implemented (`masque_racer`) |
+| Upstream connection pooling | Opt-in `upstream_pool => true`; one pooled h2 / QUIC conn carries many tunnels as streams; fingerprinted by `verify` / `cacerts` / `ssl_opts` / `alpn`; h1 bypasses | Implemented (`masque_upstream_pool`, `masque_upstream_owner`) |
 
 ## Delivered in v0.5
 

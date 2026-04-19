@@ -30,6 +30,8 @@ Options for `connect/3`:
 | `capsule_protocol` | `boolean()` | `true` | Whether to validate the `capsule-protocol: ?1` response header. |
 | `owner` | `pid()` | `self()` | Process that receives `{masque_data, ...}` messages. |
 | `mode` | `message \| queue` | `message` | Initial delivery mode. |
+| `upstream_pool` | `boolean()` | `false` | Opt-in connection pooling. When `true`, h2 / h3 attempts share a pooled transport connection keyed by host / port / transport plus a hash of connect-affecting opts (`verify`, `cacerts`, `ssl_opts`, `alpn`). Each tunnel rides a fresh stream on the shared conn. h1 always bypasses the pool (1-tunnel-per-socket). |
+| `upstream_pool_opts` | `map()` | `#{}` | Tuning forwarded to pooled owners on cold dials. Recognised keys: `idle_timeout_ms` (non-neg integer, default 30000), `max_streams` (positive integer or `dynamic`). |
 
 ### listener_opts()
 
@@ -465,7 +467,7 @@ Handler options:
 | Key | Type | Description |
 | --- | --- | --- |
 | `upstream_proxy` | `binary()` | URI of the upstream proxy (required). |
-| `upstream_opts` | `map()` | Options forwarded to `masque:connect/3` for the upstream leg. |
+| `upstream_opts` | `map()` | Options forwarded to `masque:connect/3` for the upstream leg. Set `upstream_pool => true` here to share one pooled connection to the egress across tunnels. |
 | `upstream_timeout` | `pos_integer()` | Upstream connect timeout in ms. Default: `5000`. |
 | `allow` | `fun(target()) -> boolean()` | Policy gate. |
 

@@ -414,15 +414,48 @@ Authentication (Privacy Pass, mTLS, etc.) is layered on top by
 replacing or wrapping the chain handler's `accept/1`; that is an
 application concern, not a library one.
 
+### Pooled upstream connections
+
+By default every accepted tunnel on the ingress opens a fresh
+MASQUE client connection to the egress. Opt into pooling by setting
+`upstream_pool => true` in `upstream_opts` so sibling tunnels ride
+new streams on one shared h2 / QUIC connection:
+
+```erlang
+IngressOpts = #{
+    port => 4443,
+    cert => CertDer, key => KeyDer,
+    handler_opts => #{
+        upstream_proxy => <<"https://egress.example:4434">>,
+        upstream_opts  => #{verify => verify_peer,
+                             transports => [h3],
+                             upstream_pool => true}
+    }
+}.
+```
+
+The pool key fingerprints the connect-affecting opts (`verify`,
+`cacerts`, `ssl_opts`, `alpn`), so two ingresses with different
+trust configs stay isolated. h3 pool conns are always opened
+datagram-capable, so CONNECT-UDP / -TCP / -IP tunnels share one
+QUIC owner to the same egress. h1 is a pool bypass (every h1
+tunnel owns its socket).
+
+Pool owners stop themselves after `idle_timeout_ms`
+(default 30000) with no active streams; tune via
+`upstream_pool_opts => #{idle_timeout_ms => N}`.
+
 ## 10. Known limitations
 
 - **One owner per QUIC connection.** MASQUE takes the `owner` slot;
   running it alongside another extension that also needs `owner`
   (e.g. WebTransport) on the same port is not supported. Use
   separate listeners on separate ports.
-- **One QUIC connection per client session.** Multiple tunnels to the
-  same proxy today mean multiple QUIC handshakes. Tunnel multiplexing
-  over a single client connection is on the roadmap (phase 2).
+- **One QUIC / h2 connection per client session by default.** Multiple
+  tunnels to the same proxy normally mean multiple handshakes. Opt into
+  connection pooling with `upstream_pool => true` to share one
+  underlying connection across tunnels (h2 / h3 only; h1 stays
+  1-tunnel-per-socket).
 - **No per-tunnel authorization hooks beyond accept/1.** Pluggable
   auth (e.g. Privacy Pass) is on the roadmap.
 - **HTTP/2 datagrams are reliable.** On h2, UDP payloads travel as
