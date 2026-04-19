@@ -160,6 +160,10 @@ dispatch_capsule(datagram, Inner, S) ->
             {noreply, S}
     end;
 dispatch_capsule(Type, Inner, S) when is_integer(Type) ->
+    %% RFC 9297 §3.3 mandates silent-drop for unknown capsule types.
+    %% `dispatch/3' preserves that: if the handler does not export
+    %% `handle_capsule/3' it returns `{noreply, S}' unchanged. Handlers
+    %% that do export it are treated as an extension hook.
     dispatch(handle_capsule, [Type, Inner], S).
 
 %%====================================================================

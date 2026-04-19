@@ -193,6 +193,10 @@ dispatch_capsule(?MASQUE_CAPSULE_ROUTE_ADVERTISEMENT, Body, S) ->
             {stop, malformed_capsule, S}
     end;
 dispatch_capsule(Type, Inner, S) when is_integer(Type) ->
+    %% RFC 9297 §3.3: unknown capsule types are silently ignored.
+    %% `dispatch/3' returns `{noreply, S}' unchanged when the handler
+    %% does not export `handle_capsule/3', which preserves that
+    %% behaviour; handlers that do export it get an extension hook.
     dispatch(handle_capsule, [Type, Inner], S).
 
 dispatch_datagram(Payload, S) ->

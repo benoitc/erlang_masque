@@ -223,7 +223,12 @@ do_connect(Data, Opts) ->
             case ssl:send(Socket, Req) of
                 ok ->
                     case read_status_line(Socket, Timeout) of
-                        {ok, 200, _Phrase, Leftover} ->
+                        {ok, Code, _Phrase, Leftover}
+                          when Code >= 200, Code < 300 ->
+                            %% RFC 9110 §9.3.6: any 2xx establishes
+                            %% the tunnel. Most proxies send 200
+                            %% "Connection Established" but 201 / 202
+                            %% are conformant too.
                             {ok, Socket, Leftover};
                         {ok, Code, Phrase, _Leftover} ->
                             _ = ssl:close(Socket),
