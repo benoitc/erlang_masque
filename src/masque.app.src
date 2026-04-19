@@ -11,6 +11,7 @@
     public_key,
     quic,
     h2,
+    h1,
     instrument
    ]},
   {env, []},

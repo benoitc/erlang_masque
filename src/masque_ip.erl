@@ -6,7 +6,24 @@
 %%% resolution to reject tunnels targeting internal networks.
 -module(masque_ip).
 
--export([is_public/1]).
+-export([is_public/1, reject_requests/1]).
+
+-include("masque_ip.hrl").
+
+%% @doc Build the RFC 9484 §5.2 "reject all" answer to a batch of
+%% inbound ADDRESS_REQUEST entries: each reply carries the same
+%% Request ID and IP Version, an all-zero address, and the maximum
+%% prefix length for that version (32 for v4, 128 for v6).
+-spec reject_requests([#ip_prefix_request{}]) -> [#ip_assignment{}].
+reject_requests(Requests) ->
+    [reject_one(R) || R <- Requests].
+
+reject_one(#ip_prefix_request{request_id = Id, version = 4}) ->
+    #ip_assignment{request_id = Id, version = 4,
+                   address = {0,0,0,0}, prefix_len = 32};
+reject_one(#ip_prefix_request{request_id = Id, version = 6}) ->
+    #ip_assignment{request_id = Id, version = 6,
+                   address = {0,0,0,0,0,0,0,0}, prefix_len = 128}.
 
 -spec is_public(inet:ip_address()) -> boolean().
 

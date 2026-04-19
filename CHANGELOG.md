@@ -4,6 +4,84 @@ All notable changes to `masque` are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- HTTP/1.1 fallback for all three tunnel protocols. CONNECT-UDP
+  (RFC 9298) and CONNECT-IP (RFC 9484) use HTTP Upgrade +
+  RFC 9297 capsules; CONNECT-TCP uses classic HTTP CONNECT
+  (RFC 9110 §9.3.6). Opt in per client call with
+  `masque:connect(URL, Target, #{transports => [h3, h2, h1], ...})`
+  and on the server with `masque:start_listener_h1/2`. The racer
+  stages a tertiary h1 attempt after `h1_prefer_timeout_ms`
+  (default 500 ms) behind the existing h2 head-start, giving
+  Apple-style transport racing over classic HTTPS paths.
+- `proxy_authorization` client opt for classic CONNECT-TCP over h1
+  (`Proxy-Authorization` header passthrough).
+- `masque_uri:build_authority/2` and `masque_uri:parse_authority_form/1`
+  helpers. IPv6 literals get bracketed on outbound authorities and
+  unwrapped on CONNECT request-targets.
+
+## [0.5.0] - 2026-04-19
+
+### Added
+
+- **CONNECT-IP (RFC 9484)** over HTTP/3 and HTTP/2. One listener can
+  now serve CONNECT-UDP, CONNECT-TCP, and CONNECT-IP simultaneously;
+  each has its own handler/template option pair (`ip_handler` +
+  `ip_uri_template`).
+- Bidirectional control plane per RFC 9484 §5 (both endpoints can
+  send every capsule; site-to-site pattern from §8.2 works without
+  workarounds): `masque:send_ip_packet/2`,
+  `masque:request_addresses/2`, `masque:assign_addresses/2`,
+  `masque:advertise_routes/2`, `masque:ip_info/1`.
+- `masque_ip_capsule`: codec for `ADDRESS_ASSIGN` (0x01),
+  `ADDRESS_REQUEST` (0x02), `ROUTE_ADVERTISEMENT` (0x03) with full
+  §4.7.3 validation (ordering, disjointness, protocol-0 overlap).
+- Generic URI-template engine `masque_uri_template` (Level-1 path
+  placeholders, Level-3 `{?var1,var2}` query form, absolute-URI
+  awareness); `masque_uri` re-seated on it with unchanged public
+  API; new `masque_uri_ip` for CONNECT-IP (client-absolute,
+  server-side path+query match pattern).
+- Transport-generic IP sessions
+  (`masque_ip_client_session`, `masque_ip_server_session`) that
+  dispatch H2 / H3 on a single `transport` field, mirroring the TCP
+  session architecture rather than cloning per transport.
+- Default `masque_ip_proxy_handler`: round-robin address-pool
+  allocator, listener-owned DNS resolution before `accept/1`
+  (hostnames resolved, addresses stitched into `req()`,
+  SSRF/BCP-38 policy runs on the resolved list), initial
+  `ROUTE_ADVERTISEMENT` from config + resolution, BCP-38
+  source-address filter on the inbound data plane, pluggable
+  `forward_fun`.
+- `masque_icmp`: RFC 792 + RFC 4443 error builders with correct
+  invoking-packet truncation (548 B ICMPv4, 1232 B ICMPv6) and
+  IPv6 pseudo-header checksum. Session `{icmp_error, ...}` action
+  emits the resulting IP packet as a context-0 datagram.
+- RFC 9484 §8 MTU check on the H3 client handshake — aborts with
+  `{mtu_too_low, Got, 1280}` if the negotiated QUIC datagram size
+  can't carry a 1280-byte IPv6 packet.
+- Client `connect/3` validates target shape vs. protocol and
+  forces `capsule-protocol: ?1` on CONNECT-IP (no way to accidentally
+  dial without it).
+- 9 ICMP eunit tests, 29 URI eunit tests, 24 capsule/datagram
+  eunit tests, 3 CT cases for H3 CONNECT-IP, 3 CT cases for H2
+  CONNECT-IP, 7 CT cases for RFC 9484 normative compliance.
+- `docs/connect_ip.md` usage guide with the §-mapped compliance
+  table; `examples/ip_echo.erl` runnable sample.
+
+### Changed
+
+- `listener_opts()` public type corrected: `cert` / `key` instead
+  of the stale `certfile` / `keyfile` (the real listeners have
+  read the former for several releases).
+- `masque_handler:req()` extended with `protocol => ip`,
+  `ip_target`, `ip_ipproto`, `resolved_addresses` keys.
+- `masque_h2_session_sup` grew an IP branch so H2 CONNECT-IP
+  tunnels land on the IP session module (previously defaulted to
+  the UDP session, which silently dropped IP capsules).
+
 ## [0.4.0] - 2026-04-17
 
 ### Added

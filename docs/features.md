@@ -14,6 +14,37 @@ Current coverage of the `masque` library against the relevant RFCs.
 | 9297 §3.2 - DATAGRAM capsule on HTTP/2 | UDP payloads as capsules on the request body stream | Implemented (`masque_h2_*`) |
 | 9220 - Extended CONNECT in HTTP/3 | `:protocol` negotiation and `SETTINGS_ENABLE_CONNECT_PROTOCOL` | Delegated to `quic_h3` |
 | 8441 - Extended CONNECT in HTTP/2 | `:protocol` negotiation | Delegated to `erlang_h2` |
+| 9484 §3 - CONNECT-IP URI template | `{target}` + `{ipproto}` in Level-1 path and Level-3 query forms | Implemented (`masque_uri_template`, `masque_uri_ip`) |
+| 9484 §4 - CONNECT-IP handshake | `:protocol=connect-ip`, `capsule-protocol: ?1` enforcement | Implemented (`masque_ip_client_session`, `masque_ip_server_session`) |
+| 9484 §4.7 - Control-plane capsules | `ADDRESS_ASSIGN` (0x01), `ADDRESS_REQUEST` (0x02), `ROUTE_ADVERTISEMENT` (0x03); ordering + disjointness + protocol-0 overlap validation | Implemented (`masque_ip_capsule`) |
+| 9484 §6 - Datagram framing | Context-0 = full IP packet; unknown contexts buffered then dropped | Implemented (`masque_datagram` reused) |
+| 9484 §7 - ICMP error synthesis | ICMPv4 (RFC 792) and ICMPv6 (RFC 4443) error builders with correct invoking-packet truncation | Implemented (`masque_icmp`) |
+| 9484 §4.7.1 - Mandatory DNS resolution | Resolve hostname targets before 2xx; resolved addresses into initial `ROUTE_ADVERTISEMENT` | Implemented (listener-owned, `resolver` option) |
+| 9298 + 9484 over HTTP/1.1 | `Upgrade: connect-udp` / `Upgrade: connect-ip` + capsule-protocol handshake; RFC 9297 capsules on the upgraded TLS socket | Implemented (`masque_h1_client_session`, `masque_ip_h1_client_session`, `masque_h1_server`, session-sup) |
+| 9110 §9.3.6 - Classic CONNECT-TCP over HTTP/1.1 | `CONNECT host:port HTTP/1.1` + `200 Connection Established`; IPv6 authority (`[::1]:443`); `Proxy-Authorization` passthrough | Implemented (`masque_tcp_h1_client_session`, `masque_tcp_h1_server_session`) |
+| Apple-style transport race | h3 -> h2 -> h1 with staggered head-starts (`prefer_timeout_ms`, `h1_prefer_timeout_ms`) | Implemented (`masque_racer`) |
+
+## Delivered in v0.5
+
+- CONNECT-IP (RFC 9484): extended CONNECT with `:protocol=connect-ip`
+  over HTTP/3 and HTTP/2. Both endpoints can send every control-plane
+  capsule (site-to-site support per §8.2).
+- Full bidirectional control plane: typed client API for
+  `request_addresses/2`, `assign_addresses/2`, `advertise_routes/2`,
+  `send_ip_packet/2`, `ip_info/1`; handler actions for the same on
+  the server side.
+- Default `masque_ip_proxy_handler` with address-pool allocator
+  (round-robin over a configured prefix), listener-owned DNS
+  resolution before `accept/1`, BCP-38 source-address filter, and a
+  pluggable `forward_fun`.
+- ICMP error synthesis (`masque_icmp`): ICMPv4 / ICMPv6 builders for
+  `Destination Unreachable`, `Packet Too Big` (v6), and
+  `Time Exceeded` with RFC-compliant invoking-packet truncation
+  (1232 B on v6, 548 B on v4) and pseudo-header checksums.
+- Transport-generic IP sessions: one
+  `masque_ip_client_session` and one `masque_ip_server_session`
+  serve both H3 and H2 by dispatching on a `transport` field, mirroring
+  the TCP session architecture.
 
 ## Delivered in v0.4
 
@@ -86,8 +117,11 @@ Current coverage of the `masque` library against the relevant RFCs.
   beyond `accept/1` (e.g. Privacy Pass token verification).
 - **Client-side proxy chaining** - client controls both hops via a
   virtual-transport adapter (server-side chaining is done in v0.3).
-- **RFC 9484 (Proxying IP in HTTP)** - distinct protocol, separate
-  library on top of `masque`.
+- **CONNECT-IP TUN device integration** - phase 2 wires
+  `erlang-tun` as an optional dep so a proxy can bridge tunnels to a
+  real kernel routing table. The phase-1 default handler exposes a
+  `forward_fun` seam; `masque_ip_tun_proxy_handler` takes over from
+  there without API change.
 - **Private Relay-style relay** - separate application on top of
   `masque` with two-hop wiring, Privacy Pass auth, policy engine.
 - **HTTP/1.1 Upgrade** - RFC 9298 also defines an HTTP/1.1 path;

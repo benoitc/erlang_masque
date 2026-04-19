@@ -1,4 +1,5 @@
-%%% @doc URI template handling for RFC 9298 CONNECT-UDP.
+%%% @doc URI template handling for RFC 9298 CONNECT-UDP and the
+%%% CONNECT-TCP draft.
 %%%
 %%% RFC 9298 §3 defines the request path as the expansion of a URI
 %%% template with two variables - `target_host` and `target_port`.
@@ -6,13 +7,14 @@
 %%% registered name; colons and any non-unreserved characters are
 %%% percent-encoded on the wire.
 %%%
-%%% This module implements the subset of RFC 6570 Level 2 we need:
-%%% templates made of literal segments interleaved with `{Name}`
-%%% placeholders. Level 2 reserved-expansion (`{+var}`) and higher
-%%% operators are not supported.
+%%% The template engine now lives in `masque_uri_template'; this
+%%% module is a thin UDP/TCP facade that keeps its historical public
+%%% API shape and does the UDP-specific validation (`target_host'
+%%% reg-name / IP literal rules, `target_port' integer range).
 -module(masque_uri).
 
 -export([expand/2, match/2, to_path/1, valid_host/1]).
+-export([build_authority/2, parse_authority_form/1]).
 
 -export_type([template/0, vars/0]).
 
@@ -30,7 +32,13 @@
 %% expanded, mirroring what servers actually match at runtime.
 -spec expand(template(), vars()) -> binary().
 expand(Template, Vars) when is_binary(Template), is_map(Vars) ->
-    iolist_to_binary(expand_parts(parse(to_path(Template)), Vars)).
+    PathTpl = to_path(Template),
+    case masque_uri_template:parse_pattern(PathTpl) of
+        {ok, T} ->
+            masque_uri_template:expand(T, Vars);
+        {error, _} = Err ->
+            error({bad_template, Err})
+    end.
 
 %% @doc Match a request path against a template.
 %%
@@ -41,26 +49,26 @@ expand(Template, Vars) when is_binary(Template), is_map(Vars) ->
     {ok, #{target_host := binary(), target_port := 1..65535}}
   | {error, no_match | bad_port | bad_host | bad_template}.
 match(Template, Path) when is_binary(Template), is_binary(Path) ->
-    try
-        Parts = parse(to_path(Template)),
-        case match_parts(Parts, Path, #{}) of
-            {ok, #{target_host := H, target_port := P} = Out}
-              when byte_size(H) > 0 ->
-                case {valid_host(H), parse_port(P)} of
-                    {true, {ok, PortInt}} ->
-                        {ok, Out#{target_port := PortInt}};
-                    {false, _} ->
-                        {error, bad_host};
-                    {_, error} ->
-                        {error, bad_port}
-                end;
-            {ok, _} ->
-                {error, bad_host};
-            nomatch ->
-                {error, no_match}
-        end
-    catch
-        throw:bad_template -> {error, bad_template}
+    case masque_uri_template:parse_pattern(to_path(Template)) of
+        {ok, T} ->
+            match_with(T, Path);
+        {error, _} ->
+            {error, bad_template}
+    end.
+
+match_with(T, Path) ->
+    case masque_uri_template:match(T, Path) of
+        {ok, #{target_host := Host, target_port := Port}}
+          when byte_size(Host) > 0 ->
+            case {valid_host(Host), parse_port(Port)} of
+                {true,  {ok, PortInt}} ->
+                    {ok, #{target_host => Host, target_port => PortInt}};
+                {false, _} -> {error, bad_host};
+                {_, error} -> {error, bad_port}
+            end;
+        {ok, _} -> {error, bad_host};
+        {error, no_match} -> {error, no_match};
+        {error, bad_pct}  -> {error, bad_host}
     end.
 
 %% @doc Strip an absolute `http(s)://…' template to its path portion.
@@ -118,136 +126,70 @@ is_ldh($-)                      -> true;
 is_ldh(_)                       -> false.
 
 %%====================================================================
-%% Template parsing
+%% Internal
 %%====================================================================
-
-%% A parsed template is a list of `{literal, Bin}` and `{var, Name}`
-%% alternating segments.
-parse(Template) ->
-    parse(Template, <<>>, []).
-
-parse(<<>>, Acc, Out) ->
-    lists:reverse(emit_literal(Acc, Out));
-parse(<<"{", Rest/binary>>, Acc, Out) ->
-    case binary:split(Rest, <<"}">>) of
-        [Name, Tail] when Name =/= <<>> ->
-            parse(Tail, <<>>,
-                  [{var, binary_to_atom(Name, utf8)} | emit_literal(Acc, Out)]);
-        _ ->
-            throw(bad_template)
-    end;
-parse(<<C, Rest/binary>>, Acc, Out) ->
-    parse(Rest, <<Acc/binary, C>>, Out).
-
-emit_literal(<<>>, Out) -> Out;
-emit_literal(Bin, Out)  -> [{literal, Bin} | Out].
-
-%%====================================================================
-%% Expansion
-%%====================================================================
-
-expand_parts([], _Vars) ->
-    [];
-expand_parts([{literal, Bin} | Rest], Vars) ->
-    [Bin | expand_parts(Rest, Vars)];
-expand_parts([{var, Name} | Rest], Vars) ->
-    Val = maps:get(Name, Vars),
-    [pct_encode(to_binary(Val)) | expand_parts(Rest, Vars)].
-
-to_binary(B) when is_binary(B) -> B;
-to_binary(L) when is_list(L)   -> list_to_binary(L);
-to_binary(I) when is_integer(I), I >= 0 -> integer_to_binary(I);
-to_binary(A) when is_atom(A)   -> atom_to_binary(A, utf8).
-
-%%====================================================================
-%% Matching
-%%====================================================================
-
-%% We consume `Path` left-to-right, peeling off each literal prefix and
-%% capturing each variable up to the next literal (or end-of-string).
-match_parts([], <<>>, Acc) ->
-    {ok, Acc};
-match_parts([], _Rem, _Acc) ->
-    nomatch;
-match_parts([{literal, Lit} | Rest], Path, Acc) ->
-    case binary:match(Path, Lit) of
-        {0, N} when N =:= byte_size(Lit) ->
-            <<_:N/binary, Tail/binary>> = Path,
-            match_parts(Rest, Tail, Acc);
-        _ ->
-            nomatch
-    end;
-match_parts([{var, Name}], Path, Acc) ->
-    %% Trailing variable - the entire remainder is the value.
-    case pct_decode(Path) of
-        {ok, Decoded} when byte_size(Decoded) > 0 ->
-            {ok, Acc#{Name => Decoded}};
-        _ ->
-            nomatch
-    end;
-match_parts([{var, Name}, {literal, NextLit} | Rest], Path, Acc) ->
-    case binary:match(Path, NextLit) of
-        {Pos, _} when Pos > 0 ->
-            <<VarRaw:Pos/binary, _/binary>> = Path,
-            case pct_decode(VarRaw) of
-                {ok, Decoded} when byte_size(Decoded) > 0 ->
-                    <<_:Pos/binary, Tail/binary>> = Path,
-                    match_parts([{literal, NextLit} | Rest], Tail,
-                                Acc#{Name => Decoded});
-                _ ->
-                    nomatch
-            end;
-        _ ->
-            nomatch
-    end;
-match_parts([{var, _} | _], _Path, _Acc) ->
-    %% Two adjacent `{var}` placeholders - ambiguous, reject.
-    throw(bad_template).
 
 parse_port(Bin) when is_binary(Bin) ->
     case catch binary_to_integer(Bin) of
         P when is_integer(P), P >= 1, P =< 65535 -> {ok, P};
         _ -> error
-    end.
+    end;
+parse_port(Int) when is_integer(Int), Int >= 1, Int =< 65535 ->
+    {ok, Int};
+parse_port(_) ->
+    error.
 
 %%====================================================================
-%% Percent encoding/decoding (RFC 3986 §2)
+%% Authority helpers (for CONNECT-TCP request-target + Host header)
 %%====================================================================
 
-pct_encode(Bin) when is_binary(Bin) ->
-    << <<(pct_encode_byte(B))/binary>> || <<B>> <= Bin >>.
+%% @doc Format a `host:port' authority. IPv6 literals are wrapped in
+%% square brackets per RFC 3986 §3.2.2. Used on the client side to
+%% build the CONNECT request-target and `Host' header.
+-spec build_authority(binary(), inet:port_number()) -> binary().
+build_authority(Host, Port) when is_binary(Host), is_integer(Port) ->
+    HostPart = case is_ipv6_literal(Host) of
+                   true  -> <<"[", Host/binary, "]">>;
+                   false -> Host
+               end,
+    iolist_to_binary([HostPart, ":", integer_to_binary(Port)]).
 
-pct_encode_byte(B) when
-    (B >= $A andalso B =< $Z);
-    (B >= $a andalso B =< $z);
-    (B >= $0 andalso B =< $9);
-    B =:= $-; B =:= $.; B =:= $_; B =:= $~ ->
-    <<B>>;
-pct_encode_byte(B) ->
-    Hi = hex_digit(B bsr 4),
-    Lo = hex_digit(B band 16#0F),
-    <<"%", Hi, Lo>>.
+%% @doc Parse the authority-form of a request-target used by classic
+%% CONNECT (RFC 9112 §3.2.3): `host:port' or `[ipv6]:port'. Strips the
+%% brackets from the IPv6 literal on the way out. Rejects malformed
+%% inputs (missing port, non-numeric port, empty host).
+-spec parse_authority_form(binary()) ->
+    {ok, binary(), inet:port_number()} | {error, term()}.
+parse_authority_form(<<"[", Rest/binary>>) ->
+    case binary:split(Rest, <<"]:">>) of
+        [Host, PortBin] when Host =/= <<>> ->
+            case parse_port(PortBin) of
+                {ok, Port} -> {ok, Host, Port};
+                error      -> {error, bad_port}
+            end;
+        _ ->
+            {error, bad_authority}
+    end;
+parse_authority_form(Bin) when is_binary(Bin) ->
+    case binary:matches(Bin, <<":">>) of
+        [{Pos, 1}] ->
+            <<Host:Pos/binary, ":", PortBin/binary>> = Bin,
+            case Host of
+                <<>> -> {error, bad_host};
+                _ ->
+                    case parse_port(PortBin) of
+                        {ok, Port} -> {ok, Host, Port};
+                        error      -> {error, bad_port}
+                    end
+            end;
+        _ ->
+            {error, bad_authority}
+    end;
+parse_authority_form(_) ->
+    {error, bad_authority}.
 
-hex_digit(N) when N >= 0, N =< 9  -> N + $0;
-hex_digit(N) when N >= 10, N =< 15 -> N - 10 + $A.
-
-pct_decode(Bin) ->
-    try
-        {ok, iolist_to_binary(pct_decode_list(Bin))}
-    catch
-        throw:bad_pct -> {error, bad_pct}
+is_ipv6_literal(Host) when is_binary(Host) ->
+    case inet:parse_address(binary_to_list(Host)) of
+        {ok, {_, _, _, _, _, _, _, _}} -> true;
+        _ -> false
     end.
-
-pct_decode_list(<<>>) ->
-    [];
-pct_decode_list(<<"%", H, L, Rest/binary>>) ->
-    [ <<(from_hex(H) * 16 + from_hex(L))>> | pct_decode_list(Rest) ];
-pct_decode_list(<<"%", _/binary>>) ->
-    throw(bad_pct);
-pct_decode_list(<<C, Rest/binary>>) ->
-    [<<C>> | pct_decode_list(Rest)].
-
-from_hex(C) when C >= $0, C =< $9 -> C - $0;
-from_hex(C) when C >= $a, C =< $f -> C - $a + 10;
-from_hex(C) when C >= $A, C =< $F -> C - $A + 10;
-from_hex(_) -> throw(bad_pct).

@@ -16,11 +16,20 @@
 -export([send_capsule/3, shutdown_write/1]).
 -export([start_listener/2, stop_listener/1]).
 -export([start_listener_h2/2, stop_listener_h2/1]).
+-export([start_listener_h1/2, stop_listener_h1/1]).
 -export([drain_listener/1, undrain_listener/1, is_draining/1]).
 -export([start_chain_listener/2]).
 -export([h3_handlers/1, h2_handlers/1]).
 
+%% CONNECT-IP (RFC 9484) client API.
+-export([send_ip_packet/2,
+         request_addresses/2,
+         assign_addresses/2,
+         advertise_routes/2,
+         ip_info/1]).
+
 -include("masque.hrl").
+-include("masque_ip.hrl").
 
 -export_type([
     session/0,
@@ -28,7 +37,11 @@
     target/0,
     transport/0,
     connect_opts/0,
-    listener_opts/0
+    listener_opts/0,
+    %% CONNECT-IP types.
+    ip_version/0, ip_prefix/0, ip_prefix_request/0,
+    ip_assignment/0, ip_route/0, ip_ipproto/0, ip_target/0,
+    request_id/0, nz_request_id/0
 ]).
 
 %%====================================================================
@@ -39,18 +52,62 @@
 
 -type proxy_uri() :: binary() | string().
 
-%% A UDP target - either a resolved IP or a host name to resolve, and a port.
--type target() :: {binary() | inet:hostname() | inet:ip_address(), inet:port_number()}.
+%% A UDP/TCP target — a resolved IP or a host name to resolve, and a
+%% port. CONNECT-IP targets are `{ip_target(), ip_ipproto()}'.
+-type udp_target() :: {binary() | inet:hostname() | inet:ip_address(),
+                       inet:port_number()}.
+-type target() :: udp_target() | {ip_target(), ip_ipproto()}.
 
--type transport() :: h3 | h2.
+-type transport() :: h3 | h2 | h1.
+
+%%--------------------------------------------------------------------
+%% CONNECT-IP types (RFC 9484)
+%%--------------------------------------------------------------------
+
+-type ip_version() :: 4 | 6.
+
+-type ip_prefix() :: {4, inet:ip4_address(), 0..32}
+                   | {6, inet:ip6_address(), 0..128}.
+
+%% RFC 9484 §4.7.2 — ADDRESS_REQUEST Request IDs MUST be nonzero.
+-type nz_request_id() :: pos_integer().
+
+%% RFC 9484 §4.7.1 — ADDRESS_ASSIGN uses Request ID 0 for
+%% unprompted (server-initiated) assignments.
+-type request_id() :: non_neg_integer().
+
+%% ADDRESS_REQUEST / ADDRESS_ASSIGN / ROUTE_ADVERTISEMENT entries are
+%% exposed as tagged records (defined in `include/masque_ip.hrl').
+%% Clients that want to build them without the include can use the
+%% `masque_ip' helper module.
+-type ip_prefix_request() :: #ip_prefix_request{}.
+-type ip_assignment()     :: #ip_assignment{}.
+-type ip_route()          :: #ip_route{}.
+
+-type ip_ipproto() :: '*' | 0..255.
+
+-type ip_target() ::
+      '*'
+    | inet:ip4_address() | inet:ip6_address()
+    | ip_prefix()
+    | binary().                 %% hostname
 
 -type connect_opts() ::
     #{
-        %% Tunnel protocol: `udp' (default) or `tcp'.
-        protocol => udp | tcp,
+        %% Tunnel protocol: `udp' (default), `tcp', or `ip'.
+        protocol => udp | tcp | ip,
         %% Transport preference. `[h3, h2]' (default) races the two.
+        %% `h1' may appear as a tertiary fallback for `udp' and `ip';
+        %% `tcp' support on h1 lands with the CONNECT-TCP step.
         transports => [transport()],
         prefer_timeout_ms => non_neg_integer(),
+        %% Head-start (ms) before the h1 attempt is spawned, measured
+        %% from when the h2 attempt starts. Default 500.
+        h1_prefer_timeout_ms => non_neg_integer(),
+        %% CONNECT-TCP over h1: value for the `Proxy-Authorization'
+        %% header (e.g. `<<"Basic dXNlcjpwYXNz">>'). Ignored on all
+        %% other transport/protocol combinations.
+        proxy_authorization => binary(),
         uri_template => binary(),
         verify => verify_peer | verify_none,
         cacerts => [public_key:der_encoded()],
@@ -58,6 +115,8 @@
         capsule_protocol => boolean(),
         owner => pid(),
         ssl_opts => [ssl:tls_client_option()],
+        %% CONNECT-IP: local send-side MTU (1280..65535, default 1500).
+        mtu => 1280..65535,
         %% Internal - set by racer, not by callers.
         transport => transport(),
         proxy => {binary(), inet:port_number()},
@@ -68,14 +127,32 @@
 -type listener_opts() ::
     #{
         port := inet:port_number(),
-        certfile := file:filename(),
-        keyfile := file:filename(),
-        uri_template => binary(),
-        handler => module(),
+        %% DER binaries for H3, PEM paths for H2 — both listeners
+        %% read these same keys.
+        cert => term(),
+        key  => term(),
+        uri_template => binary(),             %% CONNECT-UDP
+        tcp_uri_template => binary(),         %% CONNECT-TCP
+        ip_uri_template => binary(),          %% CONNECT-IP (RFC 9484)
+        handler => module(),                  %% CONNECT-UDP handler
+        tcp_handler => module(),              %% CONNECT-TCP handler
+        ip_handler => module(),               %% CONNECT-IP handler
         handler_opts => term(),
+        address_pool => ip_prefix() | [ip_prefix()],
+        routes => [ip_route()],
+        mtu => 1280..65535,
+        resolver => fun((binary()) ->
+                            {ok, [inet:ip_address()]} | {error, term()}),
         allow => fun((target()) -> boolean()),
-        resolver => fun((inet:hostname()) ->
-                            {ok, inet:ip_address()} | {error, term()})
+        %% CONNECT-TCP policy - forwarded to the tcp_handler through
+        %% handler_opts. `family' picks the outbound DNS-resolved
+        %% address class; `allow_private' gates non-global targets;
+        %% `connect_timeout' bounds the outbound dial; `socket_opts'
+        %% extend the gen_tcp options of the target socket.
+        family => auto | inet | inet6,
+        allow_private => boolean(),
+        connect_timeout => pos_integer(),
+        socket_opts => [gen_tcp:option()]
     }.
 
 %%====================================================================
@@ -96,21 +173,65 @@ version() ->
 -spec connect(proxy_uri(), target(), connect_opts()) ->
     {ok, session()} | {error, term()}.
 connect(ProxyURI, Target, Opts) when is_map(Opts) ->
-    case parse_proxy_uri(ProxyURI) of
-        {ok, Host, Port} ->
-            Owner = maps:get(owner, Opts, self()),
-            Opts1 = Opts#{proxy => {Host, Port}},
-            Transports = normalize_transports(
-                           maps:get(transports, Opts, [h3, h2])),
-            connect_via(Transports, Target, Opts1, Owner);
+    case validate_connect_opts(Target, Opts) of
+        {ok, Opts0} ->
+            case parse_proxy_uri(ProxyURI) of
+                {ok, Host, Port} ->
+                    Owner = maps:get(owner, Opts0, self()),
+                    Opts1 = Opts0#{proxy => {Host, Port}},
+                    Transports = normalize_transports(
+                                   maps:get(transports, Opts1, [h3, h2])),
+                    connect_via(Transports, Target, Opts1, Owner);
+                {error, _} = Err ->
+                    Err
+            end;
         {error, _} = Err ->
             Err
     end.
+
+%% Validate and normalize `connect_opts()`. Enforces RFC 9484
+%% invariants for CONNECT-IP (capsule protocol required, target
+%% shape matches protocol) and widens/normalizes shared keys.
+validate_connect_opts(Target, Opts) ->
+    Protocol = maps:get(protocol, Opts, udp),
+    case check_target_shape(Protocol, Target) of
+        ok ->
+            case check_capsule_protocol(Protocol, Opts) of
+                {ok, Opts1} -> {ok, Opts1};
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err -> Err
+    end.
+
+check_target_shape(ip, {Target, IPProto}) ->
+    case masque_uri_ip:validate_target(Target) andalso
+         masque_uri_ip:validate_ipproto(IPProto) of
+        true  -> ok;
+        false -> {error, {bad_target_for_protocol, ip}}
+    end;
+check_target_shape(ip, _) ->
+    {error, {bad_target_for_protocol, ip}};
+check_target_shape(_, {_, P}) when is_integer(P), P >= 0, P =< 65535 ->
+    ok;
+check_target_shape(Proto, _) ->
+    {error, {bad_target_for_protocol, Proto}}.
+
+check_capsule_protocol(ip, Opts) ->
+    case maps:get(capsule_protocol, Opts, true) of
+        false ->
+            {error, {invalid_opts, capsule_protocol_required_for_ip}};
+        _ ->
+            {ok, Opts#{capsule_protocol => true}}
+    end;
+check_capsule_protocol(_, Opts) ->
+    {ok, Opts}.
 
 connect_via([h3], Target, Opts, Owner) ->
     dial_single(session_mod(Opts, h3), Target, Opts#{transport => h3}, Owner);
 connect_via([h2], Target, Opts, Owner) ->
     dial_single(session_mod(Opts, h2), Target, Opts#{transport => h2}, Owner);
+connect_via([h1], Target, Opts, Owner) ->
+    dial_single(session_mod(Opts, h1), Target, Opts#{transport => h1}, Owner);
 connect_via(Transports, Target, Opts, Owner)
   when length(Transports) >= 2 ->
     masque_racer:race(Transports, Target, Opts, Owner).
@@ -118,12 +239,24 @@ connect_via(Transports, Target, Opts, Owner)
 session_mod(Opts, h3) ->
     case maps:get(protocol, Opts, udp) of
         tcp -> masque_tcp_client_session;
+        ip  -> masque_ip_client_session;
         _   -> masque_client_session
     end;
 session_mod(Opts, h2) ->
     case maps:get(protocol, Opts, udp) of
         tcp -> masque_tcp_client_session;
+        ip  -> masque_ip_client_session;
         _   -> masque_h2_client_session
+    end;
+session_mod(Opts, h1) ->
+    %% h1 supports CONNECT-UDP + CONNECT-IP via HTTP Upgrade (RFC 9297
+    %% capsules on the upgraded socket) and classic CONNECT-TCP via
+    %% RFC 9110 §9.3.6 (raw byte pipe after `200 Connection
+    %% Established').
+    case maps:get(protocol, Opts, udp) of
+        udp -> masque_h1_client_session;
+        ip  -> masque_ip_h1_client_session;
+        tcp -> masque_tcp_h1_client_session
     end.
 
 %% Direct (non-racing) dial via a single transport module.
@@ -155,7 +288,7 @@ dial_single(Mod, Target, Opts, Owner) ->
 
 normalize_transports([]) -> [h3, h2];
 normalize_transports(L) when is_list(L) ->
-    [T || T <- L, T =:= h3 orelse T =:= h2].
+    [T || T <- L, T =:= h3 orelse T =:= h2 orelse T =:= h1].
 
 %% @equiv connect(ProxyURI, Target, #{})
 -spec connect(proxy_uri(), target()) -> {ok, session()} | {error, term()}.
@@ -222,6 +355,47 @@ shutdown_write(Sess) when is_pid(Sess) ->
     gen_statem:call(Sess, shutdown_write).
 
 %%====================================================================
+%% CONNECT-IP client API (RFC 9484)
+%%====================================================================
+
+%% @doc Send a full IP packet (starting at the IP header) through a
+%% CONNECT-IP tunnel. Rejects packets larger than the session's MTU.
+-spec send_ip_packet(session(), binary()) -> ok | {error, term()}.
+send_ip_packet(Sess, Packet) when is_pid(Sess), is_binary(Packet) ->
+    masque_ip_client_session:send_ip_packet(Sess, Packet).
+
+%% @doc Send an ADDRESS_REQUEST capsule asking the peer to assign
+%% one or more addresses. Returns the allocated Request IDs.
+-spec request_addresses(session(),
+                        [{ip_version(), inet:ip_address(), non_neg_integer()}]) ->
+    {ok, [nz_request_id()]} | {error, term()}.
+request_addresses(Sess, Prefixes) when is_pid(Sess) ->
+    masque_ip_client_session:request_addresses(Sess, Prefixes).
+
+%% @doc Send an ADDRESS_ASSIGN capsule. Non-zero Request IDs must
+%% match an outstanding peer ADDRESS_REQUEST; ID 0 is always
+%% accepted (unprompted, RFC 9484 §4.7.1).
+-spec assign_addresses(session(), [ip_assignment()]) ->
+    ok | {error, term()}.
+assign_addresses(Sess, Entries) when is_pid(Sess) ->
+    masque_ip_client_session:assign_addresses(Sess, Entries).
+
+%% @doc Send a ROUTE_ADVERTISEMENT capsule.
+-spec advertise_routes(session(), [ip_route()]) -> ok | {error, term()}.
+advertise_routes(Sess, Routes) when is_pid(Sess) ->
+    masque_ip_client_session:advertise_routes(Sess, Routes).
+
+%% @doc Inspect the CONNECT-IP session state.
+-spec ip_info(session()) -> #{
+    assigned  := [ip_assignment()],
+    routes    := [ip_route()],
+    mtu       := 1280..65535,
+    transport := transport()
+}.
+ip_info(Sess) when is_pid(Sess) ->
+    masque_ip_client_session:ip_info(Sess).
+
+%%====================================================================
 %% Server facade
 %%====================================================================
 
@@ -241,6 +415,15 @@ start_listener_h2(Name, Opts) ->
 -spec stop_listener_h2(h2:server_ref() | atom()) -> ok | {error, term()}.
 stop_listener_h2(Ref) ->
     masque_h2_server:stop_listener(Ref).
+
+-spec start_listener_h1(atom(), map()) ->
+    {ok, h1:server_ref()} | {error, term()}.
+start_listener_h1(Name, Opts) ->
+    masque_h1_server:start_listener(Name, Opts).
+
+-spec stop_listener_h1(h1:server_ref() | atom()) -> ok | {error, term()}.
+stop_listener_h1(Ref) ->
+    masque_h1_server:stop_listener(Ref).
 
 %% @doc Stop accepting new tunnels but let existing ones finish.
 -spec drain_listener(atom()) -> ok.

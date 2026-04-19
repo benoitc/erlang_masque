@@ -70,6 +70,7 @@ lookup_session(RouterPid, StreamId) ->
 %% @doc Return the session module for the given args.
 -spec session_module(map()) -> module().
 session_module(#{protocol := tcp}) -> masque_tcp_server_session;
+session_module(#{protocol := ip})  -> masque_ip_server_session;
 session_module(_)                  -> masque_server_session.
 
 %%====================================================================

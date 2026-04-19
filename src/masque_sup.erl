@@ -23,6 +23,18 @@ init([]) ->
           type  => supervisor},
         #{id    => masque_h2_tcp_session_sup,
           start => {masque_h2_session_sup, start_link_tcp, []},
+          type  => supervisor},
+        #{id    => masque_h2_ip_session_sup,
+          start => {masque_h2_session_sup, start_link_ip, []},
+          type  => supervisor},
+        #{id    => masque_h1_session_sup,
+          start => {masque_h1_session_sup, start_link, []},
+          type  => supervisor},
+        #{id    => masque_h1_ip_session_sup,
+          start => {masque_h1_session_sup, start_link_ip, []},
+          type  => supervisor},
+        #{id    => masque_h1_tcp_session_sup,
+          start => {masque_h1_session_sup, start_link_tcp, []},
           type  => supervisor}
     ],
     {ok, {SupFlags, Children}}.

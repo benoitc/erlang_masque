@@ -1,39 +1,57 @@
 # masque
 
-An Erlang implementation of [RFC 9298 - Proxying UDP in HTTP][rfc9298]
-(MASQUE CONNECT-UDP) over **HTTP/3** and **HTTP/2**, built on
-[`erlang_quic`][quic] (`quic_h3`) and [`erlang_h2`][h2].
+An Erlang implementation of the MASQUE family — [RFC 9298 - Proxying
+UDP in HTTP][rfc9298], [RFC 9484 - Proxying IP in HTTP][rfc9484], and
+the draft-ietf-httpbis-connect-tcp variant — over **HTTP/3** and
+**HTTP/2**, built on [`erlang_quic`][quic] (`quic_h3`) and
+[`erlang_h2`][h2].
 
 The client races both transports Apple-style (h3 first, h2 after
 250 ms, first 2xx wins) so tunnels connect quickly even on networks
 that block QUIC.
 
 `masque` lets you tunnel arbitrary UDP flows (DNS, QUIC, WireGuard,
-game traffic, …) through an authenticated HTTPS endpoint. Both proxy
-**server** and **client** are shipped in this library.
+game traffic, …), TCP streams, and full IP packets through an
+authenticated HTTPS endpoint. Both proxy **server** and **client**
+are shipped in this library.
 
 ## Features
 
-- RFC 9298 Extended CONNECT handshake (`:protocol = connect-udp`)
-- RFC 9297 HTTP Datagrams for UDP payloads (quarter-stream-id handled
-  by `quic_h3`)
-- Context-ID framing per RFC 9298 §5 (context 0 = UDP)
-- Capsule-protocol dispatch for extension capsule types
-- Built-in UDP proxy handler (`masque_udp_proxy_handler`) - zero-code
-  proxies with optional `allow` / `resolver` policy hooks
-- Handler behaviour for custom server-side logic
-- Client API in both *message* and *queue* (blocking `recv_packet`)
-  delivery modes
-- End-to-end compliance CT suite (17 cases) + eunit codecs (29 tests)
-  + PropEr properties (3) + skippable external-peer interop suite
+- RFC 9298 CONNECT-UDP (`:protocol = connect-udp`): built-in UDP
+  proxy handler, `allow` / `resolver` policy hooks, client API in
+  both *message* and *queue* (blocking `recv`) delivery modes.
+- RFC 9484 CONNECT-IP (`:protocol = connect-ip`): bidirectional
+  control plane (`ADDRESS_ASSIGN` / `ADDRESS_REQUEST` /
+  `ROUTE_ADVERTISEMENT`), default handler with address-pool
+  allocator, listener-owned DNS resolution before `accept/1`,
+  BCP-38 source filter, ICMPv4+v6 error synthesis (`masque_icmp`),
+  H3 datagram MTU enforcement per §8. See
+  [`docs/connect_ip.md`](docs/connect_ip.md) for the §-mapped
+  compliance table.
+- draft-ietf-httpbis-connect-tcp (`:protocol = connect-tcp`): TCP
+  tunneling with END_STREAM = TCP FIN semantics.
+- One listener serves all three protocols; `:protocol` pseudo-header
+  selects the handler.
+- RFC 9297 HTTP Datagrams (delegated to `quic_h3`) and RFC 9297
+  DATAGRAM-type capsules on HTTP/2 (for IP and UDP data planes).
+- Capsule-protocol dispatch for extension capsule types.
+- Handler behaviour for custom server-side logic; transport-generic
+  client sessions for TCP and IP (one module per protocol serves both
+  H3 and H2).
 - HTTP/2 fallback with Apple-style head-start racing (`transports`
-  option; default `[h3, h2]`)
+  option; default `[h3, h2]`).
+- End-to-end compliance CT suites (UDP + IP) and eunit codecs (URI,
+  capsule, datagram, ICMP) + skippable external-peer interop suite.
 
-- **[Usage guide](docs/usage.md)** - client modes, multiple tunnels,
+- **[Usage guide](docs/usage.md)** — client modes, multiple tunnels,
   integration with an existing `quic_h3` or `h2` server, handler
   lifecycle, transport selection.
-- **[Feature matrix](docs/features.md)** - RFC coverage and
+- **[CONNECT-IP guide](docs/connect_ip.md)** — RFC 9484 usage and
+  section-by-section compliance mapping.
+- **[Feature matrix](docs/features.md)** — RFC coverage and
   intentional non-goals.
+
+[rfc9484]: https://www.rfc-editor.org/rfc/rfc9484
 
 ## Installation
 

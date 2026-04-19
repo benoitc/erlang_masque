@@ -29,6 +29,7 @@
 ]).
 
 -include("masque.hrl").
+-include("masque_ip.hrl").
 
 -type listener_name() :: atom().
 -type listener_opts() :: masque:listener_opts().
@@ -125,13 +126,26 @@ h3_handlers(Opts0) ->
     Opts = defaults(Opts0),
     UdpTemplate = maps:get(uri_template, Opts),
     TcpTemplate = maps:get(tcp_uri_template, Opts),
+    IpTemplate  = maps:get(ip_uri_template, Opts),
     UdpHandler  = maps:get(handler, Opts),
     TcpHandler  = maps:get(tcp_handler, Opts),
-    HandlerOpts = maps:get(handler_opts, Opts, #{}),
+    IpHandler   = maps:get(ip_handler, Opts),
+    Resolver    = maps:get(resolver, Opts, fun default_resolver/1),
+    %% Lift IP-scoped listener options into handler_opts so the
+    %% default IP handler (and user handlers that follow the same
+    %% convention) see them without callers having to duplicate.
+    IpExtra = maps:with([address_pool, routes, mtu,
+                          resolver, allow, family, allow_private,
+                          connect_timeout, socket_opts], Opts),
+    UserHOpts = maps:get(handler_opts, Opts, #{}),
+    HandlerOpts = maps:merge(IpExtra, UserHOpts),
     Fallback    = maps:get(fallback, Opts, undefined),
     DrainKey = maps:get(drain_key, Opts, undefined),
     Dispatch = #{udp_template => UdpTemplate, tcp_template => TcpTemplate,
+                 ip_template  => IpTemplate,
                  udp_handler => UdpHandler, tcp_handler => TcpHandler,
+                 ip_handler  => IpHandler,
+                 resolver    => Resolver,
                  handler_opts => HandlerOpts, fallback => Fallback,
                  name => DrainKey},
     MaxTunnels = maps:get(max_tunnels_per_connection, Opts, 0),
@@ -156,10 +170,27 @@ defaults(Opts) ->
     D = #{
         uri_template     => ?MASQUE_DEFAULT_URI_TEMPLATE,
         tcp_uri_template => ?MASQUE_DEFAULT_TCP_URI_TEMPLATE,
+        ip_uri_template  => ?MASQUE_DEFAULT_IP_URI_PATH_PATTERN,
         handler          => masque_udp_proxy_handler,
-        tcp_handler      => masque_tcp_proxy_handler
+        tcp_handler      => masque_tcp_proxy_handler,
+        ip_handler       => masque_ip_proxy_handler
     },
     maps:merge(D, Opts).
+
+%% Default resolver: resolve A and AAAA, merge results.
+default_resolver(Host) when is_binary(Host) ->
+    default_resolver(binary_to_list(Host));
+default_resolver(Host) when is_list(Host) ->
+    V4 = case inet_res:lookup(Host, in, a) of
+             [] -> []; Xs -> Xs
+         end,
+    V6 = case inet_res:lookup(Host, in, aaaa) of
+             [] -> []; Ys -> Ys
+         end,
+    case V4 ++ V6 of
+        []    -> {error, nxdomain};
+        Addrs -> {ok, Addrs}
+    end.
 
 %% MASQUE requires `SETTINGS_ENABLE_CONNECT_PROTOCOL = 1' and
 %% `SETTINGS_H3_DATAGRAM = 1'. Merge these on top of any user-supplied
@@ -188,22 +219,31 @@ dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
 
 dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
     #{udp_template := UdpTpl, tcp_template := TcpTpl,
+      ip_template  := IpTpl,
       udp_handler := UdpHandler, tcp_handler := TcpHandler,
+      ip_handler  := IpHandler,
+      resolver    := Resolver,
       handler_opts := HandlerOpts, fallback := Fallback} = Dispatch,
-    case validate(Method, Path, Headers, UdpTpl, TcpTpl) of
+    case validate(Method, Path, Headers, UdpTpl, TcpTpl, IpTpl) of
         {ok, Req0} ->
             Protocol = maps:get(protocol, Req0),
             HandlerMod = case Protocol of
                 udp -> UdpHandler;
-                tcp -> TcpHandler
+                tcp -> TcpHandler;
+                ip  -> IpHandler
             end,
             Req1 = add_peer_info(Conn, Req0),
-            Req = Req1#{handler_opts => HandlerOpts},
-            case accept_request(HandlerMod, Req) of
-                accept ->
-                    spawn_session(Conn, StreamId, Router, Protocol,
-                                  HandlerMod, HandlerOpts, Req);
-                {reject, Reason} ->
+            Req2 = Req1#{handler_opts => HandlerOpts},
+            case resolve_target(Protocol, Req2, Resolver) of
+                {ok, Req3} ->
+                    case accept_request(HandlerMod, Req3) of
+                        accept ->
+                            spawn_session(Conn, StreamId, Router, Protocol,
+                                          HandlerMod, HandlerOpts, Req3);
+                        {reject, Reason} ->
+                            reject(Conn, StreamId, Reason)
+                    end;
+                {error, Reason} ->
                     reject(Conn, StreamId, Reason)
             end;
         {error, Reason} ->
@@ -214,6 +254,27 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
                     Fun(Conn, StreamId, Method, Path, Headers)
             end
     end.
+
+%% RFC 9484 §4.7.1: hostname targets MUST be resolved before the 2xx
+%% response. The resolved address list is attached to `req()` so the
+%% handler's `accept/1' can apply SSRF policy on the real addresses
+%% and the session's `init/2' gets them ready to emit in the first
+%% ROUTE_ADVERTISEMENT.
+resolve_target(ip, #{ip_target := Target} = Req, Resolver)
+  when is_binary(Target) ->
+    %% Binary ip_target is a hostname (IPs parse into tuples).
+    case Resolver(Target) of
+        {ok, Addrs} -> {ok, Req#{resolved_addresses => Addrs}};
+        {error, _}  -> {error, resolution_failed}
+    end;
+resolve_target(ip, #{ip_target := {_,_,_,_} = A} = Req, _Resolver) ->
+    {ok, Req#{resolved_addresses => [A]}};
+resolve_target(ip, #{ip_target := {_,_,_,_,_,_,_,_} = A} = Req, _Resolver) ->
+    {ok, Req#{resolved_addresses => [A]}};
+resolve_target(ip, Req, _Resolver) ->
+    {ok, Req#{resolved_addresses => []}};
+resolve_target(_, Req, _Resolver) ->
+    {ok, Req}.
 
 spawn_session(Conn, StreamId, undefined, _Proto, _Handler, _HOpts, _Req) ->
     reject(Conn, StreamId, resolution_failed);
@@ -251,7 +312,7 @@ map_init_error({resolution_failed, _}) -> resolution_failed;
 map_init_error({reject, Err})          -> Err;
 map_init_error(_)                      -> resolution_failed.
 
-validate(Method, Path, Headers, UdpTemplate, TcpTemplate) ->
+validate(Method, Path, Headers, UdpTemplate, TcpTemplate, IpTemplate) ->
     case Method of
         <<"CONNECT">> ->
             Protocol = header(<<":protocol">>, Headers),
@@ -260,6 +321,8 @@ validate(Method, Path, Headers, UdpTemplate, TcpTemplate) ->
                     match_path(Path, Headers, UdpTemplate, udp);
                 ?MASQUE_CONNECT_TCP_PROTOCOL ->
                     match_path(Path, Headers, TcpTemplate, tcp);
+                ?MASQUE_CONNECT_IP_PROTOCOL ->
+                    match_ip_path(Path, Headers, IpTemplate);
                 _ ->
                     {error, bad_protocol}
             end;
@@ -294,6 +357,37 @@ match_path(Path, Headers, Template, Protocol) ->
             {error, bad_port};
         {error, bad_host} ->
             {error, bad_host};
+        {error, _} ->
+            {error, bad_path}
+    end.
+
+match_ip_path(Path, Headers, Template) ->
+    case masque_uri_ip:parse_server_template(Template) of
+        {ok, T} ->
+            case masque_uri_ip:match(T, Path) of
+                {ok, #{target := Target, ipproto := IPProto}} ->
+                    case {header(<<":scheme">>, Headers),
+                          header(<<":authority">>, Headers)} of
+                        {Scheme, Authority}
+                          when Scheme =/= undefined,
+                               Authority =/= undefined ->
+                            {ok, #{
+                                method => <<"CONNECT">>,
+                                protocol => ip,
+                                path => Path,
+                                authority => Authority,
+                                scheme => Scheme,
+                                ip_target => Target,
+                                ip_ipproto => IPProto,
+                                headers => Headers
+                            }};
+                        _ ->
+                            {error, bad_path}
+                    end;
+                {error, bad_target}   -> {error, bad_host};
+                {error, bad_ipproto}  -> {error, bad_port};
+                {error, _}            -> {error, bad_path}
+            end;
         {error, _} ->
             {error, bad_path}
     end.
