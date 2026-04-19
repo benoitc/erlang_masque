@@ -16,7 +16,8 @@ and the server-side handler module lifecycle.
 7. [Capsule protocol](#7-capsule-protocol)
 8. [Error mapping](#8-error-mapping)
 9. [Two-hop relay](#9-two-hop-relay)
-10. [Known limitations](#10-known-limitations)
+10. [Metrics](#10-metrics)
+11. [Known limitations](#11-known-limitations)
 
 ---
 
@@ -239,7 +240,7 @@ spawn a per-connection state process), merge its return map with
 MASQUE's: keys `owner` and `h3_datagram_enabled` must come from the
 MASQUE side for tunnels to work.
 
-### Known limitation — single owner per connection
+### Known limitation - single owner per connection
 
 MASQUE *must* be the connection's `owner` in v0.1. Running MASQUE and
 another extension that also needs ownership (e.g. WebTransport)
@@ -310,6 +311,72 @@ accept(#{target_host := H, target_port := P, headers := Hdrs}) ->
 
 See [`masque_errors`](../src/masque_errors.erl) for the full
 `handshake_error()` atom set.
+
+### Authentication patterns
+
+The `Req` map passed to `accept/1` surfaces enough connection and
+request context to build realistic auth schemes without peeking
+into the transport libs:
+
+```erlang
+-spec req() :: #{
+    %% ...
+    peer       => {inet:ip_address(), inet:port_number()},  %% h3/h2
+    peer_cert  => binary(),                                 %% h3 only (DER)
+    headers    := [{binary(), binary()}],                   %% full request headers
+    resolved_addresses => [inet:ip_address()]               %% resolver output
+}.
+```
+
+**Bearer tokens** (Privacy Pass, OAuth, Paseto):
+
+```erlang
+accept(#{headers := H} = Req) ->
+    case header(<<"authorization">>, H) of
+        <<"Bearer ", Token/binary>> ->
+            case my_token_lib:verify(Token) of
+                ok                       -> accept;
+                {error, {expired, _}}    -> {reject, {other, 401}};
+                {error, _}               -> {reject, forbidden}
+            end;
+        _ ->
+            {reject, {other, 401}}
+    end.
+
+header(Name, H) ->
+    case lists:keyfind(Name, 1, H) of
+        {_, V} -> V;
+        false  -> undefined
+    end.
+```
+
+**mTLS** (client certificate, h3 only today):
+
+```erlang
+accept(#{peer_cert := Der}) when is_binary(Der) ->
+    {ok, Cert} = public_key:pkix_decode_cert(Der, otp),
+    case my_pki:verify_chain(Cert) of
+        ok        -> accept;
+        {error,_} -> {reject, forbidden}
+    end;
+accept(_) ->
+    {reject, {other, 401}}.
+```
+
+**Peer IP allow-list**:
+
+```erlang
+accept(#{peer := {Ip, _}}) ->
+    case lists:member(Ip, ?INTERNAL_RANGE) of
+        true  -> accept;
+        false -> {reject, forbidden}
+    end.
+```
+
+The `accept/1` callback runs synchronously on the request thread,
+so keep it cheap (no blocking network calls). Do heavy validation
+in `init/2` where a `{stop, Reason}` still surfaces cleanly as a
+5xx to the client.
 
 ---
 
@@ -445,7 +512,36 @@ Pool owners stop themselves after `idle_timeout_ms`
 (default 30000) with no active streams; tune via
 `upstream_pool_opts => #{idle_timeout_ms => N}`.
 
-## 10. Known limitations
+## 10. Metrics
+
+`masque_metrics` wires `instrument_meter` meters for tunnel
+lifecycle and throughput. The masque application calls
+`masque_metrics:setup/0` at start so the meters are available as
+soon as the supervisor is up.
+
+| Meter                         | Kind             | What it records |
+|-------------------------------|------------------|-----------------|
+| `masque.tunnels.total`        | counter          | Accepted tunnels. |
+| `masque.tunnels.active`       | up/down counter  | Currently open tunnels. |
+| `masque.tunnels.rejected`     | counter          | Tunnels refused at handshake (`accept/1` rejected, `resolution_failed`, etc.). |
+| `masque.bytes.in`             | counter          | Bytes received from clients. |
+| `masque.bytes.out`            | counter          | Bytes sent to clients. |
+| `masque.tunnel.duration_ms`   | histogram        | Tunnel lifetime on close. |
+
+Every sample carries a tags map. Typical tags:
+
+```erlang
+#{protocol  => udp,        %% udp | tcp | ip
+  transport => h3,         %% h3 | h2 | h1
+  listener  => my_proxy}   %% listener name
+```
+
+Use any `instrument_meter` exporter (OTLP, Prometheus via
+`prometheus` adapter, stdout for debugging) to forward these off
+the node. `instrument` is in the supervision tree via the
+`instrument_app` dep, so no extra app needs starting.
+
+## 11. Known limitations
 
 - **One owner per QUIC connection.** MASQUE takes the `owner` slot;
   running it alongside another extension that also needs `owner`

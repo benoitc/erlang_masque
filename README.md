@@ -1,8 +1,8 @@
 # masque
 
-An Erlang implementation of the MASQUE family — [RFC 9298 - Proxying
+An Erlang implementation of the MASQUE family - [RFC 9298 - Proxying
 UDP in HTTP][rfc9298], [RFC 9484 - Proxying IP in HTTP][rfc9484], and
-the draft-ietf-httpbis-connect-tcp variant — over **HTTP/3** and
+the draft-ietf-httpbis-connect-tcp variant - over **HTTP/3** and
 **HTTP/2**, built on [`erlang_quic`][quic] (`quic_h3`) and
 [`erlang_h2`][h2].
 
@@ -43,12 +43,17 @@ are shipped in this library.
 - End-to-end compliance CT suites (UDP + IP) and eunit codecs (URI,
   capsule, datagram, ICMP) + skippable external-peer interop suite.
 
-- **[Usage guide](docs/usage.md)** — client modes, multiple tunnels,
+- **[Usage guide](docs/usage.md)** - client modes, multiple tunnels,
   integration with an existing `quic_h3` or `h2` server, handler
-  lifecycle, transport selection.
-- **[CONNECT-IP guide](docs/connect_ip.md)** — RFC 9484 usage and
+  lifecycle, transport selection, connection pooling, metrics.
+- **[Design](docs/design.md)** - architecture overview, supervision
+  tree, client and server request paths, upstream pool internals,
+  extension points.
+- **[API reference](docs/api.md)** - type signatures, option maps,
+  handler callbacks, built-in handlers.
+- **[CONNECT-IP guide](docs/connect_ip.md)** - RFC 9484 usage and
   section-by-section compliance mapping.
-- **[Feature matrix](docs/features.md)** — RFC coverage and
+- **[Feature matrix](docs/features.md)** - RFC coverage and
   intentional non-goals.
 
 [rfc9484]: https://www.rfc-editor.org/rfc/rfc9484
