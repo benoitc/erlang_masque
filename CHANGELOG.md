@@ -26,6 +26,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
   complete the chain-listener trio (h3 was already there). A
   Private-Relay-shaped ingress now takes the same one-liner shape
   on every transport.
+- CONNECT-IP support in `masque_chain_handler`. Ingress tunnels with
+  `protocol => ip` forward IP packets both ways, forward the
+  egress's initial `ROUTE_ADVERTISEMENT`, and forward unprompted
+  `ADDRESS_ASSIGN` entries (request_id = 0). Prompted ADDRESS_ASSIGN
+  forwarding requires request-id remapping and stays out of this
+  change; a client that expects the chain to round-trip a
+  client-initiated `ADDRESS_REQUEST` has to wait for that follow-up.
 
 ## [0.5.0] - 2026-04-19
 
