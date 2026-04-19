@@ -40,7 +40,10 @@
 
 %% Default capsule-buffer ceiling in bytes. Capsules exceeding this
 %% trigger a stream reset with H3_MESSAGE_ERROR (RFC 9297 §3.3).
--define(MASQUE_DEFAULT_MAX_CAPSULE_SIZE, 1048576).
+%% 64 KiB covers an IPv6 MTU datagram plus generous capsule overhead;
+%% operators expecting larger extension capsules can raise this via
+%% `max_capsule_size' in `connect_opts' / listener `handler_opts'.
+-define(MASQUE_DEFAULT_MAX_CAPSULE_SIZE, 65536).
 
 %% RFC 9114 §8.1: stream-level error codes we emit.
 -define(MASQUE_H3_MESSAGE_ERROR, 16#10E).

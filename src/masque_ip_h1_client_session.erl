@@ -256,8 +256,10 @@ closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
 
 terminate(_Reason, _State, #data{socket = undefined} = D) ->
+    _ = erlang:demonitor(D#data.owner_ref, [flush]),
     cancel_all_waiters(D);
 terminate(_Reason, _State, #data{socket = Socket} = D) ->
+    _ = erlang:demonitor(D#data.owner_ref, [flush]),
     cancel_all_waiters(D),
     _ = (catch ssl:close(Socket)),
     ok.
