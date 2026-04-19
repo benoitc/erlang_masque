@@ -18,7 +18,9 @@
 -export([start_listener_h2/2, stop_listener_h2/1]).
 -export([start_listener_h1/2, stop_listener_h1/1]).
 -export([drain_listener/1, undrain_listener/1, is_draining/1]).
--export([start_chain_listener/2]).
+-export([start_chain_listener/2,
+         start_chain_listener_h2/2,
+         start_chain_listener_h1/2]).
 -export([h3_handlers/1, h2_handlers/1]).
 
 %% CONNECT-IP (RFC 9484) client API.
@@ -465,15 +467,40 @@ is_draining(undefined) -> false;
 is_draining(Name) ->
     persistent_term:get({masque_drain, Name}, false).
 
-%% @doc Start a chaining (two-hop) listener.
+%% @doc Start a chaining (two-hop) listener on HTTP/3.
 %%
 %% Convenience wrapper: starts an h3 listener with
 %% `masque_chain_handler' as the handler module. Every accepted
 %% tunnel is relayed to the upstream proxy specified in
 %% `handler_opts.upstream_proxy'.
+%%
+%% See {@link start_chain_listener_h2/2} and
+%% {@link start_chain_listener_h1/2} for the HTTP/2 and HTTP/1.1
+%% siblings. A full Apple-Private-Relay-shaped ingress runs all three
+%% so the client can race them.
 -spec start_chain_listener(atom(), map()) -> {ok, pid()} | {error, term()}.
 start_chain_listener(Name, Opts) ->
     start_listener(Name, Opts#{handler => masque_chain_handler}).
+
+%% @doc Start a chaining (two-hop) listener on HTTP/2.
+%%
+%% Same shape as {@link start_chain_listener/2}; only the outer
+%% transport differs. Handler is `masque_chain_handler'; upstream
+%% proxy URI goes in `handler_opts.upstream_proxy'.
+-spec start_chain_listener_h2(atom(), map()) ->
+    {ok, h2:server_ref()} | {error, term()}.
+start_chain_listener_h2(Name, Opts) ->
+    start_listener_h2(Name, Opts#{handler => masque_chain_handler}).
+
+%% @doc Start a chaining (two-hop) listener on HTTP/1.1.
+%%
+%% Same shape as {@link start_chain_listener/2}; only the outer
+%% transport differs. Handler is `masque_chain_handler'; upstream
+%% proxy URI goes in `handler_opts.upstream_proxy'.
+-spec start_chain_listener_h1(atom(), map()) ->
+    {ok, h1:server_ref()} | {error, term()}.
+start_chain_listener_h1(Name, Opts) ->
+    start_listener_h1(Name, Opts#{handler => masque_chain_handler}).
 
 -spec h2_handlers(map()) ->
     #{handler := fun((pid(), non_neg_integer(), binary(), binary(),

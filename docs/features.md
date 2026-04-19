@@ -64,7 +64,10 @@ Current coverage of the `masque` library against the relevant RFCs.
 - Server-side proxy chaining (`masque_chain_handler`): an Ingress
   listener opens a MASQUE client session to an upstream Egress proxy
   and relays datagrams both ways. Enables Private Relay-style two-hop
-  tunnels with zero client-side changes.
+  tunnels with zero client-side changes. Wire up a chain listener
+  on any transport via `masque:start_chain_listener/2` (h3),
+  `start_chain_listener_h2/2` (h2), or `start_chain_listener_h1/2`
+  (h1); start one per transport and clients race them.
 
 ## Delivered in v0.2
 

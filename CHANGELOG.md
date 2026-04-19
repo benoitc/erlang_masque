@@ -22,6 +22,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - `masque_uri:build_authority/2` and `masque_uri:parse_authority_form/1`
   helpers. IPv6 literals get bracketed on outbound authorities and
   unwrapped on CONNECT request-targets.
+- `masque:start_chain_listener_h2/2` and `start_chain_listener_h1/2`
+  complete the chain-listener trio (h3 was already there). A
+  Private-Relay-shaped ingress now takes the same one-liner shape
+  on every transport.
 
 ## [0.5.0] - 2026-04-19
 

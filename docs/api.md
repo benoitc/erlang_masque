@@ -288,6 +288,28 @@ relayed to the upstream proxy specified in
 }).
 ```
 
+### start_chain_listener_h2/2
+
+```erlang
+-spec start_chain_listener_h2(atom(), map()) ->
+    {ok, h2:server_ref()} | {error, term()}.
+```
+
+Same as `start_chain_listener/2`, on HTTP/2. Cert/key are PEM file
+paths (h2 convention). A full Apple-Private-Relay-shaped ingress
+starts one chain listener on each transport so clients can race
+them.
+
+### start_chain_listener_h1/2
+
+```erlang
+-spec start_chain_listener_h1(atom(), map()) ->
+    {ok, h1:server_ref()} | {error, term()}.
+```
+
+Same as `start_chain_listener/2`, on HTTP/1.1. Cert/key are PEM
+file paths.
+
 ### h3_handlers/1
 
 ```erlang
