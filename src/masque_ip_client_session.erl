@@ -65,6 +65,8 @@
     %% Most recent server-advertised state.
     assigned = []     :: [masque_ip_capsule:address_entry()],
     routes   = []     :: [masque_ip_capsule:route_entry()],
+    %% Extra request headers prepended to the CONNECT-IP request.
+    extra_headers = [] :: [{binary(), binary()}],
     %% When set, the conn is owned by a `masque_upstream_owner';
     %% teardown releases the stream back to the pool instead of
     %% closing the conn.
@@ -155,6 +157,8 @@ init({{Target, IPProto}, Opts, Owner}) ->
         rx_buf = queue:new(),
         rx_waiters = queue:new(),
         max_cap = MaxCap,
+        extra_headers = sanitise_extra_headers(
+                          maps:get(request_headers, Opts, [])),
         pool_owner = maps:get(pool_owner, Opts, undefined)
     },
     {ok, connecting, Data,
@@ -461,18 +465,27 @@ transport_cancel(#data{transport = h2, conn = C, stream_id = S}) ->
 transport_close(#data{transport = h3, conn = C}) -> quic_h3:close(C);
 transport_close(#data{transport = h2, conn = C}) -> h2:close(C).
 
-request_headers(#data{template = T, target = Target, ipproto = IPProto}) ->
+request_headers(#data{template = T, target = Target, ipproto = IPProto,
+                      extra_headers = Extra}) ->
     Url = masque_uri_ip:expand(T, #{target => Target, ipproto => IPProto}),
     %% Split the synthesised URI into :authority and :path.
     {Scheme, Authority, Path} = split_url(Url),
-    [
+    Base = [
         {<<":method">>, <<"CONNECT">>},
         {<<":protocol">>, ?MASQUE_CONNECT_IP_PROTOCOL},
         {<<":scheme">>, Scheme},
         {<<":authority">>, Authority},
         {<<":path">>, Path},
         {<<"capsule-protocol">>, <<"?1">>}
-    ].
+    ],
+    Base ++ Extra.
+
+sanitise_extra_headers(List) when is_list(List) ->
+    Reserved = [<<":method">>, <<":scheme">>, <<":authority">>,
+                <<":path">>, <<":protocol">>, <<"capsule-protocol">>],
+    [{K, V} || {K, V} <- List,
+               is_binary(K), is_binary(V),
+               not lists:member(K, Reserved)].
 
 split_url(<<"https://", Rest/binary>>) ->
     {Auth, Path} = split_authority(Rest),

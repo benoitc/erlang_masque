@@ -44,7 +44,9 @@
     rx_buf = queue:new() :: queue:queue(binary()),
     rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
     cap_buf = <<>> :: binary(),
-    max_cap        :: pos_integer()
+    max_cap        :: pos_integer(),
+    %% Extra request headers prepended to the GET+Upgrade request.
+    extra_headers = [] :: [{binary(), binary()}]
 }).
 
 %%====================================================================
@@ -99,7 +101,9 @@ init({Target, Opts, Owner}) ->
                                 ?MASQUE_DEFAULT_URI_TEMPLATE),
         capsule_proto = maps:get(capsule_protocol, Opts, true),
         mode = Mode,
-        max_cap = MaxCap
+        max_cap = MaxCap,
+        extra_headers = sanitise_extra_headers(
+                          maps:get(request_headers, Opts, []))
     },
     {ok, connecting, Data,
      [{next_event, internal, {do_handshake, Opts}}]}.
@@ -271,7 +275,8 @@ classify_upgrade_error(Other)                      -> {upgrade, Other}.
 request_headers(#data{proxy_host = ProxyHost, proxy_port = ProxyPort,
                       target_host = TargetHost, target_port = TargetPort,
                       uri_template = Template,
-                      capsule_proto = CapProto}) ->
+                      capsule_proto = CapProto,
+                      extra_headers = Extra}) ->
     Path = masque_uri:expand(Template, #{
         target_host => TargetHost,
         target_port => TargetPort
@@ -281,10 +286,21 @@ request_headers(#data{proxy_host = ProxyHost, proxy_port = ProxyPort,
         {<<":path">>, Path},
         {<<"host">>, Authority}
     ],
-    case CapProto of
+    WithCap = case CapProto of
         true  -> Base ++ [{<<"capsule-protocol">>, <<"?1">>}];
         false -> Base
-    end.
+    end,
+    WithCap ++ Extra.
+
+sanitise_extra_headers(List) when is_list(List) ->
+    Reserved = [<<":path">>, <<"host">>, <<"capsule-protocol">>,
+                <<"upgrade">>, <<"connection">>],
+    [{K, V} || {K, V} <- List,
+               is_binary(K), is_binary(V),
+               not lists:member(lowercase_bin(K), Reserved)].
+
+lowercase_bin(B) when is_binary(B) ->
+    list_to_binary(string:to_lower(binary_to_list(B))).
 
 setopts_active_once(Socket) ->
     ssl:setopts(Socket, [{active, once}, {mode, binary}]).

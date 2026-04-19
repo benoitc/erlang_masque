@@ -554,6 +554,8 @@ Where to plug in without forking the library:
 - **Custom tunnel policy.** Implement `masque_handler`; override
   `accept/1` to gate on headers, peer cert, peer IP. The `Req`
   map carries `peer_cert`, `peer`, `headers`, `resolved_addresses`.
+  Return `{reject, Error, ExtraHeaders}` to attach response headers
+  like `WWW-Authenticate` for a Privacy Pass challenge.
 - **Custom tunnel backend.** Implement `masque_handler`; do
   whatever in `init/2`, `handle_packet/2`, `handle_data/2`, and
   emit actions. Examples: record to an audit log, route to
@@ -565,6 +567,11 @@ Where to plug in without forking the library:
   `upstream_pool => true` on direct clients and on chain handlers.
 - **Transport preference.** `transports => [h3]` to force QUIC;
   `[h3, h2, h1]` to enable the full race.
+- **Client-side request headers.** Pass
+  `request_headers => [{Name, Value}]` in `connect_opts()` to add
+  auth headers (`Authorization: PrivateToken ...`) or metadata to
+  the CONNECT / Upgrade request. The library sanitises caller
+  input (reserved names dropped; CR/LF refused on h1).
 - **TLS customisation.** Pass `ssl_opts` for client overrides;
   bring your own cert store via `cacerts`. For server listeners
   use `masque:start_listener/2` / `_h2/2` / `_h1/2`, which

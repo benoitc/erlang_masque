@@ -57,7 +57,17 @@ tunnel_closed(DurationMs, Attrs) ->
 -spec tunnel_rejected(map()) -> ok.
 tunnel_rejected(Attrs) ->
     instrument_meter:add(
-        persistent_term:get(masque_tunnels_rejected), 1, Attrs).
+        persistent_term:get(masque_tunnels_rejected), 1,
+        normalise_attrs(Attrs)).
+
+%% `instrument_meter' labels must be scalars (atom/binary/integer);
+%% flatten any tuple-shaped reasons (`{other, 401}') into a binary.
+normalise_attrs(Attrs) when is_map(Attrs) ->
+    maps:map(fun(_K, V) -> normalise_value(V) end, Attrs).
+
+normalise_value(V) when is_atom(V); is_binary(V); is_integer(V) -> V;
+normalise_value(V) ->
+    iolist_to_binary(io_lib:format("~p", [V])).
 
 -spec bytes_in(non_neg_integer(), map()) -> ok.
 bytes_in(Bytes, Attrs) ->

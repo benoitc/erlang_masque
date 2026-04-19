@@ -48,7 +48,15 @@
 
 -type accept_result() ::
     accept
-  | {reject, masque_errors:handshake_error()}.
+  | {reject, masque_errors:handshake_error()}
+  %% Rejection with extra HTTP response headers. Useful for schemes
+  %% that require a challenge header on 401 (Privacy Pass via
+  %% `WWW-Authenticate: PrivateToken ...', RFC 9112 `Basic' / `Bearer'
+  %% challenges, rate-limit `Retry-After' hints). Duplicate keys with
+  %% the library-set headers (`content-type', `content-length',
+  %% `proxy-status') take the caller's value.
+  | {reject, masque_errors:handshake_error(),
+     [{binary(), binary()}]}.
 
 %%====================================================================
 %% Behaviour

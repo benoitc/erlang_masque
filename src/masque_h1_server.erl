@@ -163,7 +163,9 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
                     spawn_session(Conn, StreamId, Protocol, HandlerMod,
                                   HandlerOpts, Req);
                 {reject, Reason} ->
-                    reject(Conn, StreamId, Reason)
+                    reject(Conn, StreamId, Reason);
+                {reject, Reason, Extra} when is_list(Extra) ->
+                    reject(Conn, StreamId, Reason, Extra)
             end;
         {error, Reason} ->
             reject(Conn, StreamId, Reason)
@@ -329,18 +331,29 @@ lowercase_bin(L) when is_list(L) ->
     lowercase_bin(iolist_to_binary(L)).
 
 reject(Conn, StreamId, Reason) ->
+    reject(Conn, StreamId, Reason, []).
+
+reject(Conn, StreamId, Reason, ExtraHeaders) ->
     masque_metrics:tunnel_rejected(#{reason => Reason}),
     Status = masque_errors:handshake_status(Reason),
     Phrase = masque_errors:status_reason(Reason),
     Body = <<Phrase/binary, "\n">>,
-    Headers = [
+    Base = [
         {<<"content-type">>, <<"text/plain; charset=utf-8">>},
         {<<"content-length">>, integer_to_binary(byte_size(Body))},
         {<<"proxy-status">>, proxy_status_field(Reason)}
     ],
+    Headers = merge_extra_headers(Base, ExtraHeaders),
     _ = catch h1:send_response(Conn, StreamId, Status, Headers),
     _ = catch h1:send_data(Conn, StreamId, Body, true),
     ok.
+
+merge_extra_headers(Base, []) ->
+    Base;
+merge_extra_headers(Base, Extra) ->
+    Keys = [K || {K, _} <- Extra],
+    Kept = [Pair || {K, _} = Pair <- Base, not lists:member(K, Keys)],
+    Extra ++ Kept.
 
 proxy_status_field(Reason) ->
     Error = proxy_status_error(Reason),

@@ -378,6 +378,57 @@ so keep it cheap (no blocking network calls). Do heavy validation
 in `init/2` where a `{stop, Reason}` still surfaces cleanly as a
 5xx to the client.
 
+### Rejection with challenge headers (Privacy Pass, Bearer challenges)
+
+Schemes like Privacy Pass use the `WWW-Authenticate` response
+header to carry the challenge a client must satisfy. Return
+`{reject, Error, ExtraHeaders}` to attach custom response
+headers to the rejection:
+
+```erlang
+accept(#{headers := H, handler_opts := #{token_key := K}}) ->
+    case header(<<"authorization">>, H) of
+        <<"PrivateToken ", TokenBody/binary>> ->
+            case privacy_pass:verify(TokenBody, K) of
+                ok    -> accept;
+                error -> {reject, {other, 401}, challenge_headers(K)}
+            end;
+        _ ->
+            {reject, {other, 401}, challenge_headers(K)}
+    end.
+
+challenge_headers(K) ->
+    [{<<"www-authenticate">>,
+      iolist_to_binary(
+        [<<"PrivateToken challenge=\"">>, base64:encode(challenge()),
+         <<"\", token-key=\"">>, base64:encode(K),
+         <<"\", max-age=3600">>])}].
+```
+
+Caller headers win over library defaults on key collision, so you
+can also override `proxy-status` or replace the default
+`content-type` for a custom error body. Works on all three
+transports (h3 / h2 / h1).
+
+### Authenticated client-side retry
+
+Clients prepend the challenge response on the retry via the
+`request_headers` option on `masque:connect/3`:
+
+```erlang
+{ok, Sess} = masque:connect(ProxyURI, {Host, Port}, #{
+    transports => [h3, h2, h1],
+    request_headers =>
+        [{<<"authorization">>,
+          <<"PrivateToken token=", Token/binary>>}]
+}).
+```
+
+The library strips any caller-supplied headers that would collide
+with its own pseudo-headers (`:method`, `:authority`, `:path`,
+`:protocol`, `capsule-protocol`) and, on h1, rejects CR/LF in any
+value to prevent request-line injection.
+
 ---
 
 ## 7. Capsule protocol

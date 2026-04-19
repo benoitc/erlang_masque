@@ -128,6 +128,14 @@
         %% Tuning forwarded to the pooled owner on cold dials
         %% (`idle_timeout_ms', `max_streams').
         upstream_pool_opts => map(),
+        %% Extra request headers prepended to the CONNECT (or GET +
+        %% Upgrade on h1). Useful for auth schemes that ride on the
+        %% handshake request (`Authorization: PrivateToken token=...',
+        %% proxy-specific metadata). Library-controlled pseudo-headers
+        %% (`:method', `:scheme', `:authority', `:path', `:protocol',
+        %% `capsule-protocol') are not overridable; a duplicate here
+        %% is silently dropped.
+        request_headers => [{binary(), binary()}],
         %% Internal - set by racer, not by callers.
         transport => transport(),
         proxy => {binary(), inet:port_number()},

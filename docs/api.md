@@ -32,6 +32,7 @@ Options for `connect/3`:
 | `mode` | `message \| queue` | `message` | Initial delivery mode. |
 | `upstream_pool` | `boolean()` | `false` | Opt-in connection pooling. When `true`, h2 / h3 attempts share a pooled transport connection keyed by host / port / transport plus a hash of connect-affecting opts (`verify`, `cacerts`, `ssl_opts`, `alpn`). Each tunnel rides a fresh stream on the shared conn. h1 always bypasses the pool (1-tunnel-per-socket). |
 | `upstream_pool_opts` | `map()` | `#{}` | Tuning forwarded to pooled owners on cold dials. Recognised keys: `idle_timeout_ms` (non-neg integer, default 30000), `max_streams` (positive integer or `dynamic`). |
+| `request_headers` | `[{binary(), binary()}]` | `[]` | Extra headers prepended to the CONNECT (or GET+Upgrade on h1) request. Useful for auth schemes that ride on the handshake (e.g. `Authorization: PrivateToken token=...`). Reserved pseudo-headers (`:method`, `:authority`, `:path`, `:protocol`, `capsule-protocol`) are silently dropped. On h1, CR/LF in either key or value is rejected to prevent request-line injection. |
 
 ### listener_opts()
 
@@ -342,10 +343,17 @@ callbacks are optional.
 ### Callbacks
 
 ```erlang
--callback accept(req()) -> accept | {reject, handshake_error()}.
+-callback accept(req()) ->
+    accept
+  | {reject, handshake_error()}
+  | {reject, handshake_error(), ExtraHeaders :: [{binary(), binary()}]}.
 ```
 
-Synchronous accept/reject gate. Runs before the 200 response.
+Synchronous accept/reject gate. Runs before the 200 response. The
+3-tuple form attaches custom response headers to the error (e.g.
+`WWW-Authenticate: PrivateToken ...` for a Privacy Pass
+challenge); caller-supplied headers override the library's defaults
+on key collision.
 
 ```erlang
 -callback init(req(), Opts :: term()) ->

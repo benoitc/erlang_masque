@@ -241,7 +241,9 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
                             spawn_session(Conn, StreamId, Router, Protocol,
                                           HandlerMod, HandlerOpts, Req3);
                         {reject, Reason} ->
-                            reject(Conn, StreamId, Reason)
+                            reject(Conn, StreamId, Reason);
+                        {reject, Reason, Extra} when is_list(Extra) ->
+                            reject(Conn, StreamId, Reason, Extra)
                     end;
                 {error, Reason} ->
                     reject(Conn, StreamId, Reason)
@@ -400,11 +402,14 @@ accept_request(HandlerMod, Req) ->
     end.
 
 reject(Conn, StreamId, Reason) ->
+    reject(Conn, StreamId, Reason, []).
+
+reject(Conn, StreamId, Reason, ExtraHeaders) ->
     masque_metrics:tunnel_rejected(#{reason => Reason}),
     Status = masque_errors:handshake_status(Reason),
     Phrase = masque_errors:status_reason(Reason),
     Body = <<Phrase/binary, "\n">>,
-    Headers = [
+    Base = [
         {<<"content-type">>, <<"text/plain; charset=utf-8">>},
         {<<"content-length">>, integer_to_binary(byte_size(Body))},
         %% RFC 9209 structured field - gives clients a machine-readable
@@ -412,8 +417,19 @@ reject(Conn, StreamId, Reason) ->
         %% recommendation).
         {<<"proxy-status">>, proxy_status_field(Reason)}
     ],
+    Headers = merge_extra_headers(Base, ExtraHeaders),
     ok = quic_h3:send_response(Conn, StreamId, Status, Headers),
     ok = quic_h3:send_data(Conn, StreamId, Body, true).
+
+%% Caller-supplied headers win on collision so apps can override the
+%% proxy-status / content-type defaults. Order: ExtraHeaders first
+%% (caller-visible), then whatever base entries remain.
+merge_extra_headers(Base, []) ->
+    Base;
+merge_extra_headers(Base, Extra) ->
+    Keys = [K || {K, _} <- Extra],
+    Kept = [Pair || {K, _} = Pair <- Base, not lists:member(K, Keys)],
+    Extra ++ Kept.
 
 %% Map MASQUE handshake errors to a minimal Proxy-Status structured
 %% field value. We use `masque' as the proxy identifier and attach an

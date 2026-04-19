@@ -40,6 +40,8 @@
     rx_buf = queue:new() :: queue:queue(binary()),
     rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
     write_closed = false :: boolean(),
+    %% Extra request headers prepended to the CONNECT request.
+    extra_headers = [] :: [{binary(), binary()}],
     %% When set, the conn is owned by a `masque_upstream_owner';
     %% teardown releases the stream back to the pool instead of
     %% closing the conn.
@@ -95,6 +97,8 @@ init({Target, Opts, Owner}) ->
                                 ?MASQUE_DEFAULT_TCP_URI_TEMPLATE),
         transport = Transport,
         mode = Mode,
+        extra_headers = sanitise_extra_headers(
+                          maps:get(request_headers, Opts, [])),
         pool_owner = maps:get(pool_owner, Opts, undefined)
     },
     {ok, connecting, Data,
@@ -369,7 +373,8 @@ transport_close(#data{transport = h2, conn = C}) -> h2:close(C).
 
 request_headers(#data{proxy_host = ProxyHost, proxy_port = ProxyPort,
                       target_host = TargetHost, target_port = TargetPort,
-                      uri_template = Template}) ->
+                      uri_template = Template,
+                      extra_headers = Extra}) ->
     Path = masque_uri:expand(Template, #{
         target_host => TargetHost,
         target_port => TargetPort
@@ -382,7 +387,14 @@ request_headers(#data{proxy_host = ProxyHost, proxy_port = ProxyPort,
         {<<":authority">>, Authority},
         {<<":path">>, Path},
         {<<"capsule-protocol">>, <<"?1">>}
-    ].
+    ] ++ Extra.
+
+sanitise_extra_headers(List) when is_list(List) ->
+    Reserved = [<<":method">>, <<":scheme">>, <<":authority">>,
+                <<":path">>, <<":protocol">>, <<"capsule-protocol">>],
+    [{K, V} || {K, V} <- List,
+               is_binary(K), is_binary(V),
+               not lists:member(K, Reserved)].
 
 %%====================================================================
 %% Rx buffering

@@ -43,6 +43,8 @@
     rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
     cap_buf = <<>> :: binary(),
     max_cap        :: pos_integer(),
+    %% Extra request headers prepended to the CONNECT request.
+    extra_headers = [] :: [{binary(), binary()}],
     %% When set, the conn is owned by a `masque_upstream_owner';
     %% teardown releases the stream back to the pool instead of
     %% closing the conn.
@@ -102,6 +104,8 @@ init({Target, Opts, Owner}) ->
         capsule_proto = maps:get(capsule_protocol, Opts, true),
         mode = Mode,
         max_cap = MaxCap,
+        extra_headers = sanitise_extra_headers(
+                          maps:get(request_headers, Opts, [])),
         pool_owner = maps:get(pool_owner, Opts, undefined)
     },
     {ok, connecting, Data,
@@ -323,7 +327,8 @@ host_to_sni(Opts) ->
 request_headers(#data{proxy_host = ProxyHost, proxy_port = ProxyPort,
                       target_host = TargetHost, target_port = TargetPort,
                       uri_template = Template,
-                      capsule_proto = CapProto}) ->
+                      capsule_proto = CapProto,
+                      extra_headers = Extra}) ->
     Path = masque_uri:expand(Template, #{
         target_host => TargetHost,
         target_port => TargetPort
@@ -335,10 +340,18 @@ request_headers(#data{proxy_host = ProxyHost, proxy_port = ProxyPort,
         {<<":authority">>, Authority},
         {<<":path">>, Path}
     ],
-    case CapProto of
+    WithCap = case CapProto of
         true  -> Base ++ [{<<"capsule-protocol">>, <<"?1">>}];
         false -> Base
-    end.
+    end,
+    WithCap ++ Extra.
+
+sanitise_extra_headers(List) when is_list(List) ->
+    Reserved = [<<":method">>, <<":scheme">>, <<":authority">>,
+                <<":path">>, <<":protocol">>, <<"capsule-protocol">>],
+    [{K, V} || {K, V} <- List,
+               is_binary(K), is_binary(V),
+               not lists:member(K, Reserved)].
 
 %% Outbound: UDP payloads become DATAGRAM capsules whose inner
 %% payload is `ContextId (varint) || UdpBytes'. Oversize payloads are

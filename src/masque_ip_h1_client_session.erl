@@ -51,7 +51,9 @@
     peer_pending = #{} :: #{pos_integer() => true},
     next_req_id = 1   :: pos_integer(),
     assigned = []     :: [masque_ip_capsule:address_entry()],
-    routes   = []     :: [masque_ip_capsule:route_entry()]
+    routes   = []     :: [masque_ip_capsule:route_entry()],
+    %% Extra request headers prepended to the GET+Upgrade request.
+    extra_headers = [] :: [{binary(), binary()}]
 }).
 
 %%====================================================================
@@ -126,7 +128,9 @@ init({{Target, IPProto}, Opts, Owner}) ->
         mode = Mode,
         rx_buf = queue:new(),
         rx_waiters = queue:new(),
-        max_cap = MaxCap
+        max_cap = MaxCap,
+        extra_headers = sanitise_extra_headers(
+                          maps:get(request_headers, Opts, []))
     },
     {ok, connecting, Data,
      [{next_event, internal, {do_handshake, Opts}}]}.
@@ -316,7 +320,8 @@ classify_upgrade_error(timeout)                    -> handshake_timeout;
 classify_upgrade_error(Other)                      -> {upgrade, Other}.
 
 request_headers(#data{template = T, target = Target, ipproto = IPProto,
-                      proxy_host = ProxyHost, proxy_port = ProxyPort}) ->
+                      proxy_host = ProxyHost, proxy_port = ProxyPort,
+                      extra_headers = Extra}) ->
     Url = masque_uri_ip:expand(T, #{target => Target, ipproto => IPProto}),
     {_Scheme, _Authority, Path} = split_url(Url),
     Authority = build_authority(ProxyHost, ProxyPort),
@@ -324,7 +329,17 @@ request_headers(#data{template = T, target = Target, ipproto = IPProto,
         {<<":path">>, Path},
         {<<"host">>, Authority},
         {<<"capsule-protocol">>, <<"?1">>}
-    ].
+    ] ++ Extra.
+
+sanitise_extra_headers(List) when is_list(List) ->
+    Reserved = [<<":path">>, <<"host">>, <<"capsule-protocol">>,
+                <<"upgrade">>, <<"connection">>],
+    [{K, V} || {K, V} <- List,
+               is_binary(K), is_binary(V),
+               not lists:member(lowercase_bin(K), Reserved)].
+
+lowercase_bin(B) when is_binary(B) ->
+    list_to_binary(string:to_lower(binary_to_list(B))).
 
 split_url(<<"https://", Rest/binary>>) ->
     {Auth, Path} = split_authority(Rest),

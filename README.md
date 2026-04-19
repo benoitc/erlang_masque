@@ -49,6 +49,9 @@ are shipped in this library.
 - **[Design](docs/design.md)** - architecture overview, supervision
   tree, client and server request paths, upstream pool internals,
   extension points.
+- **[Relay guide](docs/relay.md)** - end-to-end walkthrough of
+  building an Apple-Private-Relay-shaped ingress + egress app on
+  top of the library.
 - **[API reference](docs/api.md)** - type signatures, option maps,
   handler callbacks, built-in handlers.
 - **[CONNECT-IP guide](docs/connect_ip.md)** - RFC 9484 usage and

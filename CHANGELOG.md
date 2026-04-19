@@ -47,6 +47,18 @@ and the project uses [Semantic Versioning](https://semver.org/).
   so callers with different trust or ALPN stay isolated. h1
   bypasses the pool (1-tunnel-per-socket). Default behaviour is
   unchanged when the flag is absent.
+- Client-side `request_headers` option on `masque:connect/3`.
+  Prepends caller-supplied headers to the CONNECT (or GET+Upgrade
+  on h1) request, so auth schemes that ride on the handshake
+  (Privacy Pass `Authorization: PrivateToken ...`, proxy metadata)
+  have a library-native hook. Reserved pseudo-headers are dropped
+  and CR/LF in h1 values is refused to prevent header injection.
+- Handler-side `{reject, Error, ExtraHeaders}' return form from
+  `accept/1`. Lets an ingress attach challenge headers to rejected
+  handshakes (`WWW-Authenticate: PrivateToken ...`, `Retry-After`,
+  etc.) without leaving the library contract. Caller-supplied
+  headers override the library's defaults on key collision. Works
+  on all three transports.
 
 ### Changed
 

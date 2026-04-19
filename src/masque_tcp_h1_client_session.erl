@@ -41,7 +41,9 @@
     mode           :: message | queue,
     rx_buf = queue:new() :: queue:queue(binary()),
     rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
-    write_closed = false :: boolean()
+    write_closed = false :: boolean(),
+    %% Extra request headers prepended to the CONNECT line.
+    extra_headers = [] :: [{binary(), binary()}]
 }).
 
 %%====================================================================
@@ -97,7 +99,9 @@ init({Target, Opts, Owner}) ->
         target_port = TargetPort,
         proxy_auth = ProxyAuth,
         connect_opts = Opts,
-        mode       = Mode
+        mode       = Mode,
+        extra_headers = sanitise_extra_headers(
+                          maps:get(request_headers, Opts, []))
     },
     %% Defer `do_handshake' until `handshake_await' arrives so the
     %% reply can be delivered synchronously (classic CONNECT is a
@@ -248,17 +252,36 @@ do_connect(Data, Opts) ->
     end.
 
 connect_request(#data{target_host = Host, target_port = Port,
-                       proxy_auth = Auth}) ->
+                       proxy_auth = Auth,
+                       extra_headers = Extra}) ->
     Authority = masque_uri:build_authority(Host, Port),
     AuthLine = case Auth of
         undefined -> <<>>;
         V when is_binary(V) ->
             <<"Proxy-Authorization: ", V/binary, "\r\n">>
     end,
+    ExtraLines = iolist_to_binary(
+                   [[N, <<": ">>, Val, <<"\r\n">>] || {N, Val} <- Extra]),
     <<"CONNECT ", Authority/binary, " HTTP/1.1\r\n",
       "Host: ", Authority/binary, "\r\n",
       AuthLine/binary,
+      ExtraLines/binary,
       "\r\n">>.
+
+sanitise_extra_headers(List) when is_list(List) ->
+    %% Strip CR/LF to prevent header injection on the raw CONNECT
+    %% line. Reserved names (Host, Proxy-Authorization, CONNECT
+    %% request line itself) are dropped so the library stays in
+    %% control of the wire format.
+    Reserved = [<<"host">>, <<"proxy-authorization">>],
+    [{K, V} || {K, V} <- List,
+               is_binary(K), is_binary(V),
+               binary:match(K, [<<"\r">>, <<"\n">>]) =:= nomatch,
+               binary:match(V, [<<"\r">>, <<"\n">>]) =:= nomatch,
+               not lists:member(lowercase_bin(K), Reserved)].
+
+lowercase_bin(B) when is_binary(B) ->
+    list_to_binary(string:to_lower(binary_to_list(B))).
 
 %% Read bytes until we have a full status line + headers (CRLFCRLF).
 %% Returns `{ok, StatusCode, Phrase, Leftover}' where Leftover is any
