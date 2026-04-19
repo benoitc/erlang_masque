@@ -23,6 +23,7 @@
          handshake_rejected_no_capsule_protocol/1,
          handshake_rejected_wrong_upgrade/1,
          handshake_rejected_no_host_header/1,
+         init_handler_stop_produces_502_not_101/1,
          drain_flag_rejects_new_tunnels/1,
          connect_via_masque_facade/1,
          one_tunnel_per_connection/1]).
@@ -37,6 +38,7 @@ all() ->
      handshake_rejected_no_capsule_protocol,
      handshake_rejected_wrong_upgrade,
      handshake_rejected_no_host_header,
+     init_handler_stop_produces_502_not_101,
      drain_flag_rejects_new_tunnels,
      connect_via_masque_facade,
      one_tunnel_per_connection].
@@ -211,6 +213,42 @@ handshake_rejected_no_host_header(Config) ->
                                       [{<<"connection">>, <<"Upgrade">>},
                                        {<<"upgrade">>, <<"connect-udp">>},
                                        {<<"capsule-protocol">>, <<"?1">>}])).
+
+init_handler_stop_produces_502_not_101(Config) ->
+    %% A handler that refuses in `init/2' must reach the client as a
+    %% 502 response on the un-upgraded connection, not as a 101 +
+    %% immediate close. Stand up a fresh listener just for this case
+    %% so the stop-handler does not affect the shared keeper.
+    Certs = ?config(certs, Config),
+    Name = list_to_atom("masque_h1_stop_init_" ++
+                        integer_to_list(erlang:unique_integer([positive]))),
+    Opts = #{
+        port => 0,
+        cert => maps:get(cert_file, Certs),
+        key  => maps:get(key_file, Certs),
+        handler => masque_stop_init_handler
+    },
+    Parent = self(),
+    K = erlang:spawn(fun() ->
+        case masque:start_listener_h1(Name, Opts) of
+            {ok, R} -> Parent ! {self(), started, h1:server_port(R)},
+                       receive stop -> _ = masque:stop_listener_h1(Name) end;
+            {error, E} -> Parent ! {self(), failed, E}
+        end
+    end),
+    Port = receive {K, started, P} -> P after 5000 -> ct:fail(keeper) end,
+    try
+        Status = direct_request(Port, <<"GET">>,
+                                  <<"/.well-known/masque/udp/127.0.0.1/5353/">>,
+                                  [{<<"host">>, <<"localhost">>},
+                                   {<<"connection">>, <<"Upgrade">>},
+                                   {<<"upgrade">>, <<"connect-udp">>},
+                                   {<<"capsule-protocol">>, <<"?1">>}]),
+        ?assert(Status >= 400 andalso Status < 600,
+                "expected a reject status, got " ++ integer_to_list(Status))
+    after
+        K ! stop
+    end.
 
 drain_flag_rejects_new_tunnels(Config) ->
     Name = ?config(server_name, Config),

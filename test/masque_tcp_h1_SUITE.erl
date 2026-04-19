@@ -23,7 +23,8 @@
          non_2xx_surfaces_on_client/1,
          target_fin_closes_tunnel/1,
          connect_host_mismatch_returns_400/1,
-         connect_host_missing_returns_400/1]).
+         connect_host_missing_returns_400/1,
+         handshake_deadline_is_absolute/1]).
 
 all() ->
     [echo_bytes,
@@ -34,7 +35,8 @@ all() ->
      non_2xx_surfaces_on_client,
      target_fin_closes_tunnel,
      connect_host_mismatch_returns_400,
-     connect_host_missing_returns_400].
+     connect_host_missing_returns_400,
+     handshake_deadline_is_absolute].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(masque),
@@ -243,6 +245,73 @@ non_2xx_surfaces_on_client(Config) ->
             ok;
         Other ->
             ct:fail({expected_non_2xx, Other})
+    end.
+
+handshake_deadline_is_absolute(Config) ->
+    %% Drip one byte every 60 ms. The old per-recv timeout (reset on
+    %% each byte) would let this run past any caller deadline; the
+    %% monotonic-deadline fix must abort close to the declared 300 ms.
+    Ctx = ?config(ctx, Config),
+    {DripPort, DripKeeper} = start_drip_server(Ctx, 60),
+    try
+        Start = erlang:monotonic_time(millisecond),
+        Result = do_connect(DripPort, {<<"127.0.0.1">>, 1}, #{timeout => 300}),
+        Elapsed = erlang:monotonic_time(millisecond) - Start,
+        ?assertMatch({error, _}, Result),
+        %% Allow slop for scheduler jitter but catch the unbounded
+        %% regression: old behaviour would complete the drip (~8 s
+        %% for the 133-byte 501 response) or hit headers_too_large.
+        ?assert(Elapsed < 1500,
+                io_lib:format("handshake elapsed ~p ms, expected < 1500",
+                               [Elapsed]))
+    after
+        exit(DripKeeper, shutdown)
+    end.
+
+start_drip_server(Ctx, GapMs) ->
+    Parent = self(),
+    Pid = erlang:spawn(fun() ->
+        {ok, LSock} = ssl:listen(0,
+            [binary, {active, false}, {reuseaddr, true},
+             {certfile, maps:get(cert_file, Ctx)},
+             {keyfile, maps:get(key_file, Ctx)},
+             {alpn_preferred_protocols, [<<"http/1.1">>]}]),
+        {ok, {_, Port}} = ssl:sockname(LSock),
+        Parent ! {self(), port, Port},
+        drip_accept_loop(LSock, GapMs)
+    end),
+    Port = receive {Pid, port, P} -> P after 2000 -> ct:fail(drip) end,
+    {Port, Pid}.
+
+drip_accept_loop(LSock, GapMs) ->
+    case ssl:transport_accept(LSock, 5000) of
+        {ok, Transport} ->
+            case ssl:handshake(Transport, 5000) of
+                {ok, TLS} ->
+                    _ = spawn(fun() -> drip_write(TLS, GapMs) end),
+                    drip_accept_loop(LSock, GapMs);
+                _ ->
+                    drip_accept_loop(LSock, GapMs)
+            end;
+        {error, timeout} ->
+            drip_accept_loop(LSock, GapMs);
+        _ ->
+            ok
+    end.
+
+drip_write(Sock, GapMs) ->
+    %% Read request then slowly drip a 501 response. Never reach the
+    %% CRLFCRLF terminator so the client has to fall back on its
+    %% deadline, not a successful parse.
+    Resp = <<"HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nX-Slow: yes">>,
+    _ = ssl:recv(Sock, 0, 2000),
+    drip_bytes(Sock, Resp, GapMs).
+
+drip_bytes(_Sock, <<>>, _) -> ok;
+drip_bytes(Sock, <<B, Rest/binary>>, GapMs) ->
+    case ssl:send(Sock, <<B>>) of
+        ok    -> timer:sleep(GapMs), drip_bytes(Sock, Rest, GapMs);
+        _     -> ok
     end.
 
 connect_host_mismatch_returns_400(Config) ->

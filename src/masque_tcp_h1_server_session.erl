@@ -64,14 +64,17 @@ init(#{conn := Conn, stream_id := StreamId,
                         {ok, State1} ->
                             %% Any bytes read past the CRLF blank line
                             %% belong to the tunnel - feed them to the
-                            %% handler before arming active-once.
-                            State2 = seed_handler(Buffer, State1),
-                            case is_record(State2, state) of
-                                true ->
+                            %% handler before arming active-once. If
+                            %% the handler crashes on that first chunk,
+                            %% close the socket before stopping so the
+                            %% raw TLS session does not leak.
+                            case seed_handler(Buffer, State1) of
+                                {stop, Reason} ->
+                                    _ = close_socket(State1),
+                                    {stop, Reason};
+                                State2 ->
                                     _ = arm_once(State2),
-                                    {ok, State2};
-                                false ->
-                                    State2
+                                    {ok, State2}
                             end;
                         {stop, Reason, _S} ->
                             _ = close_socket(State0),

@@ -103,7 +103,12 @@ handle_attempt_ready(Pid, Transport, Sess, S) ->
             cleanup_others(Pid, S),
             {ok, Sess};
         {error, Reason} ->
-            %% Session is dead (killed by transfer_owner).
+            %% The winner died between `attempt_ready' and
+            %% `set_owner'. Clean up every attempt (including losers
+            %% that have not reported yet) and keep racing what's
+            %% pending; otherwise a lost winner would strand the
+            %% other attempts with no-one to reply `lose' to them.
+            _ = catch exit(Sess, kill),
             handle_attempt_failed(Pid, Transport, Reason, S)
     end.
 
@@ -215,12 +220,14 @@ transport_mod(h1, Opts) ->
         tcp -> masque_tcp_h1_client_session
     end.
 
+%% The session is in its `open' state when the winner reports, so
+%% `set_owner' is a trivial synchronous hop; a long timeout here only
+%% hides real bugs. 500 ms is comfortably above any reasonable
+%% scheduler hiccup on a healthy node.
 transfer_owner(_Transport, Pid, Owner) ->
-    case (catch gen_statem:call(Pid, {set_owner, Owner}, 2000)) of
+    case (catch gen_statem:call(Pid, {set_owner, Owner}, 500)) of
         ok -> ok;
-        _  ->
-            catch exit(Pid, kill),
-            {error, owner_transfer_failed}
+        _  -> {error, owner_transfer_failed}
     end.
 
 notify_result(Pid, Tag) ->

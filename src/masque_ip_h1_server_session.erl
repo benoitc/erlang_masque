@@ -51,12 +51,15 @@ init(#{conn := Conn, stream_id := StreamId,
     process_flag(trap_exit, true),
     MaxCap = maps:get(max_capsule_size, HOpts,
                       ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE),
-    case h1:accept_upgrade(Conn, StreamId,
-                            [{<<"capsule-protocol">>, <<"?1">>}]) of
-        {ok, Socket, Buffer} ->
-            Transport = socket_transport(Socket),
-            case init_handler(Handler, Req, HOpts) of
-                {ok, HState, Actions} ->
+    %% init_handler before accept_upgrade: a handler rejection (e.g.
+    %% address pool exhausted) becomes a 502 on the as-yet-unupgraded
+    %% connection, not a "101 + immediate close".
+    case init_handler(Handler, Req, HOpts) of
+        {ok, HState, Actions} ->
+            case h1:accept_upgrade(Conn, StreamId,
+                                    [{<<"capsule-protocol">>, <<"?1">>}]) of
+                {ok, Socket, Buffer} ->
+                    Transport = socket_transport(Socket),
                     State0 = #state{
                         transport = Transport,
                         socket    = Socket,
@@ -74,12 +77,13 @@ init(#{conn := Conn, stream_id := StreamId,
                             _ = close_socket(State0),
                             {stop, Reason}
                     end;
-                {stop, Reason} ->
-                    _ = close_transport(Transport, Socket),
-                    {stop, Reason}
+                {error, Reason} ->
+                    try_callback(Handler, terminate,
+                                  [{accept_upgrade, Reason}, HState]),
+                    {stop, {accept_upgrade, Reason}}
             end;
-        {error, Reason} ->
-            {stop, {accept_upgrade, Reason}}
+        {stop, Reason} ->
+            {stop, Reason}
     end.
 
 handle_call(_Req, _From, S) ->

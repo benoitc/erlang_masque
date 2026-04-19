@@ -254,28 +254,41 @@ connect_request(#data{target_host = Host, target_port = Port,
       "\r\n">>.
 
 %% Read bytes until we have a full status line + headers (CRLFCRLF).
-%% Returns `{ok, StatusCode, Leftover}' where Leftover is any extra
-%% bytes past the blank line (the tunnel's initial inbound payload).
+%% Returns `{ok, StatusCode, Phrase, Leftover}' where Leftover is any
+%% extra bytes past the blank line (the tunnel's initial inbound
+%% payload). Timeout is an absolute budget: an attacker trickling
+%% bytes cannot stretch the handshake past the caller's deadline.
 read_status_line(Socket, Timeout) ->
-    read_headers_loop(Socket, <<>>, Timeout).
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    read_headers_loop(Socket, <<>>, Deadline).
 
-read_headers_loop(_Socket, Acc, _Timeout) when byte_size(Acc) > 64 * 1024 ->
+read_headers_loop(_Socket, Acc, _Deadline) when byte_size(Acc) > 64 * 1024 ->
     {error, headers_too_large};
-read_headers_loop(Socket, Acc, Timeout) ->
-    case ssl:recv(Socket, 0, Timeout) of
-        {ok, Bin} ->
-            New = <<Acc/binary, Bin/binary>>,
-            case binary:split(New, <<"\r\n\r\n">>) of
-                [HdrBlock, Rest] ->
-                    case parse_status(HdrBlock) of
-                        {ok, Code, Phrase} -> {ok, Code, Phrase, Rest};
-                        Err                -> Err
+read_headers_loop(Socket, Acc, Deadline) ->
+    Remaining = Deadline - erlang:monotonic_time(millisecond),
+    case Remaining =< 0 of
+        true ->
+            {error, handshake_timeout};
+        false ->
+            case ssl:recv(Socket, 0, Remaining) of
+                {ok, Bin} ->
+                    New = <<Acc/binary, Bin/binary>>,
+                    case binary:split(New, <<"\r\n\r\n">>) of
+                        [HdrBlock, Rest] ->
+                            case parse_status(HdrBlock) of
+                                {ok, Code, Phrase} ->
+                                    {ok, Code, Phrase, Rest};
+                                Err ->
+                                    Err
+                            end;
+                        [_] ->
+                            read_headers_loop(Socket, New, Deadline)
                     end;
-                [_] ->
-                    read_headers_loop(Socket, New, Timeout)
-            end;
-        {error, Reason} ->
-            {error, {recv, Reason}}
+                {error, timeout} ->
+                    {error, handshake_timeout};
+                {error, Reason} ->
+                    {error, {recv, Reason}}
+            end
     end.
 
 parse_status(HdrBlock) ->

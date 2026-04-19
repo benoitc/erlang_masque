@@ -47,15 +47,16 @@ init(#{conn := Conn, stream_id := StreamId,
     process_flag(trap_exit, true),
     MaxCap = maps:get(max_capsule_size, HOpts,
                       ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE),
-    %% Take the raw socket over from the h1_connection. This also
-    %% writes the `101 Switching Protocols' response with the
-    %% `capsule-protocol: ?1' header.
-    case h1:accept_upgrade(Conn, StreamId,
-                            [{<<"capsule-protocol">>, <<"?1">>}]) of
-        {ok, Socket, Buffer} ->
-            Transport = socket_transport(Socket),
-            case init_handler(Handler, Req, HOpts) of
-                {ok, HState, Actions} ->
+    %% Run the handler's init/2 first so a rejection surfaces as a
+    %% clean 502 on the as-yet-unupgraded h1 connection. Only then
+    %% call accept_upgrade, which writes 101 and transfers socket
+    %% ownership to this process.
+    case init_handler(Handler, Req, HOpts) of
+        {ok, HState, Actions} ->
+            case h1:accept_upgrade(Conn, StreamId,
+                                    [{<<"capsule-protocol">>, <<"?1">>}]) of
+                {ok, Socket, Buffer} ->
+                    Transport = socket_transport(Socket),
                     State0 = #state{
                         transport = Transport,
                         socket    = Socket,
@@ -74,12 +75,13 @@ init(#{conn := Conn, stream_id := StreamId,
                             _ = close_socket(State0),
                             {stop, Reason}
                     end;
-                {stop, Reason} ->
-                    _ = close_transport(Transport, Socket),
-                    {stop, Reason}
+                {error, Reason} ->
+                    try_callback(Handler, terminate,
+                                  [{accept_upgrade, Reason}, HState]),
+                    {stop, {accept_upgrade, Reason}}
             end;
-        {error, Reason} ->
-            {stop, {accept_upgrade, Reason}}
+        {stop, Reason} ->
+            {stop, Reason}
     end.
 
 handle_call(_Req, _From, S) ->
