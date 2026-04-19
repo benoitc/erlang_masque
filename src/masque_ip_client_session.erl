@@ -64,7 +64,11 @@
     next_req_id = 1   :: pos_integer(),
     %% Most recent server-advertised state.
     assigned = []     :: [masque_ip_capsule:address_entry()],
-    routes   = []     :: [masque_ip_capsule:route_entry()]
+    routes   = []     :: [masque_ip_capsule:route_entry()],
+    %% When set, the conn is owned by a `masque_upstream_owner';
+    %% teardown releases the stream back to the pool instead of
+    %% closing the conn.
+    pool_owner        :: pid() | undefined
 }).
 
 %%====================================================================
@@ -150,7 +154,8 @@ init({{Target, IPProto}, Opts, Owner}) ->
         mode = Mode,
         rx_buf = queue:new(),
         rx_waiters = queue:new(),
-        max_cap = MaxCap
+        max_cap = MaxCap,
+        pool_owner = maps:get(pool_owner, Opts, undefined)
     },
     {ok, connecting, Data,
      [{next_event, internal, {do_handshake, Opts}}]}.
@@ -308,7 +313,7 @@ closing(internal, do_close, Data) ->
         ok -> ok;
         _  -> catch transport_cancel(Data)
     end,
-    _ = (catch transport_close(Data)),
+    _ = session_teardown(Data),
     {stop, normal, Data};
 closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
@@ -317,7 +322,20 @@ terminate(_Reason, _State, #data{conn = undefined} = D) ->
     cancel_all_waiters(D);
 terminate(_Reason, _State, Data) ->
     cancel_all_waiters(Data),
+    _ = session_teardown(Data),
+    ok.
+
+%% Close path abstraction: release the pooled stream back to the
+%% owner, or shut down the owned transport connection.
+session_teardown(#data{pool_owner = Pool, stream_id = StreamId})
+  when is_pid(Pool), is_integer(StreamId) ->
+    masque_upstream_owner:release_stream(Pool, StreamId);
+session_teardown(#data{pool_owner = Pool}) when is_pid(Pool) ->
+    ok;
+session_teardown(#data{conn = Conn} = Data) when is_pid(Conn) ->
     _ = (catch transport_close(Data)),
+    ok;
+session_teardown(_) ->
     ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
@@ -327,6 +345,18 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %% Transport dispatch
 %%====================================================================
 
+do_connect(#data{pool_owner = PoolOwner} = Data, _Opts)
+  when is_pid(PoolOwner) ->
+    ReqHeaders = request_headers(Data),
+    ReqOpts = case Data#data.transport of
+                  h3 -> #{end_stream => false};
+                  h2 -> #{protocol => ?MASQUE_CONNECT_IP_PROTOCOL}
+              end,
+    case masque_upstream_owner:acquire_stream(
+            PoolOwner, ReqHeaders, self(), ReqOpts) of
+        {ok, StreamId, Conn} -> {ok, Conn, StreamId};
+        {error, _} = Err     -> Err
+    end;
 do_connect(#data{transport = h3} = Data, Opts) ->
     ConnOpts = maps:with([verify, cacerts], Opts),
     ConnOpts1 = ConnOpts#{
@@ -700,8 +730,16 @@ header_value(Name, Headers) ->
 %% Misc
 %%====================================================================
 
-client_stream_abort(Reason, Data) ->
-    _ = (catch transport_cancel(Data)),
+client_stream_abort(Reason,
+                    #data{pool_owner = Pool,
+                          stream_id  = StreamId} = Data) ->
+    case is_pid(Pool) of
+        true ->
+            masque_upstream_owner:release_stream(Pool, StreamId);
+        false ->
+            _ = (catch transport_cancel(Data)),
+            ok
+    end,
     _ = notify_owner_closed(Reason, Data),
     {stop, Reason, Data}.
 

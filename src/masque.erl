@@ -119,6 +119,15 @@
         ssl_opts => [ssl:tls_client_option()],
         %% CONNECT-IP: local send-side MTU (1280..65535, default 1500).
         mtu => 1280..65535,
+        %% Opt-in connection pooling. When `true', h2 / h3 attempts
+        %% share a pooled upstream transport connection keyed by
+        %% host/port/transport + a hash of connect-affecting opts
+        %% (verify, cacerts, ssl_opts, alpn). h1 always bypasses the
+        %% pool. Default `false'.
+        upstream_pool => boolean(),
+        %% Tuning forwarded to the pooled owner on cold dials
+        %% (`idle_timeout_ms', `max_streams').
+        upstream_pool_opts => map(),
         %% Internal - set by racer, not by callers.
         transport => transport(),
         proxy => {binary(), inet:port_number()},
@@ -251,14 +260,29 @@ check_capsule_protocol(_, Opts) ->
     {ok, Opts}.
 
 connect_via([h3], Target, Opts, Owner) ->
-    dial_single(session_mod(Opts, h3), Target, Opts#{transport => h3}, Owner);
+    dial_single_or_pool(session_mod(Opts, h3), h3, Target, Opts, Owner);
 connect_via([h2], Target, Opts, Owner) ->
-    dial_single(session_mod(Opts, h2), Target, Opts#{transport => h2}, Owner);
+    dial_single_or_pool(session_mod(Opts, h2), h2, Target, Opts, Owner);
 connect_via([h1], Target, Opts, Owner) ->
     dial_single(session_mod(Opts, h1), Target, Opts#{transport => h1}, Owner);
 connect_via(Transports, Target, Opts, Owner)
   when length(Transports) >= 2 ->
     masque_racer:race(Transports, Target, Opts, Owner).
+
+%% Single-transport dial that honours `upstream_pool => true' the
+%% same way the racer does; h1 is pool-bypassed so it keeps the
+%% plain dial_single path.
+dial_single_or_pool(Mod, Transport,  Target,
+                    #{upstream_pool := true} = Opts, Owner)
+  when Transport =:= h2; Transport =:= h3 ->
+    case masque_racer:checkout_pool(Transport, Opts) of
+        {ok, Opts1} ->
+            dial_single(Mod, Target, Opts1#{transport => Transport}, Owner);
+        {error, _} = Err ->
+            Err
+    end;
+dial_single_or_pool(Mod, Transport, Target, Opts, Owner) ->
+    dial_single(Mod, Target, Opts#{transport => Transport}, Owner).
 
 session_mod(Opts, h3) ->
     case maps:get(protocol, Opts, udp) of

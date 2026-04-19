@@ -37,6 +37,16 @@ and the project uses [Semantic Versioning](https://semver.org/).
   (ingress + egress on loopback, self-signed certs, all three
   transports, UDP + TCP round-trip helpers). Demonstrates the
   Apple-Private-Relay shape as a 300-line reference.
+- Opt-in upstream connection pooling for h2 / h3 MASQUE tunnels.
+  Pass `upstream_pool => true` in `connect_opts()` (or in
+  `upstream_opts` on `masque_chain_handler`) to share one pooled
+  transport connection across many tunnels; each tunnel rides a
+  fresh stream. h3 conns are always opened datagram-capable so
+  CONNECT-UDP / -TCP / -IP can coexist on a single QUIC owner.
+  Pool keys fingerprint `verify` / `cacerts` / `ssl_opts` / `alpn`
+  so callers with different trust or ALPN stay isolated. h1
+  bypasses the pool (1-tunnel-per-socket). Default behaviour is
+  unchanged when the flag is absent.
 
 ### Changed
 

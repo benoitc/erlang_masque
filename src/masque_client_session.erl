@@ -54,7 +54,11 @@
     %% Incoming capsule bytes buffered from stream body data.
     cap_buf = <<>> :: binary(),
     %% Ceiling on `cap_buf' (resets the stream with H3_MESSAGE_ERROR).
-    max_cap :: pos_integer()
+    max_cap :: pos_integer(),
+    %% When set, the conn is owned by a `masque_upstream_owner';
+    %% teardown releases the stream back to the pool instead of
+    %% closing the conn.
+    pool_owner :: pid() | undefined
 }).
 
 %%====================================================================
@@ -113,7 +117,8 @@ init({Target, Opts, Owner}) ->
                                 ?MASQUE_DEFAULT_URI_TEMPLATE),
         capsule_proto = maps:get(capsule_protocol, Opts, true),
         mode = Mode,
-        max_cap = MaxCap
+        max_cap = MaxCap,
+        pool_owner = maps:get(pool_owner, Opts, undefined)
     },
     {ok, connecting, Data,
      [{next_event, internal, {do_handshake, Opts}}]}.
@@ -340,8 +345,17 @@ drain_client_capsules(Buf, Fin, #data{owner = Owner} = Data) ->
             client_stream_abort(malformed_capsule, Data)
     end.
 
-client_stream_abort(Reason, #data{conn = Conn, stream_id = StreamId} = Data) ->
-    _ = (catch quic_h3:cancel(Conn, StreamId, ?MASQUE_H3_MESSAGE_ERROR)),
+client_stream_abort(Reason,
+                    #data{conn = Conn, stream_id = StreamId,
+                          pool_owner = Pool} = Data) ->
+    case is_pid(Pool) of
+        true ->
+            masque_upstream_owner:release_stream(Pool, StreamId);
+        false ->
+            _ = (catch quic_h3:cancel(Conn, StreamId,
+                                       ?MASQUE_H3_MESSAGE_ERROR)),
+            ok
+    end,
     _ = notify_owner_closed(Reason, Data),
     {stop, Reason, Data}.
 
@@ -364,16 +378,29 @@ closing(internal, do_close, #data{conn = Conn, stream_id = StreamId} = Data) ->
         ok  -> ok;
         _   -> catch quic_h3:cancel(Conn, StreamId)
     end,
-    _ = (catch quic_h3:close(Conn)),
+    _ = session_teardown(Data),
     {stop, normal, Data};
 closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
 
 terminate(_Reason, _State, #data{conn = undefined} = D) ->
     cancel_all_waiters(D);
-terminate(_Reason, _State, #data{conn = Conn} = D) ->
+terminate(_Reason, _State, #data{} = D) ->
     cancel_all_waiters(D),
+    _ = session_teardown(D),
+    ok.
+
+%% Close path abstraction: release the pooled stream back to the
+%% owner, or shut down the owned quic_h3 connection.
+session_teardown(#data{pool_owner = Pool, stream_id = StreamId})
+  when is_pid(Pool), is_integer(StreamId) ->
+    masque_upstream_owner:release_stream(Pool, StreamId);
+session_teardown(#data{pool_owner = Pool}) when is_pid(Pool) ->
+    ok;
+session_teardown(#data{conn = Conn}) when is_pid(Conn) ->
     _ = (catch quic_h3:close(Conn)),
+    ok;
+session_teardown(_) ->
     ok.
 
 cancel_all_waiters(#data{rx_waiters = Ws}) ->
@@ -391,6 +418,14 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %% Internal
 %%====================================================================
 
+do_connect(#data{pool_owner = PoolOwner} = Data, _Opts)
+  when is_pid(PoolOwner) ->
+    ReqHeaders = request_headers(Data),
+    case masque_upstream_owner:acquire_stream(
+            PoolOwner, ReqHeaders, self(), #{end_stream => false}) of
+        {ok, StreamId, Conn} -> {ok, Conn, StreamId};
+        {error, _} = Err     -> Err
+    end;
 do_connect(Data, Opts) ->
     ConnOpts0 = maps:with([verify, cacerts], Opts),
     ConnOpts = ConnOpts0#{

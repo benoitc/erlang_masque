@@ -35,6 +35,9 @@ init([]) ->
           type  => supervisor},
         #{id    => masque_h1_tcp_session_sup,
           start => {masque_h1_session_sup, start_link_tcp, []},
-          type  => supervisor}
+          type  => supervisor},
+        #{id    => masque_upstream_pool,
+          start => {masque_upstream_pool, start_link, []},
+          type  => worker}
     ],
     {ok, {SupFlags, Children}}.

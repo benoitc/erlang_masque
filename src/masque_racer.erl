@@ -32,7 +32,7 @@
 %%% mailbox.
 -module(masque_racer).
 
--export([race/4]).
+-export([race/4, checkout_pool/2]).
 
 -include("masque.hrl").
 
@@ -165,6 +165,15 @@ spawn_attempt(Racer, Transport, Target, Opts) ->
 -spec attempt(pid(), masque:transport(), masque:target(), map()) -> ok.
 attempt(Racer, Transport, Target, Opts) ->
     Mod = resolve_mod(Transport, Opts),
+    case maybe_inject_pool_owner(Transport, Opts) of
+        {error, Reason} ->
+            Racer ! {attempt_failed, self(), Transport, Reason},
+            ok;
+        {ok, Opts1} ->
+            start_attempt(Racer, Transport, Target, Opts1, Mod)
+    end.
+
+start_attempt(Racer, Transport, Target, Opts, Mod) ->
     case Mod:start(Target, Opts#{transport => Transport}, self()) of
         {ok, Pid} ->
             MRef = erlang:monitor(process, Pid),
@@ -189,6 +198,67 @@ attempt(Racer, Transport, Target, Opts) ->
             Racer ! {attempt_failed, self(), Transport, Reason},
             ok
     end.
+
+%% If `upstream_pool => true' and the transport supports pooling
+%% (h2, h3), check out a shared owner from the pool. h1 bypasses
+%% the pool (1-tunnel-per-socket).
+maybe_inject_pool_owner(Transport, #{upstream_pool := true} = Opts)
+  when Transport =:= h2; Transport =:= h3 ->
+    checkout_pool(Transport, Opts);
+maybe_inject_pool_owner(_Transport, Opts) ->
+    {ok, Opts}.
+
+%% Exposed to `masque:connect/3' so the single-transport path can
+%% honour `upstream_pool => true' without going through the racer.
+-spec checkout_pool(masque:transport(), map()) ->
+    {ok, map()} | {error, term()}.
+checkout_pool(Transport, Opts) when Transport =:= h2; Transport =:= h3 ->
+    case pool_fingerprint(Transport, Opts) of
+        {ok, FP, PoolOpts} ->
+            case masque_upstream_pool:checkout(FP, PoolOpts) of
+                {ok, Owner}      -> {ok, Opts#{pool_owner => Owner}};
+                {error, _} = Err -> Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+pool_fingerprint(Transport, Opts) ->
+    case maps:get(proxy, Opts, undefined) of
+        {Host, Port} ->
+            PoolTransport = case Transport of
+                                h3 -> quic_h3;
+                                h2 -> h2
+                            end,
+            FP = masque_upstream_pool:fingerprint(
+                    Host, Port, PoolTransport, Opts),
+            PoolOpts = maps:merge(
+                         #{transport     => PoolTransport,
+                           host          => Host,
+                           port          => Port,
+                           connect_opts  => pool_connect_opts(Transport, Opts)},
+                         maps:get(upstream_pool_opts, Opts, #{})),
+            {ok, FP, PoolOpts};
+        _ ->
+            {error, no_proxy}
+    end.
+
+pool_connect_opts(h3, Opts) ->
+    Base = maps:with([verify, cacerts], Opts),
+    Base#{
+        quic_opts => #{
+            alpn => maps:get(alpn, Opts, [<<"h3">>]),
+            max_datagram_frame_size => 65535
+        }
+    };
+pool_connect_opts(h2, Opts) ->
+    SSLOpts = maps:get(ssl_opts, Opts, []),
+    #{
+        transport => ssl,
+        ssl_opts  => SSLOpts,
+        verify    => maps:get(verify, Opts, verify_none),
+        timeout   => maps:get(timeout, Opts, 5000)
+    }.
 
 %% Test hook: allow eunit to inject fake session modules without
 %% wiring real network transports.
