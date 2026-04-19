@@ -87,6 +87,7 @@ init({Target, Opts, Owner}) ->
     MRef = erlang:monitor(process, Owner),
     Mode = maps:get(mode, Opts, message),
     ProxyAuth = maps:get(proxy_authorization, Opts, undefined),
+    ok = validate_proxy_auth(ProxyAuth),
     Data = #data{
         owner      = Owner,
         owner_ref  = MRef,
@@ -214,7 +215,7 @@ code_change(_OldVsn, State, Data, _Extra) ->
 
 do_connect(Data, Opts) ->
     Timeout = maps:get(timeout, Opts, 5000),
-    SSLOpts = build_ssl_opts(Data, Opts),
+    SSLOpts = masque_tls:client_opts(Data#data.proxy_host, Opts),
     case ssl:connect(binary_to_list(Data#data.proxy_host),
                      Data#data.proxy_port, SSLOpts, Timeout) of
         {ok, Socket} ->
@@ -237,22 +238,6 @@ do_connect(Data, Opts) ->
             end;
         {error, Reason} ->
             {error, {connect, Reason}}
-    end.
-
-build_ssl_opts(Data, Opts) ->
-    UserOpts = maps:get(ssl_opts, Opts, []),
-    Base = [
-        binary,
-        {active, false},
-        {alpn_advertised_protocols, [<<"http/1.1">>]},
-        {verify, maps:get(verify, Opts, verify_none)}
-    ] ++ sni_opt(Data#data.proxy_host),
-    Base ++ UserOpts.
-
-sni_opt(Host) ->
-    case inet:parse_address(binary_to_list(Host)) of
-        {ok, _} -> [];
-        _       -> [{server_name_indication, binary_to_list(Host)}]
     end.
 
 connect_request(#data{target_host = Host, target_port = Port,
@@ -381,3 +366,16 @@ session_info(#data{target_host = H, target_port = P,
 to_bin(X) when is_binary(X) -> X;
 to_bin(X) when is_list(X)   -> list_to_binary(X);
 to_bin(X) when is_atom(X)   -> atom_to_binary(X, utf8).
+
+%% Defence in depth: `masque:validate_connect_opts/2' already rejects
+%% CRLF here, but callers that bypass the facade should not be able to
+%% inject headers either.
+validate_proxy_auth(undefined) ->
+    ok;
+validate_proxy_auth(V) when is_binary(V) ->
+    case binary:match(V, [<<"\r">>, <<"\n">>]) of
+        nomatch -> ok;
+        _       -> erlang:error({invalid_opts, proxy_authorization_contains_crlf})
+    end;
+validate_proxy_auth(_) ->
+    erlang:error({invalid_opts, proxy_authorization_must_be_binary}).

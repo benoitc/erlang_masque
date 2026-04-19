@@ -30,8 +30,7 @@
 -include("masque_ip.hrl").
 
 -dialyzer({nowarn_function, [do_connect/2, do_upgrade/3, request_headers/1,
-                              build_authority/2, is_ipv6_literal/1,
-                              build_ssl_opts/2]}).
+                              build_authority/2, is_ipv6_literal/1]}).
 
 -record(data, {
     owner            :: pid(),
@@ -272,7 +271,7 @@ code_change(_OldVsn, State, Data, _Extra) ->
 
 do_connect(Data, Opts) ->
     Timeout = maps:get(timeout, Opts, 5000),
-    SSLOpts = build_ssl_opts(Data, Opts),
+    SSLOpts = masque_tls:client_opts(Data#data.proxy_host, Opts),
     ConnOpts = #{
         transport => ssl,
         ssl_opts  => SSLOpts,
@@ -313,15 +312,6 @@ do_upgrade(Conn, Data, Timeout) ->
 classify_upgrade_error({http_status, Code, _} = R) -> {handshake_rejected, Code, R};
 classify_upgrade_error(timeout)                    -> handshake_timeout;
 classify_upgrade_error(Other)                      -> {upgrade, Other}.
-
-build_ssl_opts(Data, Opts) ->
-    Base = [
-        {server_name_indication, binary_to_list(Data#data.proxy_host)},
-        {alpn_advertised_protocols, [<<"http/1.1">>]},
-        {verify, maps:get(verify, Opts, verify_none)}
-    ],
-    UserOpts = maps:get(ssl_opts, Opts, []),
-    Base ++ UserOpts.
 
 request_headers(#data{template = T, target = Target, ipproto = IPProto,
                       proxy_host = ProxyHost, proxy_port = ProxyPort}) ->

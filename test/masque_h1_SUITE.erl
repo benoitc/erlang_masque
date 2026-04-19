@@ -22,6 +22,7 @@
          handshake_rejected_wrong_method/1,
          handshake_rejected_no_capsule_protocol/1,
          handshake_rejected_wrong_upgrade/1,
+         handshake_rejected_no_host_header/1,
          drain_flag_rejects_new_tunnels/1,
          connect_via_masque_facade/1,
          one_tunnel_per_connection/1]).
@@ -35,6 +36,7 @@ all() ->
      handshake_rejected_wrong_method,
      handshake_rejected_no_capsule_protocol,
      handshake_rejected_wrong_upgrade,
+     handshake_rejected_no_host_header,
      drain_flag_rejects_new_tunnels,
      connect_via_masque_facade,
      one_tunnel_per_connection].
@@ -198,6 +200,16 @@ handshake_rejected_wrong_upgrade(Config) ->
                                       [{<<"host">>, <<"localhost">>},
                                        {<<"connection">>, <<"Upgrade">>},
                                        {<<"upgrade">>, <<"websocket">>},
+                                       {<<"capsule-protocol">>, <<"?1">>}])).
+
+handshake_rejected_no_host_header(Config) ->
+    %% RFC 9112 §3.2: HTTP/1.1 request MUST carry Host. The server
+    %% rejects the Upgrade before any 101 is sent.
+    Port = ?config(port, Config),
+    ?assertMatch(400, direct_request(Port, <<"GET">>,
+                                      <<"/.well-known/masque/udp/127.0.0.1/5353/">>,
+                                      [{<<"connection">>, <<"Upgrade">>},
+                                       {<<"upgrade">>, <<"connect-udp">>},
                                        {<<"capsule-protocol">>, <<"?1">>}])).
 
 drain_flag_rejects_new_tunnels(Config) ->

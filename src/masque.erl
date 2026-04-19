@@ -197,11 +197,33 @@ validate_connect_opts(Target, Opts) ->
     case check_target_shape(Protocol, Target) of
         ok ->
             case check_capsule_protocol(Protocol, Opts) of
-                {ok, Opts1} -> {ok, Opts1};
+                {ok, Opts1} ->
+                    check_proxy_authorization(Opts1);
                 {error, _} = Err -> Err
             end;
         {error, _} = Err -> Err
     end.
+
+%% `proxy_authorization' is embedded verbatim on the CONNECT-TCP h1
+%% wire; an embedded CR or LF would inject arbitrary headers. Reject
+%% the opt before any socket is opened.
+check_proxy_authorization(Opts) ->
+    case maps:find(proxy_authorization, Opts) of
+        error ->
+            {ok, Opts};
+        {ok, V} when is_binary(V) ->
+            case has_crlf(V) of
+                true ->
+                    {error, {invalid_opts, proxy_authorization_contains_crlf}};
+                false ->
+                    {ok, Opts}
+            end;
+        {ok, _} ->
+            {error, {invalid_opts, proxy_authorization_must_be_binary}}
+    end.
+
+has_crlf(B) when is_binary(B) ->
+    binary:match(B, [<<"\r">>, <<"\n">>]) =/= nomatch.
 
 check_target_shape(ip, {Target, IPProto}) ->
     case masque_uri_ip:validate_target(Target) andalso

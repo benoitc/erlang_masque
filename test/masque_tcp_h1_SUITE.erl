@@ -21,7 +21,9 @@
          allow_private_false_rejects_loopback/1,
          proxy_authorization_header_roundtrip/1,
          non_2xx_surfaces_on_client/1,
-         target_fin_closes_tunnel/1]).
+         target_fin_closes_tunnel/1,
+         connect_host_mismatch_returns_400/1,
+         connect_host_missing_returns_400/1]).
 
 all() ->
     [echo_bytes,
@@ -30,7 +32,9 @@ all() ->
      allow_private_false_rejects_loopback,
      proxy_authorization_header_roundtrip,
      non_2xx_surfaces_on_client,
-     target_fin_closes_tunnel].
+     target_fin_closes_tunnel,
+     connect_host_mismatch_returns_400,
+     connect_host_missing_returns_400].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(masque),
@@ -241,6 +245,16 @@ non_2xx_surfaces_on_client(Config) ->
             ct:fail({expected_non_2xx, Other})
     end.
 
+connect_host_mismatch_returns_400(Config) ->
+    Port = ?config(port, Config),
+    ?assertEqual(400, raw_connect(Port,
+                                    <<"example.com:443">>,
+                                    [{<<"host">>, <<"other.invalid:443">>}])).
+
+connect_host_missing_returns_400(Config) ->
+    Port = ?config(port, Config),
+    ?assertEqual(400, raw_connect(Port, <<"example.com:443">>, [])).
+
 target_fin_closes_tunnel(Config) ->
     Port = ?config(port, Config),
     EchoPort = ?config(echo_port, Config),
@@ -262,6 +276,24 @@ target_fin_closes_tunnel(Config) ->
 %%====================================================================
 %% Internal
 %%====================================================================
+
+%% Send a hand-rolled CONNECT request and return the numeric status.
+%% Used by the host-header validation cases to bypass the masque
+%% client (which normalises the Host header itself).
+raw_connect(Port, ReqTarget, ExtraHeaders) ->
+    {ok, Sock} = ssl:connect("127.0.0.1", Port,
+        [binary, {active, false},
+         {verify, verify_none},
+         {alpn_advertised_protocols, [<<"http/1.1">>]}], 5000),
+    HdrLines = [[N, <<": ">>, V, <<"\r\n">>] || {N, V} <- ExtraHeaders],
+    Req = iolist_to_binary([<<"CONNECT ">>, ReqTarget, <<" HTTP/1.1\r\n">>,
+                             HdrLines, <<"\r\n">>]),
+    ok = ssl:send(Sock, Req),
+    {ok, Resp} = ssl:recv(Sock, 0, 3000),
+    _ = ssl:close(Sock),
+    [StatusLine | _] = binary:split(Resp, <<"\r\n">>),
+    [_Ver, CodeBin | _] = binary:split(StatusLine, <<" ">>, [global, trim_all]),
+    binary_to_integer(CodeBin).
 
 do_connect(Port, Target, Extra) ->
     ProxyURI = iolist_to_binary(

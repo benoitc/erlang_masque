@@ -184,44 +184,78 @@ map_init_error({reject, Err}) -> Err;
 map_init_error(_)             -> resolution_failed.
 
 validate(<<"GET">>, Path, Headers, UdpTemplate, IpTemplate) ->
-    Upgrade = header(<<"upgrade">>, Headers),
-    Capsule = header(<<"capsule-protocol">>, Headers),
-    UpgradeLc = lowercase_bin(Upgrade),
-    case {UpgradeLc, Capsule} of
-        {?MASQUE_CONNECT_UDP_PROTOCOL, <<"?1">>} ->
-            match_path(Path, Headers, UdpTemplate);
-        {?MASQUE_CONNECT_IP_PROTOCOL, <<"?1">>} ->
-            match_ip_path(Path, Headers, IpTemplate);
-        {Upgrade1, _} when Upgrade1 =:= ?MASQUE_CONNECT_UDP_PROTOCOL;
-                           Upgrade1 =:= ?MASQUE_CONNECT_IP_PROTOCOL ->
-            {error, bad_protocol};
-        {undefined, _} ->
-            {error, bad_protocol};
+    %% RFC 9112 §3.2 requires a Host header on HTTP/1.1. Reject early
+    %% so every downstream branch can trust `host' is present.
+    case header(<<"host">>, Headers) of
+        undefined ->
+            {error, bad_host};
         _ ->
-            {error, bad_protocol}
+            Upgrade = header(<<"upgrade">>, Headers),
+            Capsule = header(<<"capsule-protocol">>, Headers),
+            UpgradeLc = lowercase_bin(Upgrade),
+            case {UpgradeLc, Capsule} of
+                {?MASQUE_CONNECT_UDP_PROTOCOL, <<"?1">>} ->
+                    match_path(Path, Headers, UdpTemplate);
+                {?MASQUE_CONNECT_IP_PROTOCOL, <<"?1">>} ->
+                    match_ip_path(Path, Headers, IpTemplate);
+                {Upgrade1, _} when Upgrade1 =:= ?MASQUE_CONNECT_UDP_PROTOCOL;
+                                   Upgrade1 =:= ?MASQUE_CONNECT_IP_PROTOCOL ->
+                    {error, bad_protocol};
+                {undefined, _} ->
+                    {error, bad_protocol};
+                _ ->
+                    {error, bad_protocol}
+            end
     end;
 validate(<<"CONNECT">>, Path, Headers, _UdpTemplate, _IpTemplate) ->
-    %% Classic HTTP CONNECT: request-target is the authority form
-    %% `host:port' or `[ipv6]:port'.
+    %% RFC 9110 §9.3.6 + RFC 9112 §3.2.3: CONNECT request-target is
+    %% authority-form (`host:port' / `[ipv6]:port'). RFC 9112 §3.2.3
+    %% also requires the Host header to match the request-target;
+    %% missing or mismatched Host is a 400.
     case masque_uri:parse_authority_form(Path) of
         {ok, Host, Port} ->
-            Authority = header(<<"host">>, Headers, Path),
-            {ok, #{
-                method      => <<"CONNECT">>,
-                protocol    => tcp,
-                path        => Path,
-                authority   => Authority,
-                scheme      => <<"https">>,
-                target_host => Host,
-                target_port => Port,
-                headers     => Headers
-            }};
+            case check_connect_host(Headers, Path) of
+                ok ->
+                    Authority = header(<<"host">>, Headers, Path),
+                    {ok, #{
+                        method      => <<"CONNECT">>,
+                        protocol    => tcp,
+                        path        => Path,
+                        authority   => Authority,
+                        scheme      => <<"https">>,
+                        target_host => Host,
+                        target_port => Port,
+                        headers     => Headers
+                    }};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
         {error, bad_port} -> {error, bad_port};
         {error, bad_host} -> {error, bad_host};
         {error, _}        -> {error, bad_path}
     end;
 validate(_, _Path, _Headers, _UdpTemplate, _IpTemplate) ->
     {error, bad_method}.
+
+%% Host header on a CONNECT request must be present and parse to the
+%% same host:port as the request-target (RFC 9112 §3.2.3). Case-
+%% insensitive comparison on the host part; ports compare as integers.
+check_connect_host(Headers, Path) ->
+    case header(<<"host">>, Headers) of
+        undefined ->
+            {error, bad_host};
+        HostHeader ->
+            case {masque_uri:parse_authority_form(Path),
+                  masque_uri:parse_authority_form(HostHeader)} of
+                {{ok, H1, P1}, {ok, H2, P2}} ->
+                    case ci_eq(H1, H2) andalso P1 =:= P2 of
+                        true  -> ok;
+                        false -> {error, bad_host}
+                    end;
+                _ ->
+                    {error, bad_host}
+            end
+    end.
 
 match_path(Path, Headers, Template) ->
     case masque_uri:match(Template, Path) of
