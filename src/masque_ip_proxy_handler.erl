@@ -33,7 +33,11 @@
     %% Address pool: either a single prefix or a list of prefixes.
     pools = []    :: [#ip_route{}],
     %% Already-assigned addresses (tagged with the IP version).
-    assigned = [] :: [ip_assignment_tuple()]
+    assigned = [] :: [ip_assignment_tuple()],
+    %% Negotiated URI scope: target / ipproto from the request line.
+    %% `'*'' on either axis means "any" and skips the per-packet check.
+    target  = '*' :: masque_uri_ip:ip_target(),
+    ipproto = '*' :: masque_uri_ip:ip_ipproto()
 }).
 
 -type ip_assignment_tuple() ::
@@ -64,7 +68,10 @@ init(Req, Opts) ->
     StaticRoutes = maps:get(routes, Opts, []),
     ResolvedRoutes = [route_for(A) || A <- Resolved],
     Routes = lists:usort(StaticRoutes ++ ResolvedRoutes),
-    S = #state{opts = Opts, resolved = Resolved, pools = Pools},
+    Target  = maps:get(ip_target, Req, '*'),
+    IPProto = maps:get(ip_ipproto, Req, '*'),
+    S = #state{opts = Opts, resolved = Resolved, pools = Pools,
+               target = Target, ipproto = IPProto},
     case Routes of
         [] -> {ok, S};
         _  -> {ok, S, [{advertise, Routes}]}
@@ -197,8 +204,13 @@ max_prefix(6) -> 128.
 %% Data-plane: forward_fun
 %%====================================================================
 
-handle_ip_packet(Packet, #state{opts = Opts} = S) ->
-    case src_filter_passes(Packet, S) of
+handle_ip_packet(Packet, #state{opts = Opts,
+                                target = Target,
+                                ipproto = IPProto} = S) ->
+    %% RFC 9484 §5.x: the proxy MUST drop packets that fall outside
+    %% the negotiated `target' / `ipproto' scope before forwarding.
+    case src_filter_passes(Packet, S)
+         andalso masque_ip_packet:scope_passes(Packet, Target, IPProto) of
         true  -> forward(Packet, S, Opts);
         false -> {ok, S}
     end.

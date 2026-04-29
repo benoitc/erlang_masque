@@ -171,11 +171,12 @@ handle_ip_packet(Pkt, State) ->
 ## Wire-format notes
 
 Context ID 0 carries raw IP packets (see `masque_datagram`). Unknown
-context IDs are buffered briefly then dropped. On H3 the datagram
-channel is QUIC DATAGRAM frames; on H2 the datagram channel is
-RFC 9297 DATAGRAM-type capsules on the request-stream body. The
-library's sessions dispatch internally so handler code sees the
-same `handle_ip_packet/2` callback on both transports.
+context IDs are silently dropped on receipt (RFC 9484 §6). On H3 the
+datagram channel is QUIC DATAGRAM frames; on H2 the datagram channel
+is RFC 9297 DATAGRAM-type capsules on the request-stream body; on
+H1 the channel is the same DATAGRAM-type capsule riding the upgraded
+TLS connection. The library's sessions dispatch internally so handler
+code sees the same `handle_ip_packet/2` callback on all transports.
 
 Capsules `ADDRESS_ASSIGN` (0x01), `ADDRESS_REQUEST` (0x02), and
 `ROUTE_ADVERTISEMENT` (0x03) are encoded/decoded by
@@ -203,8 +204,8 @@ nonzero-protocol ranges for the same IP version (RFC 9484 §4.7.3).
 
 ## Not in scope
 
-- HTTP/1.1 `Upgrade: connect-ip` — masque is H2/H3 only.
-- TUN device integration — phase 2 adds `masque_ip_tun` and
-  `masque_ip_tun_proxy_handler` on top of the phase-1 API.
-- Per-connection tunnel limits, auth hooks beyond `accept/1` — same
+- TUN device integration - a follow-up adds `masque_ip_tun_device`
+  and `masque_ip_tun_proxy_handler` on top of the current handler API
+  (see plan in `doc/features.md`).
+- Per-connection tunnel limits, auth hooks beyond `accept/1` - same
   as the UDP/TCP paths; follow-up releases.

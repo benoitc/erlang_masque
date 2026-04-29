@@ -371,8 +371,12 @@ send_datagram(#data{socket = Sock}, Ctx, Payload) ->
 drain_capsules(Buf, #data{socket = Socket} = Data) ->
     case h1_capsule:decode(Buf) of
         {ok, {Type, Inner}, Rest} ->
-            Data2 = deliver_capsule(Type, Inner, Data),
-            drain_capsules(Rest, Data2#data{cap_buf = <<>>});
+            case deliver_capsule(Type, Inner, Data) of
+                {abort, Reason} ->
+                    abort(Reason, Data);
+                Data2 ->
+                    drain_capsules(Rest, Data2#data{cap_buf = <<>>})
+            end;
         {more, _} ->
             _ = setopts_active_once(Socket),
             {keep_state, Data#data{cap_buf = Buf}}
@@ -393,7 +397,8 @@ deliver_capsule(?MASQUE_CAPSULE_ADDRESS_ASSIGN, Inner,
         {ok, Entries} ->
             Owner ! {masque_address_assign, self(), Entries},
             Data#data{assigned = Entries};
-        {error, _} -> Data
+        {error, _} ->
+            {abort, malformed_capsule}
     end;
 deliver_capsule(?MASQUE_CAPSULE_ADDRESS_REQUEST, Inner,
                 #data{owner = Owner, peer_pending = Pend} = Data) ->
@@ -406,7 +411,8 @@ deliver_capsule(?MASQUE_CAPSULE_ADDRESS_REQUEST, Inner,
                           Acc#{Id => true}
                       end, Pend, Entries),
             Data#data{peer_pending = Pend1};
-        {error, _} -> Data
+        {error, _} ->
+            {abort, malformed_capsule}
     end;
 deliver_capsule(?MASQUE_CAPSULE_ROUTE_ADVERTISEMENT, Inner,
                 #data{owner = Owner} = Data) ->
@@ -414,7 +420,8 @@ deliver_capsule(?MASQUE_CAPSULE_ROUTE_ADVERTISEMENT, Inner,
         {ok, Entries} ->
             Owner ! {masque_route_advertisement, self(), Entries},
             Data#data{routes = Entries};
-        {error, _} -> Data
+        {error, _} ->
+            {abort, malformed_capsule}
     end;
 deliver_capsule(Type, Inner, #data{owner = Owner} = Data)
   when is_integer(Type) ->

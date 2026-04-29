@@ -206,8 +206,13 @@ decode_addr_entries(Bin, Mk, Acc) ->
     {ReqId, Rest1} = decode_varint(Bin),
     case Rest1 of
         <<4:8, A:8, B:8, C:8, D:8, Pfx:8, Rest2/binary>> when Pfx =< 32 ->
-            decode_addr_entries(Rest2, Mk,
-                                [Mk(ReqId, 4, {A,B,C,D}, Pfx) | Acc]);
+            case prefix_host_bits_zero(4, {A,B,C,D}, Pfx) of
+                true ->
+                    decode_addr_entries(Rest2, Mk,
+                                        [Mk(ReqId, 4, {A,B,C,D}, Pfx) | Acc]);
+                false ->
+                    throw(non_canonical_prefix)
+            end;
         <<4:8, _:8, _:8, _:8, _:8, Pfx:8, _/binary>> when Pfx > 32 ->
             throw(bad_prefix_length);
         <<4:8, _/binary>> ->
@@ -216,9 +221,16 @@ decode_addr_entries(Bin, Mk, Acc) ->
             <<A:16, B:16, C:16, D:16, E:16, F:16, G:16, H:16>> = V6,
             case Rest3 of
                 <<Pfx:8, Rest4/binary>> when Pfx =< 128 ->
-                    decode_addr_entries(Rest4, Mk,
-                                        [Mk(ReqId, 6,
-                                            {A,B,C,D,E,F,G,H}, Pfx) | Acc]);
+                    case prefix_host_bits_zero(6,
+                                               {A,B,C,D,E,F,G,H}, Pfx) of
+                        true ->
+                            decode_addr_entries(
+                              Rest4, Mk,
+                              [Mk(ReqId, 6,
+                                  {A,B,C,D,E,F,G,H}, Pfx) | Acc]);
+                        false ->
+                            throw(non_canonical_prefix)
+                    end;
                 <<Pfx:8, _/binary>> when Pfx > 128 ->
                     throw(bad_prefix_length);
                 _ ->
@@ -279,10 +291,23 @@ validate_routes(Entries) ->
 
 validate_routes_result([]) -> ok;
 validate_routes_result(Entries) ->
-    case check_sort_and_disjoint(Entries) of
-        ok         -> check_proto_zero_overlap(Entries);
+    case check_each_range(Entries) of
+        ok ->
+            case check_sort_and_disjoint(Entries) of
+                ok         -> check_proto_zero_overlap(Entries);
+                {error, _} = Err -> Err
+            end;
         {error, _} = Err -> Err
     end.
+
+%% RFC 9484 §4.7.2: every route advertises a non-empty range, i.e.
+%% start_addr =< end_addr.
+check_each_range([]) -> ok;
+check_each_range([#ip_route{start_addr = S, end_addr = E} | Rest])
+  when S =< E ->
+    check_each_range(Rest);
+check_each_range(_) ->
+    {error, route_range_reversed}.
 
 %% Verify the list is sorted by (Version, Protocol, Start) with
 %% strict disjointness within equal (Version, Protocol) buckets.
@@ -344,6 +369,19 @@ ranges_overlap(#ip_route{start_addr = S1, end_addr = E1},
                #ip_route{start_addr = S2, end_addr = E2}) ->
     %% Inclusive ranges overlap iff max(S) =< min(E).
     max(S1, S2) =< min(E1, E2).
+
+%% RFC 9484 §4.6: ADDRESS_ASSIGN/REQUEST prefixes must be canonical
+%% (host bits zero).
+prefix_host_bits_zero(_V, _IP, 0) -> true;
+prefix_host_bits_zero(4, {A,B,C,D}, Pfx) when Pfx =< 32 ->
+    N = (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D,
+    HostBits = 32 - Pfx,
+    (N band ((1 bsl HostBits) - 1)) =:= 0;
+prefix_host_bits_zero(6, {A,B,C,D,E,F,G,H}, Pfx) when Pfx =< 128 ->
+    N = (A bsl 112) bor (B bsl 96) bor (C bsl 80) bor (D bsl 64)
+        bor (E bsl 48) bor (F bsl 32) bor (G bsl 16) bor H,
+    HostBits = 128 - Pfx,
+    (N band ((1 bsl HostBits) - 1)) =:= 0.
 
 %%====================================================================
 %% Internal — varint wrapper

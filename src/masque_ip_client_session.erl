@@ -524,8 +524,12 @@ drain_capsules(Buf, Fin, Data) ->
 drain_capsules_1(Buf, Fin, Data) ->
     case decode_one_capsule(Data, Buf) of
         {ok, {Type, Inner}, Rest} ->
-            Data2 = deliver_capsule(Type, Inner, Data),
-            drain_capsules_1(Rest, Fin, Data2#data{cap_buf = <<>>});
+            case deliver_capsule(Type, Inner, Data) of
+                {abort, Reason} ->
+                    client_stream_abort(Reason, Data);
+                Data2 ->
+                    drain_capsules_1(Rest, Fin, Data2#data{cap_buf = <<>>})
+            end;
         {more, _} when Fin, Buf =/= <<>> ->
             client_stream_abort(truncated_capsule, Data);
         {more, _} ->
@@ -558,7 +562,8 @@ deliver_capsule(?MASQUE_CAPSULE_ADDRESS_ASSIGN, Inner,
         {ok, Entries} ->
             Owner ! {masque_address_assign, self(), Entries},
             Data#data{assigned = Entries};
-        {error, _} -> Data   %% server-side bug; ignore rather than crash
+        {error, _} ->
+            {abort, malformed_capsule}
     end;
 deliver_capsule(?MASQUE_CAPSULE_ADDRESS_REQUEST, Inner,
                 #data{owner = Owner, peer_pending = Pend} = Data) ->
@@ -571,7 +576,8 @@ deliver_capsule(?MASQUE_CAPSULE_ADDRESS_REQUEST, Inner,
                           Acc#{Id => true}
                       end, Pend, Entries),
             Data#data{peer_pending = Pend1};
-        {error, _} -> Data
+        {error, _} ->
+            {abort, malformed_capsule}
     end;
 deliver_capsule(?MASQUE_CAPSULE_ROUTE_ADVERTISEMENT, Inner,
                 #data{owner = Owner} = Data) ->
@@ -579,7 +585,8 @@ deliver_capsule(?MASQUE_CAPSULE_ROUTE_ADVERTISEMENT, Inner,
         {ok, Entries} ->
             Owner ! {masque_route_advertisement, self(), Entries},
             Data#data{routes = Entries};
-        {error, _} -> Data
+        {error, _} ->
+            {abort, malformed_capsule}
     end;
 deliver_capsule(Type, Inner, #data{owner = Owner} = Data)
   when is_integer(Type) ->

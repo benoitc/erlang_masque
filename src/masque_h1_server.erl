@@ -338,14 +338,20 @@ reject(Conn, StreamId, Reason, ExtraHeaders) ->
     Status = masque_errors:handshake_status(Reason),
     Phrase = masque_errors:status_reason(Reason),
     Body = <<Phrase/binary, "\n">>,
+    %% RFC 9931 (updates RFC 9298): a proxy that rejects an HTTP/1.1
+    %% CONNECT/Upgrade MUST close the underlying connection, otherwise
+    %% the client may treat subsequent bytes on the wire as belonging
+    %% to the rejected resource.
     Base = [
         {<<"content-type">>, <<"text/plain; charset=utf-8">>},
         {<<"content-length">>, integer_to_binary(byte_size(Body))},
+        {<<"connection">>, <<"close">>},
         {<<"proxy-status">>, proxy_status_field(Reason)}
     ],
     Headers = merge_extra_headers(Base, ExtraHeaders),
     _ = catch h1:send_response(Conn, StreamId, Status, Headers),
     _ = catch h1:send_data(Conn, StreamId, Body, true),
+    _ = catch h1:close(Conn),
     ok.
 
 merge_extra_headers(Base, []) ->

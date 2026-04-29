@@ -61,6 +61,15 @@ parse_target_prefix_out_of_range_v4_test() ->
     ?assertEqual({error, bad_target},
                  masque_uri_ip:parse_target(<<"10.0.0.0/33">>)).
 
+%% RFC 9484 §3 / §4.6: prefix targets must be canonical (host bits zero).
+parse_target_non_canonical_prefix_v4_test() ->
+    ?assertEqual({error, bad_target},
+                 masque_uri_ip:parse_target(<<"10.0.0.5/24">>)).
+
+parse_target_non_canonical_prefix_v6_test() ->
+    ?assertEqual({error, bad_target},
+                 masque_uri_ip:parse_target(<<"2001:db8::1/64">>)).
+
 parse_target_hostname_test() ->
     ?assertEqual({ok, <<"example.com">>},
                  masque_uri_ip:parse_target(<<"example.com">>)).
@@ -177,3 +186,67 @@ match_query_form_missing_var_test() ->
                 <<"/masque{?target,ipproto}">>),
     ?assertEqual({error, no_match},
                  masque_uri_ip:match(T, <<"/masque?target=192.0.2.1">>)).
+
+%% RFC 9484 §3: target and ipproto are optional template variables.
+%% Omitting them yields a wildcard scope.
+
+match_template_omits_target_and_ipproto_test() ->
+    {ok, T} = masque_uri_ip:parse_server_template(<<"/masque">>),
+    ?assertEqual({ok, #{target => '*', ipproto => '*'}},
+                 masque_uri_ip:match(T, <<"/masque">>)).
+
+match_template_omits_ipproto_only_test() ->
+    {ok, T} = masque_uri_ip:parse_server_template(
+                <<"/masque/{target}/">>),
+    ?assertEqual({ok, #{target => {192,0,2,1}, ipproto => '*'}},
+                 masque_uri_ip:match(T, <<"/masque/192.0.2.1/">>)).
+
+match_template_omits_target_only_test() ->
+    {ok, T} = masque_uri_ip:parse_server_template(
+                <<"/masque/{ipproto}/">>),
+    ?assertEqual({ok, #{target => '*', ipproto => 17}},
+                 masque_uri_ip:match(T, <<"/masque/17/">>)).
+
+%% RFC 6570 Level 3+ operators are not in MASQUE's profile.
+template_rejects_reserved_operator_test() ->
+    ?assertEqual({error, bad_template},
+                 masque_uri_ip:parse_server_template(
+                   <<"/masque/{+target}/{ipproto}/">>)).
+
+template_rejects_fragment_operator_test() ->
+    ?assertEqual({error, bad_template},
+                 masque_uri_ip:parse_server_template(
+                   <<"/masque/{#target}/{ipproto}/">>)).
+
+template_rejects_explode_modifier_test() ->
+    ?assertEqual({error, bad_template},
+                 masque_uri_ip:parse_server_template(
+                   <<"/masque/{target*}/{ipproto}/">>)).
+
+template_rejects_prefix_modifier_test() ->
+    ?assertEqual({error, bad_template},
+                 masque_uri_ip:parse_server_template(
+                   <<"/masque/{target:4}/{ipproto}/">>)).
+
+template_rejects_non_ascii_test() ->
+    ?assertEqual({error, bad_template},
+                 masque_uri_ip:parse_server_template(
+                   <<"/masque/{target}/", 16#C3, 16#A9, "/{ipproto}/">>)).
+
+%% Regression: untrusted query keys must not enter the atom table.
+match_query_form_unknown_keys_no_atoms_test() ->
+    {ok, T} = masque_uri_ip:parse_server_template(
+                <<"/masque{?target,ipproto}">>),
+    Before = erlang:system_info(atom_count),
+    Path = build_query_path(2000),
+    %% Required keys are absent so this must fail to match, but parsing
+    %% the unknown keys must not allocate atoms.
+    ?assertEqual({error, no_match}, masque_uri_ip:match(T, Path)),
+    After = erlang:system_info(atom_count),
+    ?assert(After - Before < 50).
+
+build_query_path(N) ->
+    Pairs = [iolist_to_binary(["k", integer_to_binary(I), "=v"])
+             || I <- lists:seq(1, N)],
+    iolist_to_binary([<<"/masque?">>,
+                      lists:join(<<"&">>, Pairs)]).

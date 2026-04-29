@@ -153,20 +153,28 @@ split_authority(Scheme, Rest) ->
 
 parse_path_query(Bin) ->
     try
+        ok = check_ascii(Bin),
         {ok, parse_segments(Bin, <<>>, [])}
     catch
         throw:bad_template -> {error, bad_template};
         throw:bad_segment  -> {error, bad_segment}
     end.
 
+%% RFC 6570 §1.2: URI templates use only ASCII characters; non-ASCII
+%% input must be rejected (clients are expected to %-encode anything
+%% else before forming the template).
+check_ascii(<<>>) -> ok;
+check_ascii(<<C, Rest/binary>>) when C =< 16#7F -> check_ascii(Rest);
+check_ascii(_) -> throw(bad_template).
+
 parse_segments(<<>>, Acc, Out) ->
     lists:reverse(emit_literal(Acc, Out));
 parse_segments(<<"{?", Rest/binary>>, Acc, Out) ->
     case binary:split(Rest, <<"}">>) of
         [NamesBin, Tail] when NamesBin =/= <<>> ->
-            Names = [binary_to_atom(N, utf8)
-                     || N <- binary:split(NamesBin, <<",">>, [global]),
-                        N =/= <<>>],
+            Parts = [N || N <- binary:split(NamesBin, <<",">>, [global]),
+                          N =/= <<>>],
+            Names = [validate_var_name(N) || N <- Parts],
             case Names of
                 [] -> throw(bad_segment);
                 _  ->
@@ -178,13 +186,40 @@ parse_segments(<<"{?", Rest/binary>>, Acc, Out) ->
 parse_segments(<<"{", Rest/binary>>, Acc, Out) ->
     case binary:split(Rest, <<"}">>) of
         [Name, Tail] when Name =/= <<>> ->
+            Var = validate_var_name(Name),
             parse_segments(Tail, <<>>,
-                           [{var, binary_to_atom(Name, utf8)}
-                            | emit_literal(Acc, Out)]);
+                           [{var, Var} | emit_literal(Acc, Out)]);
         _ -> throw(bad_template)
     end;
 parse_segments(<<C, Rest/binary>>, Acc, Out) ->
     parse_segments(Rest, <<Acc/binary, C>>, Out).
+
+%% RFC 6570 Level 1/3 only: bare varname, no operators (+ # . / ; & =),
+%% no prefix modifier (:N), no explode (*). The {?...} form is parsed
+%% above, so a leading `?' here is also an unsupported operator inside
+%% a regular {...} expression.
+validate_var_name(<<C, _/binary>>) when
+        C =:= $+; C =:= $#; C =:= $.; C =:= $/;
+        C =:= $;; C =:= $&; C =:= $=; C =:= $,;
+        C =:= $!; C =:= $@; C =:= $|; C =:= $? ->
+    throw(bad_template);
+validate_var_name(Name) ->
+    case ascii_varchars(Name) of
+        true  -> binary_to_atom(Name, utf8);
+        false -> throw(bad_template)
+    end.
+
+%% A varname is a non-empty run of ALPHA / DIGIT / `_' (RFC 6570 §2.3
+%% restricted to the ASCII subset; we do not allow `.' separators or
+%% pct-encoded forms in template variable names).
+ascii_varchars(<<>>) -> true;
+ascii_varchars(<<C, Rest/binary>>) when
+        (C >= $A andalso C =< $Z);
+        (C >= $a andalso C =< $z);
+        (C >= $0 andalso C =< $9);
+        C =:= $_ ->
+    ascii_varchars(Rest);
+ascii_varchars(_) -> false.
 
 emit_literal(<<>>, Out) -> Out;
 emit_literal(Bin, Out)  -> [{literal, Bin} | Out].
@@ -293,17 +328,19 @@ split_path_query(Bin) ->
 
 %% Parse query string `k1=v1&k2=v2` into `#{k1 => Decoded, ...}`
 %% restricted to the names listed in `Keep'. Missing keys → nomatch.
+%% Untrusted query keys are matched as binaries against
+%% `atom_to_binary(KeepAtom, utf8)` so they never enter the atom table.
 parse_query(<<>>, [])    -> {ok, #{}};
 parse_query(<<>>, _Keep) -> nomatch;
 parse_query(Bin, Keep) ->
     Pairs = binary:split(Bin, <<"&">>, [global]),
+    KeepBins = [{atom_to_binary(K, utf8), K} || K <- Keep],
     try
         Vars = lists:foldl(fun(Pair, Acc) ->
             case binary:split(Pair, <<"=">>) of
                 [K, V] ->
-                    KA = binary_to_atom(K, utf8),
-                    case lists:member(KA, Keep) of
-                        true ->
+                    case lists:keyfind(K, 1, KeepBins) of
+                        {_, KA} ->
                             {ok, Dec} = pct_decode_form(V),
                             Acc#{KA => Dec};
                         false -> Acc

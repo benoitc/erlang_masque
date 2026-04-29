@@ -17,7 +17,7 @@ address_assign_v4_roundtrip_test() ->
 address_assign_v6_roundtrip_test() ->
     E = #ip_assignment{request_id = 1, version = 6,
                        address = {16#2001,16#DB8,0,0,0,0,0,1},
-                       prefix_len = 64},
+                       prefix_len = 128},
     Body = masque_ip_capsule:encode_address_assign([E]),
     ?assertEqual({ok, [E]},
                  masque_ip_capsule:decode_address_assign(Body)).
@@ -39,6 +39,20 @@ address_assign_bad_prefix_test() ->
     %% Directly crafted body with an out-of-range prefix for v4.
     BadBody = <<1, 4:8, 10:8, 0:8, 0:8, 0:8, 33:8>>,
     ?assertEqual({error, bad_prefix_length},
+                 masque_ip_capsule:decode_address_assign(BadBody)).
+
+%% RFC 9484 §4.6: prefix MUST be canonical (host bits zero).
+address_assign_non_canonical_prefix_v4_test() ->
+    %% 10.0.0.5/24 has nonzero host bits -> must be rejected.
+    BadBody = <<1, 4:8, 10:8, 0:8, 0:8, 5:8, 24:8>>,
+    ?assertEqual({error, non_canonical_prefix},
+                 masque_ip_capsule:decode_address_assign(BadBody)).
+
+address_assign_non_canonical_prefix_v6_test() ->
+    %% 2001:db8::1/64 has nonzero host bits -> must be rejected.
+    Addr = <<16#2001:16, 16#0DB8:16, 0:16, 0:16, 0:16, 0:16, 0:16, 1:16>>,
+    BadBody = <<1, 6:8, Addr/binary, 64:8>>,
+    ?assertEqual({error, non_canonical_prefix},
                  masque_ip_capsule:decode_address_assign(BadBody)).
 
 %%====================================================================
@@ -109,6 +123,13 @@ route_advertisement_unordered_rejected_test() ->
           #ip_route{version = 4, start_addr = {10,0,0,0},
                     end_addr = {10,0,0,1}, ip_protocol = 0}],
     ?assertError(unordered_routes,
+                 masque_ip_capsule:encode_route_advertisement(Es)).
+
+%% RFC 9484 §4.7.2: each route's start_addr must not exceed end_addr.
+route_advertisement_reversed_range_rejected_test() ->
+    Es = [#ip_route{version = 4, start_addr = {10,0,0,10},
+                    end_addr = {10,0,0,1}, ip_protocol = 0}],
+    ?assertError(route_range_reversed,
                  masque_ip_capsule:encode_route_advertisement(Es)).
 
 route_advertisement_overlapping_rejected_test() ->

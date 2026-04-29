@@ -17,7 +17,7 @@ Current coverage of the `masque` library against the relevant RFCs.
 | 9484 §3 - CONNECT-IP URI template | `{target}` + `{ipproto}` in Level-1 path and Level-3 query forms | Implemented (`masque_uri_template`, `masque_uri_ip`) |
 | 9484 §4 - CONNECT-IP handshake | `:protocol=connect-ip`, `capsule-protocol: ?1` enforcement | Implemented (`masque_ip_client_session`, `masque_ip_server_session`) |
 | 9484 §4.7 - Control-plane capsules | `ADDRESS_ASSIGN` (0x01), `ADDRESS_REQUEST` (0x02), `ROUTE_ADVERTISEMENT` (0x03); ordering + disjointness + protocol-0 overlap validation | Implemented (`masque_ip_capsule`) |
-| 9484 §6 - Datagram framing | Context-0 = full IP packet; unknown contexts buffered then dropped | Implemented (`masque_datagram` reused) |
+| 9484 §6 - Datagram framing | Context-0 = full IP packet; unknown contexts silently dropped | Implemented (`masque_datagram` reused) |
 | 9484 §7 - ICMP error synthesis | ICMPv4 (RFC 792) and ICMPv6 (RFC 4443) error builders with correct invoking-packet truncation | Implemented (`masque_icmp`) |
 | 9484 §4.7.1 - Mandatory DNS resolution | Resolve hostname targets before 2xx; resolved addresses into initial `ROUTE_ADVERTISEMENT` | Implemented (listener-owned, `resolver` option) |
 | 9298 + 9484 over HTTP/1.1 | `Upgrade: connect-udp` / `Upgrade: connect-ip` + capsule-protocol handshake; RFC 9297 capsules on the upgraded TLS socket | Implemented (`masque_h1_client_session`, `masque_ip_h1_client_session`, `masque_h1_server`, session-sup) |
@@ -130,5 +130,3 @@ Current coverage of the `masque` library against the relevant RFCs.
   there without API change.
 - **Private Relay-style relay** - separate application on top of
   `masque` with two-hop wiring, Privacy Pass auth, policy engine.
-- **HTTP/1.1 Upgrade** - RFC 9298 also defines an HTTP/1.1 path;
-  this library covers h3 and h2 only.

@@ -141,6 +141,10 @@ connecting({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, connecting)}]};
 connecting({call, From}, stop, Data) ->
     {stop_and_reply, normal, [{reply, From, ok}], Data};
+connecting({call, From}, _Other, Data) ->
+    %% RFC 9931: no UDP datagram (or any other operation) is permitted
+    %% before the HTTP/1.1 Upgrade handshake completes.
+    {keep_state, Data, [{reply, From, {error, not_ready}}]};
 connecting(info, {'DOWN', Ref, process, _, _},
            #data{owner_ref = Ref}) ->
     {stop, owner_gone};
