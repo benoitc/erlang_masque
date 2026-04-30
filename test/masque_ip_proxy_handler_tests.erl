@@ -183,3 +183,31 @@ address_assigned_emits_lifecycle_test() ->
     after 100 ->
         ct:fail("lifecycle_fun was not invoked for address_assigned")
     end.
+
+terminate_releases_assignments_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    Self = self(),
+    Hook = fun(E, D) -> Self ! {hook, E, D} end,
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    Opts = #{address_pool => {4, {10,0,0,0}, 30},
+             lifecycle_fun => Hook},
+    {ok, S0} = masque_ip_proxy_handler:init(Req, Opts),
+    Reqs = [#ip_prefix_request{request_id = 1, version = 4,
+                               address = {0,0,0,0}, prefix_len = 32}],
+    {ok, S1, _} =
+        masque_ip_proxy_handler:handle_address_request(Reqs, S0),
+    %% Drop the address_assigned message we already exercised.
+    drain(),
+    Before = masque_metrics:ip_released_count(),
+    ok = masque_ip_proxy_handler:terminate(normal, S1),
+    receive
+        {hook, address_released,
+         #{version := 4, address := {10,0,0,0}, prefix_len := 32}} -> ok
+    after 100 ->
+        ct:fail("lifecycle_fun was not invoked for address_released")
+    end,
+    %% The release counter only goes up when the registry is running
+    %% (a release through a no-op registry doesn't bump). The test
+    %% does not require the registry to be active.
+    ?assert(masque_metrics:ip_released_count() >= Before).

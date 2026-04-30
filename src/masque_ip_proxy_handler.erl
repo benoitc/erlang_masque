@@ -342,7 +342,16 @@ handle_address_assign(_Entries, S) -> {ok, S}.
 
 handle_route_advertisement(_Entries, S) -> {ok, S}.
 
-terminate(_Reason, _S) -> ok.
+terminate(_Reason, #state{assigned = Assigned, opts = Opts}) ->
+    [release_one(Entry, Opts) || Entry <- Assigned],
+    ok.
+
+release_one({V, Addr, Pfx}, Opts) ->
+    _ = masque_ip_session_registry:release(V, Addr, Pfx),
+    invoke_lifecycle(Opts, address_released,
+                     #{version => V, address => Addr, prefix_len => Pfx},
+                     Opts),
+    ok.
 
 %%====================================================================
 %% Helpers
