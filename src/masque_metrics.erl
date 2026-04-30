@@ -17,7 +17,10 @@
 %% out from `setup/0' so test environments without the meter system
 %% running can still exercise the counter API.
 -export([setup_ip_counters/0,
-         ip_drop_inc/1, ip_drop_count/1, ip_drop_reasons/0]).
+         ip_drop_inc/1, ip_drop_count/1, ip_drop_reasons/0,
+         ip_assign_inc/0, ip_assigned_count/0,
+         ip_release_inc/0, ip_released_count/0,
+         ip_advertise_inc/0, ip_advertised_count/0]).
 
 -spec setup() -> ok.
 setup() ->
@@ -49,21 +52,29 @@ setup() ->
             #{description => <<"Tunnel duration in milliseconds">>})),
     ok.
 
-%% @doc Idempotent allocator for the IP drop counters. Safe to call
-%% multiple times; only the first call wins (subsequent calls keep
-%% the existing reference so counts accumulated from earlier callers
-%% are preserved).
+%% @doc Idempotent allocator for the IP-side simple counters. Safe to
+%% call multiple times; only the first call wins (subsequent calls
+%% keep the existing reference so counts accumulated from earlier
+%% callers are preserved).
 -spec setup_ip_counters() -> ok.
 setup_ip_counters() ->
     case persistent_term:get(masque_ip_drop_counters, undefined) of
         undefined ->
             Ref = counters:new(length(ip_drop_reasons()),
                                [write_concurrency]),
-            persistent_term:put(masque_ip_drop_counters, Ref),
-            ok;
+            persistent_term:put(masque_ip_drop_counters, Ref);
         _ ->
             ok
-    end.
+    end,
+    case persistent_term:get(masque_ip_lifecycle_counters, undefined) of
+        undefined ->
+            %% [assigned, released, advertised]
+            LRef = counters:new(3, [write_concurrency]),
+            persistent_term:put(masque_ip_lifecycle_counters, LRef);
+        _ ->
+            ok
+    end,
+    ok.
 
 -spec tunnel_opened(map()) -> ok.
 tunnel_opened(Attrs) ->
@@ -141,3 +152,33 @@ reason_index(Reason) ->
 index_of(_X, [], _I) -> not_found;
 index_of(X, [X | _], I) -> I;
 index_of(X, [_ | T], I) -> index_of(X, T, I + 1).
+
+%%====================================================================
+%% IP lifecycle counters - assign / release / advertise.
+%%====================================================================
+
+-spec ip_assign_inc() -> ok.
+ip_assign_inc()    -> lifecycle_inc(1).
+-spec ip_release_inc() -> ok.
+ip_release_inc()   -> lifecycle_inc(2).
+-spec ip_advertise_inc() -> ok.
+ip_advertise_inc() -> lifecycle_inc(3).
+
+-spec ip_assigned_count() -> non_neg_integer().
+ip_assigned_count()    -> lifecycle_get(1).
+-spec ip_released_count() -> non_neg_integer().
+ip_released_count()    -> lifecycle_get(2).
+-spec ip_advertised_count() -> non_neg_integer().
+ip_advertised_count()  -> lifecycle_get(3).
+
+lifecycle_inc(Idx) ->
+    case persistent_term:get(masque_ip_lifecycle_counters, undefined) of
+        undefined -> ok;
+        Ref       -> counters:add(Ref, Idx, 1)
+    end.
+
+lifecycle_get(Idx) ->
+    case persistent_term:get(masque_ip_lifecycle_counters, undefined) of
+        undefined -> 0;
+        Ref       -> counters:get(Ref, Idx)
+    end.

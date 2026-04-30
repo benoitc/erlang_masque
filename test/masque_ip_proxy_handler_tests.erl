@@ -131,3 +131,55 @@ forward_drop_counted_test() ->
     after 100 ->
         ct:fail("lifecycle_fun was not invoked for forward_drop")
     end.
+
+%%====================================================================
+%% Allocation lifecycle telemetry: address_assigned, route_advertised
+%%====================================================================
+
+%% Drain any leftover hook messages so each test starts clean.
+drain() ->
+    receive _ -> drain() after 0 -> ok end.
+
+route_advertised_emits_lifecycle_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    Self = self(),
+    Hook = fun(E, D) -> Self ! {hook, E, D} end,
+    Routes = [#ip_route{version = 4,
+                        start_addr = {10,0,0,0},
+                        end_addr = {10,0,0,255},
+                        ip_protocol = 0}],
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    Opts = #{routes => Routes, lifecycle_fun => Hook},
+    Before = masque_metrics:ip_advertised_count(),
+    {ok, _S, [{advertise, _}]} = masque_ip_proxy_handler:init(Req, Opts),
+    ?assertEqual(Before + 1, masque_metrics:ip_advertised_count()),
+    receive
+        {hook, route_advertised, #{routes := Routes}} -> ok
+    after 100 ->
+        ct:fail("lifecycle_fun was not invoked for route_advertised")
+    end.
+
+address_assigned_emits_lifecycle_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    Self = self(),
+    Hook = fun(E, D) -> Self ! {hook, E, D} end,
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    Opts = #{address_pool => {4, {10,0,0,0}, 30},
+             lifecycle_fun => Hook},
+    {ok, S0} = masque_ip_proxy_handler:init(Req, Opts),
+    Reqs = [#ip_prefix_request{request_id = 1, version = 4,
+                               address = {0,0,0,0}, prefix_len = 32}],
+    Before = masque_metrics:ip_assigned_count(),
+    {ok, _S1, [{assign, [Assign]}]} =
+        masque_ip_proxy_handler:handle_address_request(Reqs, S0),
+    ?assertMatch(#ip_assignment{request_id = 1, version = 4,
+                                prefix_len = 32}, Assign),
+    ?assertEqual(Before + 1, masque_metrics:ip_assigned_count()),
+    receive
+        {hook, address_assigned,
+         #{version := 4, prefix_len := 32, address := {10,0,0,0}}} -> ok
+    after 100 ->
+        ct:fail("lifecycle_fun was not invoked for address_assigned")
+    end.

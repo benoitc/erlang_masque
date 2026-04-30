@@ -78,8 +78,12 @@ init(Req, Opts) ->
     S = #state{opts = Opts, resolved = Resolved, pools = Pools,
                target = Target, ipproto = IPProto},
     case Routes of
-        [] -> {ok, S};
-        _  -> {ok, S, [{advertise, Routes}]}
+        [] ->
+            {ok, S};
+        _ ->
+            masque_metrics:ip_advertise_inc(),
+            invoke_lifecycle(Opts, route_advertised, #{routes => Routes}, Opts),
+            {ok, S, [{advertise, Routes}]}
     end.
 
 %%====================================================================
@@ -90,6 +94,15 @@ handle_address_request(Requests, #state{} = S) ->
     {Entries, S1} = allocate_or_reject(Requests, S),
     {ok, S1, [{assign, Entries}]}.
 
+emit_assigned(#ip_assignment{version = V, address = A,
+                             prefix_len = Pfx} = E,
+              #state{opts = Opts}) ->
+    masque_metrics:ip_assign_inc(),
+    invoke_lifecycle(Opts, address_assigned,
+                     #{version => V, address => A, prefix_len => Pfx,
+                       entry => E},
+                     Opts).
+
 allocate_or_reject(Requests, #state{pools = []} = S) ->
     %% No pool configured — reject everything per RFC 9484 §5.2.
     {masque_ip:reject_requests(Requests), S};
@@ -99,9 +112,10 @@ allocate_or_reject(Requests, #state{} = S) ->
 allocate_one(#ip_prefix_request{request_id = Id, version = V}, S) ->
     case next_free(V, S) of
         {ok, Addr, Pfx, S1} ->
-            {#ip_assignment{request_id = Id, version = V,
-                            address = Addr, prefix_len = Pfx},
-             S1};
+            Entry = #ip_assignment{request_id = Id, version = V,
+                                   address = Addr, prefix_len = Pfx},
+            emit_assigned(Entry, S1),
+            {Entry, S1};
         none ->
             %% Pool exhausted — single-entry rejection.
             Req = #ip_prefix_request{request_id = Id, version = V,
