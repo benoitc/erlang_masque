@@ -114,6 +114,7 @@ allocate_one(#ip_prefix_request{request_id = Id, version = V}, S) ->
         {ok, Addr, Pfx, S1} ->
             Entry = #ip_assignment{request_id = Id, version = V,
                                    address = Addr, prefix_len = Pfx},
+            register_with_registry(V, Addr, Pfx, S1),
             emit_assigned(Entry, S1),
             {Entry, S1};
         none ->
@@ -124,6 +125,16 @@ allocate_one(#ip_prefix_request{request_id = Id, version = V}, S) ->
             [Reject] = masque_ip:reject_requests([Req]),
             {Reject, S}
     end.
+
+register_with_registry(V, Addr, Pfx, #state{opts = Opts}) ->
+    %% The handler runs inside the session's process, so `self()' is
+    %% the session pid. Context id 0 is the IP datagram context per
+    %% RFC 9484 §6 (matches `MASQUE_CONTEXT_ID_IP'). Both can be
+    %% overridden via opts for embedded uses.
+    Pid = maps:get(session_pid, Opts, self()),
+    Ctx = maps:get(ip_context_id, Opts, ?MASQUE_CONTEXT_ID_IP),
+    _ = masque_ip_session_registry:register(V, Addr, Pfx, Pid, Ctx),
+    ok.
 
 next_free(V, #state{pools = Pools, assigned = Assigned} = S) ->
     case pick_pool(V, Pools) of
