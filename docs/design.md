@@ -491,10 +491,86 @@ Owner messages:
 - `{masque_route_advertisement, Sess, Routes}`
 
 Server side: `masque_ip_proxy_handler` is the default handler. It
-allocates from a configured `address_pool` (round-robin), sends an
-unprompted `ADDRESS_ASSIGN` + initial `ROUTE_ADVERTISEMENT` at
-init, and runs a BCP-38 source filter on outbound packets. Custom
-forwarding plugs in via a `forward_fun :: fun((Packet) -> ok)`.
+allocates from a configured `address_pool` (prefix-aware, see
+"Address allocator" below), sends an unprompted `ADDRESS_ASSIGN` +
+initial `ROUTE_ADVERTISEMENT` at init, runs a BCP-38 source filter
+plus URI-scope (`target` / `ipproto`) checks on inbound packets, and
+delegates the forwarding decision to a configurable `forward_fun`.
+
+Inbound packet gating is consolidated in `accept_inbound/2`, which
+returns `ok | {drop, Reason}` so dropped packets carry an
+attributable reason. Reasons feed the simple counters in
+`masque_metrics` (see §12) and the optional `lifecycle_fun`
+callback (see "Lifecycle hook" below).
+
+### Address allocator
+
+The allocator is prefix-aware: `allocate_one/2` honours the
+`prefix_len` field of the `ADDRESS_REQUEST` entry, clamping the
+response to the configured `min_assignable_prefix`
+(`#{4 => 32, 6 => 128}` by default - host routes only, matching the
+historical behaviour). `next_free/3` walks the pool in stride-aligned
+blocks of `2^(MaxPfx - Pfx)` and rejects ranges that overlap any
+existing assignment via `overlaps_assigned/4` (`max(s1,s2) =< min(e1,e2)`
+on the integer-address space). Host and prefix allocations from the
+same pool are guaranteed not to collide.
+
+### Address registry
+
+`masque_ip_session_registry` (worker child of `masque_sup`) maps
+every assigned address or prefix to the session pid that serves it,
+across all sessions. Storage is a single ETS `ordered_set` keyed by
+`{Version, StartIntAddr}` with values
+`{EndIntAddr, Pfx, Pid, ContextId, MRef}`; lookup does longest-prefix
+match by interval inclusion (`ets:prev/2` to the candidate, then
+endpoint check). Because every registration is rejected on overlap,
+at most one interval covers any given address, so the lookup is a
+single ETS hit, no scan.
+
+The registry server is only on the write path. The proxy handler
+calls `register/5` from `allocate_one/2` and `release/3` from
+`terminate/2`. Process monitoring inside the registry releases
+orphan ranges if a session exits abruptly. All write APIs tolerate
+the registry not being started (no-ops via `whereis/1` checks),
+which keeps eunit tests that don't boot the application working.
+
+### Out-of-band injection
+
+`masque_ip:inject_packet(SessionPid, Packet)` casts
+`{inject_packet, Packet}` into a server session. Both
+`masque_ip_server_session` (h2/h3) and `masque_ip_h1_server_session`
+(h1) handle the cast by re-running the existing
+`{send_ip_packet, Packet}` action through their own `do_actions/2`
+interpreter, so capsule framing, MTU enforcement, and metrics fire
+identically to a handler-driven send. This is the seam a TUN device
+owner uses to deliver kernel-side packets to a tunnel client; paired
+with the registry it gives full read-side fan-out without exposing
+the session's internal state machine.
+
+### Lifecycle hook
+
+The default handler's `handler_opts` accepts an optional
+`lifecycle_fun :: fun((Event, Detail) -> ok)`. Recognised events:
+`address_assigned`, `address_released`, `route_advertised`,
+`packet_dropped`. The hook is invoked synchronously from inside the
+handler with errors swallowed - a misbehaving consumer cannot break
+the data plane. Each event also bumps a simple counter in
+`masque_metrics` (see §12) so observers that prefer scraping a
+counter to subscribing to a callback are also covered.
+
+### `forward_fun` action list
+
+In addition to the historical
+`{reply, _, _} | {drop, _} | {forward, _} | ok | {error, _}` return
+shapes, `forward_fun` may return
+`{actions, [forward_action()], NewState}` where `forward_action()`
+matches the IP server-session interpreter's vocabulary
+(`{send_ip_packet, _}`, `{icmp_error, {Kind, Spec, Invoking}}`,
+`{drop, Reason}`). `{drop, _}` is intercepted before the action list
+reaches the session, so it generates only a drop counter bump and a
+`packet_dropped` lifecycle event - it never produces wire output.
+This lets a forward_fun reply with ICMP and drop the original in a
+single call.
 
 ICMP error synthesis (`src/masque_icmp.erl`) builds
 RFC-compliant ICMPv4/v6 replies - Destination Unreachable, Packet
@@ -504,7 +580,11 @@ Section-by-section compliance map: `docs/connect_ip.md`.
 
 ## 12. Metrics
 
-`src/masque_metrics.erl` wires five `instrument_meter` meters:
+`src/masque_metrics.erl` exposes two metric surfaces with different
+shapes.
+
+The tunnel-lifetime metrics use `instrument_meter` for OpenTelemetry
+compatibility:
 
 - `masque.tunnels.total` - counter; incremented on every accepted
   tunnel.
@@ -519,6 +599,27 @@ Every sample carries a tags map so OpenTelemetry-style attributes
 (e.g. `#{protocol => udp, transport => h3, target_port => 443}`)
 flow through. Call `masque_metrics:setup/0` at application start;
 the masque application already does this.
+
+The CONNECT-IP plumbing metrics deliberately use the OTP `counters`
+module instead - they are intended as a lightweight surface for
+downstream consumers (TUN/router, scrapers) and tests, with no
+dependency on a meter system being initialised:
+
+- `ip_drop_inc(Reason)` / `ip_drop_count(Reason)` - one bucket per
+  reason in `ip_drop_reasons/0` (`bcp38`, `scope_target`,
+  `scope_ipproto`, `malformed`, `forward_drop`, `ttl_zero`,
+  `mtu_exceeded`, `other`); unknown reasons fold into `other`.
+- `ip_assign_inc/0` / `ip_assigned_count/0` - allocator handed out a
+  range.
+- `ip_release_inc/0` / `ip_released_count/0` - allocator or
+  registry freed a range.
+- `ip_advertise_inc/0` / `ip_advertised_count/0` - handler emitted a
+  ROUTE_ADVERTISEMENT.
+
+`setup_ip_counters/0` is the idempotent allocator; tests call it
+directly, the masque application calls it from `setup/0`. All
+`*_count` reads return `0` when the counters aren't yet allocated,
+all `*_inc` calls become no-ops in the same case.
 
 ## 13. Known invariants
 
@@ -561,8 +662,23 @@ Where to plug in without forking the library:
   emit actions. Examples: record to an audit log, route to
   internal services, dynamically resolve targets.
 - **IP packet pipeline.** Use `masque_ip_proxy_handler` and set
-  `forward_fun :: fun((Packet) -> ok)` to replace the default
-  raw-socket forwarder.
+  `forward_fun :: fun((Packet, State) -> Return)`. `Return` may use
+  the historical `{reply, _, _} | {drop, _} | {forward, _} | ok |
+  {error, _}` shapes or the action-list shape
+  `{actions, [forward_action()], State}` where each action matches
+  the IP server-session interpreter's vocabulary. See
+  `docs/connect_ip.md` "Plumbing for external consumers".
+- **External TUN/router data plane.** Combine
+  `masque_ip_session_registry:lookup/1` with
+  `masque_ip:inject_packet/2` to deliver packets read from a TUN
+  device to the right server session without going through any
+  handler callback. Subscribe to the data plane by setting
+  `lifecycle_fun` in `handler_opts` to receive
+  `address_assigned` / `address_released` / `route_advertised` /
+  `packet_dropped` events.
+- **Per-family prefix delegation.** Set
+  `min_assignable_prefix => #{4 => N4, 6 => N6}` in `handler_opts`
+  to issue prefixes (e.g. `/64` to a CPE) instead of host routes.
 - **Upstream connection pooling.** Opt in with
   `upstream_pool => true` on direct clients and on chain handlers.
 - **Transport preference.** `transports => [h3]` to force QUIC;

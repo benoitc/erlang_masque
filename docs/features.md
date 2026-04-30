@@ -27,6 +27,49 @@ Current coverage of the `masque` library against the relevant RFCs.
 | Client-side request headers | `connect_opts()` `request_headers` for auth schemes that ride on the handshake (Privacy Pass `Authorization: PrivateToken ...`, proxy metadata) | Implemented across all six session modules |
 | Server-side rejection challenge | `{reject, Error, ExtraHeaders}` return from `accept/1` attaches `WWW-Authenticate` / `Retry-After` / custom headers to the HTTP response | Implemented (all three server modules) |
 
+## Delivered in v0.6
+
+- **Drop-reason telemetry**: inbound packet gating split into a
+  `accept_inbound/2` helper that attributes drops to a specific axis
+  (`bcp38`, `scope_target`, `scope_ipproto`, `malformed`,
+  `forward_drop`, ...). New simple counters in `masque_metrics`
+  (`ip_drop_inc/1`, `ip_drop_count/1`) backed by the OTP `counters`
+  module - independent of `instrument_meter` so tests and embedded
+  consumers can read drop counts without booting the meter system.
+- **`lifecycle_fun` callback**: the default proxy handler now emits
+  `address_assigned`, `address_released`, `route_advertised`, and
+  `packet_dropped` events to an optional callback in `handler_opts`,
+  with matching simple counters in `masque_metrics`.
+- **Cross-session address registry**: new `masque_ip_session_registry`
+  (gen_server child of `masque_sup`) maps every assigned address or
+  prefix to the session pid that serves it, with longest-prefix
+  match by interval inclusion and overlap-rejecting registration.
+  Sessions exiting abruptly are gc-ed via process monitors. The
+  default proxy handler now releases its allocations on `terminate/2`.
+- **Out-of-band packet injection**: `masque_ip:inject_packet/2`
+  pushes packets from any process into the right server session
+  for delivery to the connected client; handled across h1/h2/h3.
+- **Per-session prefix assignments**: the default allocator honours
+  the requested prefix length (clamped to `min_assignable_prefix`)
+  and walks the pool in stride-aligned blocks. Default
+  `min_assignable_prefix` is `#{4 => 32, 6 => 128}` so existing
+  configurations keep host-route semantics.
+- **Rich `forward_fun` actions**: in addition to the historical
+  return shapes, `forward_fun` may return
+  `{actions, [forward_action()], State}` to emit multiple effects
+  (`{send_ip_packet, _}`, `{icmp_error, {Kind, Spec, Invoking}}`,
+  `{drop, atom()}`) in one call; `{drop, _}` is intercepted by the
+  handler to bump the drop counter and lifecycle hook without
+  putting anything on the wire.
+- **RFC 9484 / 9298 / 9931 compliance fixes**: URI-template
+  hardening (rejects unsupported RFC 6570 operators, level >3
+  modifiers, non-ASCII input), prefix-targets must be canonical
+  (host bits zero), per-route start =< end validation,
+  ADDRESS_ASSIGN/REQUEST canonical-prefix enforcement, malformed
+  control-capsule abort on the IP client, RFC 9931 close-on-
+  rejected H1 CONNECT, optional `target` / `ipproto` URI variables,
+  inbound packet scoping with IPv6 extension-header walking.
+
 ## Delivered in v0.5
 
 - CONNECT-IP (RFC 9484): extended CONNECT with `:protocol=connect-ip`

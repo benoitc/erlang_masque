@@ -168,6 +168,135 @@ handle_ip_packet(Pkt, State) ->
     end.
 ```
 
+## Plumbing for external consumers
+
+The default proxy handler ships with hooks designed for downstream
+applications - typically a TUN/router process - that want to drive
+CONNECT-IP without forking the library. There are five seams:
+
+### 1. Address registry
+
+`masque_ip_session_registry` is a `gen_server` child of `masque_sup`
+that owns a single ETS table mapping every assigned address or
+prefix to the session pid that serves it. The default proxy handler
+calls into it on each allocation and on `terminate/2`.
+
+```erlang
+%% From a TUN read loop, given the destination address of a packet:
+case masque_ip_session_registry:lookup({10,0,0,5}) of
+    {ok, SessionPid, _ContextId} ->
+        masque_ip:inject_packet(SessionPid, Packet);
+    not_found ->
+        drop_or_icmp(Packet)
+end.
+```
+
+Lookup is direct ETS - the registry process is only on the write
+path. Storage is a `{Version, StartIntAddr}` ordered set whose
+intervals never overlap, so a host route inside an enclosing prefix
+resolves to the session that owns the wider prefix. Sessions that
+exit abruptly are gc-ed automatically via process monitors.
+
+Public API:
+
+| Call | Purpose |
+| --- | --- |
+| `lookup(IP)` | Longest-prefix match. Returns `{ok, Pid, CtxId} \| not_found`. |
+| `register(V, Addr, Pfx, Pid, CtxId)` | Reject on overlap. Default proxy handler calls this from `allocate_one/2`. |
+| `release(V, Addr, Pfx)` | Free a single range. Default handler calls this from `terminate/2`. |
+| `release_pid(Pid)` | Drop everything owned by `Pid`. |
+| `all/0` | Snapshot for diagnostics. |
+
+### 2. Out-of-band packet injection
+
+`masque_ip:inject_packet(SessionPid, Packet)` is a non-blocking cast
+that pushes `Packet` into a server session for delivery to the
+connected client, regardless of which transport that session uses
+(h1, h2, or h3). It re-uses the same wire path as the
+`{send_ip_packet, _}` handler action, so capsule framing, MTU
+checks, and metrics fire identically.
+
+### 3. Lifecycle callback
+
+Set `lifecycle_fun => fun((Event, Detail) -> ok)` in `handler_opts`
+to receive structured events from the default proxy handler:
+
+| Event | `Detail` |
+| --- | --- |
+| `address_assigned` | `#{version, address, prefix_len, entry}` |
+| `address_released` | `#{version, address, prefix_len}` |
+| `route_advertised` | `#{routes => [#ip_route{}]}` |
+| `packet_dropped`   | `#{reason, packet_size, ...}` |
+
+Typical use: program kernel routes on assign / release, log dropped
+packets with their reason. Errors thrown from the callback are
+swallowed so a misbehaving consumer cannot break the data plane.
+
+### 4. Per-family prefix policy
+
+`min_assignable_prefix => #{4 => Pfx4, 6 => Pfx6}` (default
+`#{4 => 32, 6 => 128}` - host routes only) caps the widest prefix
+the allocator will hand out. To delegate `/64`s to clients while
+keeping IPv4 host-routed:
+
+```erlang
+#{address_pool => {6, {16#2001,16#DB8,0,0,0,0,0,0}, 48},
+  min_assignable_prefix => #{4 => 32, 6 => 64}}
+```
+
+The allocator walks the pool in stride-aligned blocks of
+`2^(MaxPfx - Pfx)` and rejects ranges that overlap any prior
+assignment, so prefix and host allocations from the same pool
+coexist.
+
+### 5. Rich `forward_fun` actions
+
+In addition to the historical
+`{reply, _, _} | {drop, _} | {forward, _} | ok | {error, _}` shapes,
+`forward_fun` can return:
+
+```erlang
+{actions, [forward_action()], NewState}.
+
+forward_action() :: {send_ip_packet, binary()}
+                  | {icmp_error, {atom(), term(), binary()}}
+                  | {drop, atom()}.       %% telemetry only
+```
+
+`{drop, Reason}` bumps `masque_metrics:ip_drop_inc(Reason)` and
+emits a `packet_dropped` lifecycle event without putting anything
+on the wire, so a TUN consumer can both reply with an ICMP error
+and account for the dropped original in a single call:
+
+```erlang
+forward_fun(Pkt, S) ->
+    case ttl(Pkt) of
+        0 ->
+            {actions,
+             [{icmp_error, {time_exceeded, {v4, 0}, Pkt}},
+              {drop, ttl_zero}],
+             S};
+        _ ->
+            {forward, S}
+    end.
+```
+
+### Drop counters
+
+`masque_metrics` exposes simple `counters`-backed read APIs for the
+drop axis:
+
+```erlang
+masque_metrics:ip_drop_count(bcp38).
+masque_metrics:ip_drop_count(scope_target).
+masque_metrics:ip_drop_count(forward_drop).
+```
+
+Recognised reasons live in `masque_metrics:ip_drop_reasons/0`;
+unknown reasons land in the `other` bucket. Public helper
+`masque_ip_proxy_handler:emit_drop(Reason, Detail)` lets a TUN
+consumer's own data path bump the same counters and lifecycle hook.
+
 ## Wire-format notes
 
 Context ID 0 carries raw IP packets (see `masque_datagram`). Unknown
