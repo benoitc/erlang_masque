@@ -109,9 +109,16 @@ allocate_or_reject(Requests, #state{pools = []} = S) ->
 allocate_or_reject(Requests, #state{} = S) ->
     lists:mapfoldl(fun allocate_one/2, S, Requests).
 
-allocate_one(#ip_prefix_request{request_id = Id, version = V}, S) ->
-    case next_free(V, S) of
-        {ok, Addr, Pfx, S1} ->
+allocate_one(#ip_prefix_request{request_id = Id, version = V,
+                                prefix_len = ReqPfx},
+             #state{opts = Opts} = S) ->
+    %% RFC 9484 §4.6: the proxy MAY answer with the same prefix
+    %% length the client asked for, or with a more specific (longer)
+    %% one. The `min_assignable_prefix' opt sets the widest prefix
+    %% the proxy is willing to give out per IP family.
+    Pfx = effective_prefix(V, ReqPfx, Opts),
+    case next_free(V, Pfx, S) of
+        {ok, Addr, S1} ->
             Entry = #ip_assignment{request_id = Id, version = V,
                                    address = Addr, prefix_len = Pfx},
             register_with_registry(V, Addr, Pfx, S1),
@@ -126,6 +133,26 @@ allocate_one(#ip_prefix_request{request_id = Id, version = V}, S) ->
             {Reject, S}
     end.
 
+effective_prefix(V, ReqPfx, Opts) ->
+    Min = min_assignable(V, Opts),
+    Max = max_prefix(V),
+    %% Clamp into [Min, Max]. RFC 9484 says we may return a longer
+    %% (= numerically larger) prefix, never a wider one than Min.
+    Cand = case is_integer(ReqPfx) andalso ReqPfx >= 0
+                andalso ReqPfx =< Max of
+        true  -> ReqPfx;
+        false -> Max
+    end,
+    erlang:max(Cand, Min).
+
+min_assignable(V, Opts) ->
+    Default = max_prefix(V),
+    case maps:get(min_assignable_prefix, Opts, undefined) of
+        undefined         -> Default;
+        Map when is_map(Map) -> maps:get(V, Map, Default);
+        N when is_integer(N) -> N
+    end.
+
 register_with_registry(V, Addr, Pfx, #state{opts = Opts}) ->
     %% The handler runs inside the session's process, so `self()' is
     %% the session pid. Context id 0 is the IP datagram context per
@@ -136,15 +163,14 @@ register_with_registry(V, Addr, Pfx, #state{opts = Opts}) ->
     _ = masque_ip_session_registry:register(V, Addr, Pfx, Pid, Ctx),
     ok.
 
-next_free(V, #state{pools = Pools, assigned = Assigned} = S) ->
+next_free(V, Pfx, #state{pools = Pools, assigned = Assigned} = S) ->
     case pick_pool(V, Pools) of
         undefined -> none;
         Pool ->
-            case iter_pool(Pool, Assigned) of
+            case iter_pool(V, Pfx, Pool, Assigned) of
                 {ok, Addr} ->
-                    {ok, Addr, max_prefix(V),
-                     S#state{assigned =
-                                 [{V, Addr, max_prefix(V)} | Assigned]}};
+                    {ok, Addr,
+                     S#state{assigned = [{V, Addr, Pfx} | Assigned]}};
                 exhausted -> none
             end
     end.
@@ -153,29 +179,61 @@ pick_pool(_V, []) -> undefined;
 pick_pool(V, [#ip_route{version = V} = P | _]) -> P;
 pick_pool(V, [_ | Rest]) -> pick_pool(V, Rest).
 
-iter_pool(#ip_route{start_addr = S, end_addr = E}, Assigned) ->
-    iter_range(S, E, Assigned).
+iter_pool(V, Pfx,
+          #ip_route{start_addr = StartAddr, end_addr = EndAddr},
+          Assigned) ->
+    Max = max_prefix(V),
+    Stride = 1 bsl (Max - Pfx),
+    StartInt = align_up(addr_to_int(V, StartAddr), Stride),
+    EndInt = addr_to_int(V, EndAddr),
+    iter_range_strided(V, StartInt, EndInt, Pfx, Stride, Assigned).
 
-iter_range(Addr, End, _Assigned) when Addr > End -> exhausted;
-iter_range(Addr, End, Assigned) ->
-    Taken = lists:any(fun({_, A, _}) -> A =:= Addr end, Assigned),
-    case Taken of
-        true  -> iter_range(inc_addr(Addr), End, Assigned);
-        false -> {ok, Addr}
+iter_range_strided(_V, Cur, End, _Pfx, _Stride, _Assigned)
+  when Cur > End ->
+    exhausted;
+iter_range_strided(V, Cur, End, Pfx, Stride, Assigned) ->
+    %% A candidate range covers [Cur, Cur + Stride - 1] in int space.
+    Last = Cur + Stride - 1,
+    case Last > End of
+        true  -> exhausted;
+        false ->
+            case overlaps_assigned(V, Cur, Last, Assigned) of
+                true  ->
+                    iter_range_strided(V, Cur + Stride, End, Pfx, Stride,
+                                       Assigned);
+                false ->
+                    {ok, int_to_addr(V, Cur)}
+            end
     end.
 
-inc_addr({A,B,C,D}) ->
-    N = ((A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D) + 1,
+overlaps_assigned(V, S, E, Assigned) ->
+    Max = max_prefix(V),
+    lists:any(
+      fun({V0, A, P0}) when V0 =:= V ->
+              AStart = addr_to_int(V, A),
+              AEnd = AStart + (1 bsl (Max - P0)) - 1,
+              max(S, AStart) =< min(E, AEnd);
+         (_) -> false
+      end, Assigned).
+
+align_up(N, Stride) when Stride > 0 ->
+    Mask = Stride - 1,
+    (N + Mask) band (bnot Mask).
+
+addr_to_int(4, {A,B,C,D}) ->
+    (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D;
+addr_to_int(6, {A,B,C,D,E,F,G,H}) ->
+    (A bsl 112) bor (B bsl 96) bor (C bsl 80) bor (D bsl 64)
+    bor (E bsl 48) bor (F bsl 32) bor (G bsl 16) bor H.
+
+int_to_addr(4, N) ->
     {(N bsr 24) band 16#FF, (N bsr 16) band 16#FF,
-     (N bsr 8) band 16#FF, N band 16#FF};
-inc_addr({A,B,C,D,E,F,G,H}) ->
-    N = (A bsl 112) bor (B bsl 96) bor (C bsl 80) bor (D bsl 64)
-        bor (E bsl 48) bor (F bsl 32) bor (G bsl 16) bor H,
-    N1 = N + 1,
-    {(N1 bsr 112) band 16#FFFF, (N1 bsr 96) band 16#FFFF,
-     (N1 bsr 80) band 16#FFFF, (N1 bsr 64) band 16#FFFF,
-     (N1 bsr 48) band 16#FFFF, (N1 bsr 32) band 16#FFFF,
-     (N1 bsr 16) band 16#FFFF, N1 band 16#FFFF}.
+     (N bsr 8)  band 16#FF, N band 16#FF};
+int_to_addr(6, N) ->
+    {(N bsr 112) band 16#FFFF, (N bsr 96) band 16#FFFF,
+     (N bsr 80)  band 16#FFFF, (N bsr 64) band 16#FFFF,
+     (N bsr 48)  band 16#FFFF, (N bsr 32) band 16#FFFF,
+     (N bsr 16)  band 16#FFFF, N band 16#FFFF}.
 
 %% Turn an `address_pool' option (a prefix, a route, or a list of
 %% these) into a list of `#ip_route{}` ranges we can allocate from.

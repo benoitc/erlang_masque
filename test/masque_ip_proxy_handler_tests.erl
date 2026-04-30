@@ -184,6 +184,61 @@ address_assigned_emits_lifecycle_test() ->
         ct:fail("lifecycle_fun was not invoked for address_assigned")
     end.
 
+%%====================================================================
+%% Per-session prefix assignments
+%%====================================================================
+
+allocate_prefix_aligned_test() ->
+    drain(),
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    %% Pool spans 10.0.0.0/24 (256 addresses); allow up to /28 wide.
+    Opts = #{address_pool => {4, {10,0,0,0}, 24},
+             min_assignable_prefix => #{4 => 28}},
+    {ok, S0} = masque_ip_proxy_handler:init(Req, Opts),
+    Reqs = [#ip_prefix_request{request_id = 1, version = 4,
+                               address = {0,0,0,0}, prefix_len = 28}],
+    {ok, S1, [{assign, [Assign1]}]} =
+        masque_ip_proxy_handler:handle_address_request(Reqs, S0),
+    %% First /28 is 10.0.0.0/28.
+    ?assertMatch(#ip_assignment{prefix_len = 28,
+                                address = {10,0,0,0}}, Assign1),
+    %% Second /28 must be aligned to the next 16-address boundary.
+    Reqs2 = [#ip_prefix_request{request_id = 2, version = 4,
+                                address = {0,0,0,0}, prefix_len = 28}],
+    {ok, _S2, [{assign, [Assign2]}]} =
+        masque_ip_proxy_handler:handle_address_request(Reqs2, S1),
+    ?assertMatch(#ip_assignment{prefix_len = 28,
+                                address = {10,0,0,16}}, Assign2).
+
+%% Even when the client asks for a wider prefix than `min_assignable',
+%% the proxy clamps the response to `min_assignable'.
+allocate_clamps_to_min_assignable_test() ->
+    drain(),
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    Opts = #{address_pool => {4, {10,0,0,0}, 24},
+             min_assignable_prefix => #{4 => 30}},
+    {ok, S0} = masque_ip_proxy_handler:init(Req, Opts),
+    %% Client asks for /24, but server's `min_assignable' is /30 so
+    %% we must answer with /30.
+    Reqs = [#ip_prefix_request{request_id = 1, version = 4,
+                               address = {0,0,0,0}, prefix_len = 24}],
+    {ok, _, [{assign, [A]}]} =
+        masque_ip_proxy_handler:handle_address_request(Reqs, S0),
+    ?assertEqual(30, A#ip_assignment.prefix_len).
+
+%% Default behaviour (no min_assignable_prefix opt) still gives /32.
+allocate_default_is_host_route_test() ->
+    drain(),
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    Opts = #{address_pool => {4, {10,0,0,0}, 24}},
+    {ok, S0} = masque_ip_proxy_handler:init(Req, Opts),
+    Reqs = [#ip_prefix_request{request_id = 1, version = 4,
+                               address = {0,0,0,0}, prefix_len = 32}],
+    {ok, _, [{assign, [A]}]} =
+        masque_ip_proxy_handler:handle_address_request(Reqs, S0),
+    ?assertEqual(32, A#ip_assignment.prefix_len),
+    ?assertEqual({10,0,0,0}, A#ip_assignment.address).
+
 terminate_releases_assignments_test() ->
     ok = masque_metrics:setup_ip_counters(),
     drain(),
