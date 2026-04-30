@@ -239,6 +239,41 @@ allocate_default_is_host_route_test() ->
     ?assertEqual(32, A#ip_assignment.prefix_len),
     ?assertEqual({10,0,0,0}, A#ip_assignment.address).
 
+%%====================================================================
+%% forward_fun {actions, _, _} shape
+%%====================================================================
+
+forward_actions_emit_drop_and_send_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    Self = self(),
+    Hook = fun(E, D) -> Self ! {hook, E, D} end,
+    Reply = <<"reply payload">>,
+    Forward = fun(_Pkt, St) ->
+        {actions,
+         [{send_ip_packet, Reply},
+          {drop, ttl_zero}],
+         St}
+    end,
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    Opts = #{allow_private => true,
+             lifecycle_fun => Hook,
+             forward_fun => Forward},
+    S = init_with(Req, Opts),
+    Before = masque_metrics:ip_drop_count(ttl_zero),
+    Pkt = v4_packet(10,0,0,1, 192,0,2,1, 17),
+    %% The handler returns a 3-tuple `{ok, S, Actions}' with the
+    %% non-drop actions ready for the session's interpreter.
+    {ok, _S2, Actions} =
+        masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    ?assertEqual([{send_ip_packet, Reply}], Actions),
+    ?assertEqual(Before + 1, masque_metrics:ip_drop_count(ttl_zero)),
+    receive
+        {hook, packet_dropped, #{reason := ttl_zero}} -> ok
+    after 100 ->
+        ct:fail("lifecycle_fun was not invoked for {drop, ttl_zero}")
+    end.
+
 terminate_releases_assignments_test() ->
     ok = masque_metrics:setup_ip_counters(),
     drain(),

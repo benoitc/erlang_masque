@@ -320,17 +320,41 @@ forward(Packet, #state{opts = Opts} = S) ->
     case maps:find(forward_fun, Opts) of
         {ok, Fun} when is_function(Fun, 2) ->
             case Fun(Packet, S) of
-                {reply, RepPkt, S2}  -> {ok, S2, [{send_ip_packet, RepPkt}]};
+                %% Backward-compat shapes -----------------------------
+                {reply, RepPkt, S2} ->
+                    {ok, S2, [{send_ip_packet, RepPkt}]};
                 {drop, S2} ->
                     emit_drop(forward_drop, drop_detail(Packet), Opts),
                     {ok, S2};
-                {forward, S2}        -> {ok, S2};
-                ok                   -> {ok, S};
-                {error, _}           -> {ok, S}
+                {forward, S2} ->
+                    {ok, S2};
+                ok ->
+                    {ok, S};
+                {error, _} ->
+                    {ok, S};
+                %% New action-list shape ------------------------------
+                %% Lets a forward_fun emit multiple effects in one call
+                %% (e.g. ICMP error + drop). Recognised actions match
+                %% the existing IP-server-session interpreter:
+                %%   {send_ip_packet, binary()}
+                %%   {icmp_error, {Kind, Spec, Invoking}}
+                %%   {drop, atom()}                 % telemetry only
+                {actions, Actions, S2} when is_list(Actions) ->
+                    {Wire, _} = process_forward_actions(Actions, Packet, Opts),
+                    {ok, S2, Wire}
             end;
         error ->
             {ok, S}
     end.
+
+process_forward_actions(Actions, Packet, Opts) ->
+    lists:foldl(
+      fun({drop, Reason}, {Wire, Drops}) ->
+              emit_drop(Reason, drop_detail(Packet), Opts),
+              {Wire, [Reason | Drops]};
+         (Action, {Wire, Drops}) ->
+              {Wire ++ [Action], Drops}
+      end, {[], []}, Actions).
 
 %%====================================================================
 %% Drop emit / lifecycle hook

@@ -130,10 +130,6 @@ handle_call({register, V, Addr, Pfx, Pid, Ctx}, _From, S) ->
                     Mons = (S#state.monitors)#{
                         MRef => [{V, Start, Pfx} | Mon]},
                     {reply, ok, S#state{monitors = Mons}};
-                {idempotent, MRef} ->
-                    %% same pid, exact range -> treat as ok.
-                    _ = MRef,
-                    {reply, ok, S};
                 conflict ->
                     {reply, {error, conflict}, S}
             end
