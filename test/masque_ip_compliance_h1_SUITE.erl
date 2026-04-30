@@ -15,13 +15,15 @@
 -export([initial_route_advertisement/1,
          address_allocation_round_robin/1,
          pool_exhaustion_rejects/1,
-         oversize_packet_rejected/1]).
+         oversize_packet_rejected/1,
+         inject_packet_via_registry/1]).
 
 all() ->
     [initial_route_advertisement,
      address_allocation_round_robin,
      pool_exhaustion_rejects,
-     oversize_packet_rejected].
+     oversize_packet_rejected,
+     inject_packet_via_registry].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(masque),
@@ -89,6 +91,14 @@ case_opts(pool_exhaustion_rejects, Ctx) ->
         address_pool => #ip_route{version = 4,
                                   start_addr = {10,200,0,1},
                                   end_addr   = {10,200,0,1},
+                                  ip_protocol = 0}
+    };
+case_opts(inject_packet_via_registry, Ctx) ->
+    Base = base_opts(Ctx),
+    Base#{
+        address_pool => #ip_route{version = 4,
+                                  start_addr = {10,200,0,1},
+                                  end_addr   = {10,200,0,3},
                                   ip_protocol = 0}
     };
 case_opts(_, Ctx) ->
@@ -161,6 +171,31 @@ oversize_packet_rejected(Config) ->
     ?assertMatch({error, {packet_too_large, 2000, 1500}},
                  masque:send_ip_packet(Sess, Big)),
     ok = masque:close(Sess).
+
+inject_packet_via_registry(Config) ->
+    {ok, Sess} = do_connect(?config(port, Config)),
+    _ = flush_advertise(Sess),
+    {ok, [Id]} = masque:request_addresses(Sess, [{4, {0,0,0,0}, 0}]),
+    Assigned =
+        receive
+            {masque_address_assign, Sess,
+             [#ip_assignment{request_id = Id, version = 4, address = A}]} -> A
+        after 2000 -> ct:fail("no assign")
+        end,
+    {ok, ServerPid, _Ctx} = masque_ip_session_registry:lookup(Assigned),
+    Pkt = ipv4_packet({203,0,113,1}, Assigned, 17),
+    ok = masque_ip:inject_packet(ServerPid, Pkt),
+    receive
+        {masque_ip_packet, Sess, Got} when Got =:= Pkt -> ok
+    after 2000 -> ct:fail("injected packet did not arrive at client")
+    end,
+    ok = masque:close(Sess).
+
+ipv4_packet({SA,SB,SC,SD}, {DA,DB,DC,DD}, Proto) ->
+    IHL = 5,
+    Total = IHL * 4,
+    <<4:4, IHL:4, 0:8, Total:16, 0:16, 0:16, 64:8, Proto:8, 0:16,
+      SA:8, SB:8, SC:8, SD:8, DA:8, DB:8, DC:8, DD:8>>.
 
 %%====================================================================
 %% Internal

@@ -6,7 +6,7 @@
 %%% resolution to reject tunnels targeting internal networks.
 -module(masque_ip).
 
--export([is_public/1, reject_requests/1]).
+-export([is_public/1, reject_requests/1, inject_packet/2]).
 
 -include("masque_ip.hrl").
 
@@ -24,6 +24,16 @@ reject_one(#ip_prefix_request{request_id = Id, version = 4}) ->
 reject_one(#ip_prefix_request{request_id = Id, version = 6}) ->
     #ip_assignment{request_id = Id, version = 6,
                    address = {0,0,0,0,0,0,0,0}, prefix_len = 128}.
+
+%% @doc Push an IP packet into a server session for delivery to its
+%% connected client. Non-blocking. Intended for out-of-band injectors
+%% (e.g. a TUN device owner that holds the session pid via the
+%% address registry); accepted by both `masque_ip_server_session'
+%% (h2/h3) and `masque_ip_h1_server_session' (h1).
+-spec inject_packet(pid(), binary()) -> ok.
+inject_packet(SessionPid, Packet) when is_pid(SessionPid),
+                                       is_binary(Packet) ->
+    gen_server:cast(SessionPid, {inject_packet, Packet}).
 
 -spec is_public(inet:ip_address()) -> boolean().
 

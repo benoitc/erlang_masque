@@ -21,7 +21,8 @@
          client_rejects_capsule_off/1,
          bad_target_shape_for_ip/1,
          oversize_packet_rejected/1,
-         capsule_protocol_forced_true/1]).
+         capsule_protocol_forced_true/1,
+         inject_packet_via_registry/1]).
 
 all() ->
     [initial_route_advertisement,
@@ -30,7 +31,8 @@ all() ->
      client_rejects_capsule_off,
      bad_target_shape_for_ip,
      oversize_packet_rejected,
-     capsule_protocol_forced_true].
+     capsule_protocol_forced_true,
+     inject_packet_via_registry].
 
 init_per_suite(Config) ->
     application:ensure_all_started(quic),
@@ -79,6 +81,14 @@ case_opts(pool_exhaustion_rejects, Ctx) ->
         address_pool => #ip_route{version = 4,
                                   start_addr = {10,200,0,1},
                                   end_addr   = {10,200,0,1},
+                                  ip_protocol = 0}
+    };
+case_opts(inject_packet_via_registry, Ctx) ->
+    Base = base_opts(Ctx),
+    Base#{
+        address_pool => #ip_route{version = 4,
+                                  start_addr = {10,200,0,1},
+                                  end_addr   = {10,200,0,3},
                                   ip_protocol = 0}
     };
 case_opts(_, Ctx) ->
@@ -193,6 +203,38 @@ bad_target_shape_for_ip(_Config) ->
        masque:connect(<<"https://127.0.0.1:1">>,
                       {<<"dns.google">>, 5353},     %% UDP-shape
                       #{protocol => ip})).
+
+%% RFC 9484 §6: an out-of-band injector (e.g. a TUN device owner)
+%% must be able to push a packet into the right server session given
+%% only a destination address. This case validates the registry +
+%% inject_packet plumbing end-to-end over h3.
+inject_packet_via_registry(Config) ->
+    {ok, Sess} = do_connect(?config(port, Config)),
+    _ = flush_advertise(Sess),
+    {ok, [Id]} = masque:request_addresses(Sess, [{4, {0,0,0,0}, 0}]),
+    Assigned =
+        receive
+            {masque_address_assign, Sess,
+             [#ip_assignment{request_id = Id, version = 4, address = A}]} -> A
+        after 2000 -> ct:fail("no assign")
+        end,
+    %% Look up the server session pid via the registry.
+    {ok, ServerPid, _Ctx} = masque_ip_session_registry:lookup(Assigned),
+    %% A minimal IPv4 packet whose destination matches the assignment;
+    %% it will reach the connected client as a {masque_ip_packet, Sess, _}.
+    Pkt = ipv4_packet({203,0,113,1}, Assigned, 17),
+    ok = masque_ip:inject_packet(ServerPid, Pkt),
+    receive
+        {masque_ip_packet, Sess, Got} when Got =:= Pkt -> ok
+    after 2000 -> ct:fail("injected packet did not arrive at client")
+    end,
+    ok = masque:close(Sess).
+
+ipv4_packet({SA,SB,SC,SD}, {DA,DB,DC,DD}, Proto) ->
+    IHL = 5,
+    Total = IHL * 4,
+    <<4:4, IHL:4, 0:8, Total:16, 0:16, 0:16, 64:8, Proto:8, 0:16,
+      SA:8, SB:8, SC:8, SD:8, DA:8, DB:8, DC:8, DD:8>>.
 
 %%====================================================================
 %% Internal

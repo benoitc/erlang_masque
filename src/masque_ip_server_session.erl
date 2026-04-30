@@ -153,6 +153,14 @@ handle_call(_Req, _From, S) ->
 
 handle_cast(connection_closed, S) ->
     {stop, connection_closed, S};
+handle_cast({inject_packet, Pkt}, S) when is_binary(Pkt) ->
+    %% Out-of-band packet injection from a process other than the
+    %% session itself (e.g. a TUN device owner). Re-uses the same
+    %% transport-send path the `{send_ip_packet, _}' action uses.
+    case do_actions([{send_ip_packet, Pkt}], S) of
+        {ok, S2}            -> {noreply, S2};
+        {stop, Reason, S2}  -> {stop, Reason, S2}
+    end;
 handle_cast(_Msg, S) ->
     {noreply, S}.
 

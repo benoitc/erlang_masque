@@ -93,6 +93,13 @@ init(#{conn := Conn, stream_id := StreamId,
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
+handle_cast({inject_packet, Pkt}, S) when is_binary(Pkt) ->
+    %% Out-of-band packet injection. Re-uses the same h1 capsule
+    %% send path that the `{send_ip_packet, _}' action takes.
+    case do_actions([{send_ip_packet, Pkt}], S) of
+        {ok, S2}            -> {noreply, S2};
+        {stop, Reason, S2}  -> {stop, Reason, S2}
+    end;
 handle_cast(_Msg, S) ->
     {noreply, S}.
 
