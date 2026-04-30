@@ -25,6 +25,11 @@
          handle_route_advertisement/2,
          terminate/2]).
 
+%% Public helpers reused by downstream consumers (TUN/router) so they
+%% emit the same drop counter and lifecycle events as the default
+%% handler.
+-export([emit_drop/2, emit_drop/3]).
+
 -include("masque_ip.hrl").
 
 -record(state, {
@@ -204,29 +209,76 @@ max_prefix(6) -> 128.
 %% Data-plane: forward_fun
 %%====================================================================
 
-handle_ip_packet(Packet, #state{opts = Opts,
-                                target = Target,
-                                ipproto = IPProto} = S) ->
-    %% RFC 9484 §5.x: the proxy MUST drop packets that fall outside
-    %% the negotiated `target' / `ipproto' scope before forwarding.
-    case src_filter_passes(Packet, S)
-         andalso masque_ip_packet:scope_passes(Packet, Target, IPProto) of
-        true  -> forward(Packet, S, Opts);
-        false -> {ok, S}
+handle_ip_packet(Packet, #state{opts = Opts} = S) ->
+    case accept_inbound(Packet, S) of
+        ok ->
+            forward(Packet, S);
+        {drop, Reason} ->
+            emit_drop(Reason, drop_detail(Packet), Opts),
+            {ok, S}
     end.
 
-forward(Packet, S, Opts) ->
+%% RFC 9484 §5: the proxy MUST drop packets that fail BCP-38 source
+%% filtering or fall outside the negotiated `target' / `ipproto'
+%% scope. Returns the first failing axis so the drop counter and the
+%% lifecycle hook can attribute the cause.
+accept_inbound(Packet, #state{target = Target, ipproto = IPProto} = S) ->
+    case src_filter_passes(Packet, S) of
+        false ->
+            {drop, bcp38};
+        true ->
+            case masque_ip_packet:scope_check(Packet, Target, IPProto) of
+                ok              -> ok;
+                {error, Reason} -> {drop, Reason}
+            end
+    end.
+
+forward(Packet, #state{opts = Opts} = S) ->
     case maps:find(forward_fun, Opts) of
         {ok, Fun} when is_function(Fun, 2) ->
             case Fun(Packet, S) of
                 {reply, RepPkt, S2}  -> {ok, S2, [{send_ip_packet, RepPkt}]};
-                {drop, S2}           -> {ok, S2};
+                {drop, S2} ->
+                    emit_drop(forward_drop, drop_detail(Packet), Opts),
+                    {ok, S2};
                 {forward, S2}        -> {ok, S2};
                 ok                   -> {ok, S};
                 {error, _}           -> {ok, S}
             end;
         error ->
             {ok, S}
+    end.
+
+%%====================================================================
+%% Drop emit / lifecycle hook
+%%====================================================================
+
+%% @doc Bump the drop counter and invoke `lifecycle_fun' if configured
+%% in handler opts. Public so a TUN/router consumer that runs its own
+%% data path can drive the same telemetry without re-implementing it.
+-spec emit_drop(atom(), map()) -> ok.
+emit_drop(Reason, Detail) ->
+    masque_metrics:ip_drop_inc(Reason),
+    invoke_lifecycle(Detail, packet_dropped, Detail#{reason => Reason}, #{}).
+
+-spec emit_drop(atom(), map(), map()) -> ok.
+emit_drop(Reason, Detail, Opts) ->
+    masque_metrics:ip_drop_inc(Reason),
+    invoke_lifecycle(Opts, packet_dropped, Detail#{reason => Reason}, Opts).
+
+drop_detail(Packet) when is_binary(Packet) ->
+    #{packet_size => byte_size(Packet)}.
+
+invoke_lifecycle(_Carrier, Event, Detail, Opts) ->
+    case maps:find(lifecycle_fun, Opts) of
+        {ok, Fun} when is_function(Fun, 2) ->
+            try Fun(Event, Detail) of
+                _ -> ok
+            catch
+                _:_ -> ok
+            end;
+        _ ->
+            ok
     end.
 
 %% BCP-38-style source check: reject packets whose source address

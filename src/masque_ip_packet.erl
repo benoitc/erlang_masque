@@ -12,7 +12,8 @@
 %%% `ipproto' is matched against.
 -module(masque_ip_packet).
 
--export([destination/1, upper_protocol/1, scope_passes/3]).
+-export([destination/1, upper_protocol/1,
+         scope_passes/3, scope_check/3]).
 
 -type version() :: 4 | 6.
 -type address() :: inet:ip4_address() | inet:ip6_address().
@@ -52,13 +53,31 @@ upper_protocol(_) ->
                    masque_uri_ip:ip_target(),
                    masque_uri_ip:ip_ipproto()) -> boolean().
 scope_passes(Packet, Target, IPProto) ->
+    case scope_check(Packet, Target, IPProto) of
+        ok         -> true;
+        {error, _} -> false
+    end.
+
+%% @doc Reasonful variant of `scope_passes/3' for telemetry. Returns
+%% the first failing axis instead of a boolean.
+-spec scope_check(binary(),
+                  masque_uri_ip:ip_target(),
+                  masque_uri_ip:ip_ipproto()) ->
+    ok | {error, malformed | scope_target | scope_ipproto}.
+scope_check(Packet, Target, IPProto) ->
     case destination(Packet) of
         {ok, V, Dst} ->
             case target_matches(V, Dst, Target) of
-                true  -> ipproto_matches(Packet, IPProto);
-                false -> false
+                true ->
+                    case ipproto_matches(Packet, IPProto) of
+                        true  -> ok;
+                        false -> {error, scope_ipproto}
+                    end;
+                false ->
+                    {error, scope_target}
             end;
-        {error, _} -> false
+        {error, _} ->
+            {error, malformed}
     end.
 
 %%====================================================================
