@@ -558,10 +558,10 @@ build_request(Data) ->
 render_header(N, V) -> [N, <<": ">>, V, <<"\r\n">>].
 
 expand_path(unscoped) ->
-    masque_uri_udp_bind:expand(<<"/", ?MASQUE_DEFAULT_URI_TEMPLATE/binary>>,
+    masque_uri_udp_bind:expand(?MASQUE_DEFAULT_URI_TEMPLATE,
                                 unscoped);
 expand_path({Host, Port}) ->
-    masque_uri_udp_bind:expand(<<"/", ?MASQUE_DEFAULT_URI_TEMPLATE/binary>>,
+    masque_uri_udp_bind:expand(?MASQUE_DEFAULT_URI_TEMPLATE,
                                 {Host, Port}).
 
 read_response(Socket) ->

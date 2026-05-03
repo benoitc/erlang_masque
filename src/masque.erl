@@ -302,25 +302,24 @@ dial_single_or_pool(Mod, Transport, Target, Opts, Owner) ->
 
 session_mod(Opts, h3) ->
     case maps:get(protocol, Opts, udp) of
-        tcp -> masque_tcp_client_session;
-        ip  -> masque_ip_client_session;
-        _   -> masque_client_session
+        tcp      -> masque_tcp_client_session;
+        ip       -> masque_ip_client_session;
+        udp_bind -> masque_udp_bind_client_session;
+        _        -> masque_client_session
     end;
 session_mod(Opts, h2) ->
     case maps:get(protocol, Opts, udp) of
-        tcp -> masque_tcp_client_session;
-        ip  -> masque_ip_client_session;
-        _   -> masque_h2_client_session
+        tcp      -> masque_tcp_client_session;
+        ip       -> masque_ip_client_session;
+        udp_bind -> masque_udp_bind_client_session;
+        _        -> masque_h2_client_session
     end;
 session_mod(Opts, h1) ->
-    %% h1 supports CONNECT-UDP + CONNECT-IP via HTTP Upgrade (RFC 9297
-    %% capsules on the upgraded socket) and classic CONNECT-TCP via
-    %% RFC 9110 §9.3.6 (raw byte pipe after `200 Connection
-    %% Established').
     case maps:get(protocol, Opts, udp) of
-        udp -> masque_h1_client_session;
-        ip  -> masque_ip_h1_client_session;
-        tcp -> masque_tcp_h1_client_session
+        udp      -> masque_h1_client_session;
+        ip       -> masque_ip_h1_client_session;
+        tcp      -> masque_tcp_h1_client_session;
+        udp_bind -> masque_udp_bind_h1_client_session
     end.
 
 %% Direct (non-racing) dial via a single transport module.

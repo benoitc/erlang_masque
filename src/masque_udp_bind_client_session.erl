@@ -644,6 +644,8 @@ do_connect(#data{transport = h3} = Data, Opts) ->
         sync      => true,
         verify    => maps:get(verify, Opts, verify_none),
         timeout   => maps:get(timeout, Opts, 5000),
+        settings  => #{enable_connect_protocol => 1, h3_datagram => 1},
+        h3_datagram_enabled => true,
         quic_opts => #{
             alpn => maps:get(alpn, Opts, [<<"h3">>]),
             max_datagram_frame_size => 65535
@@ -712,7 +714,7 @@ expand_path({Host, Port}) ->
                                 {to_bin(Host), Port}).
 
 default_template_bin() ->
-    <<"https://h/", ?MASQUE_DEFAULT_URI_TEMPLATE/binary>>.
+    <<"https://h", ?MASQUE_DEFAULT_URI_TEMPLATE/binary>>.
 
 %%====================================================================
 %% Response validation: both Connect-UDP-Bind: ?1 AND
