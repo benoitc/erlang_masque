@@ -27,6 +27,57 @@ Current coverage of the `masque` library against the relevant RFCs.
 | Client-side request headers | `connect_opts()` `request_headers` for auth schemes that ride on the handshake (Privacy Pass `Authorization: PrivateToken ...`, proxy metadata) | Implemented across all six session modules |
 | Server-side rejection challenge | `{reject, Error, ExtraHeaders}` return from `accept/1` attaches `WWW-Authenticate` / `Retry-After` / custom headers to the HTTP response | Implemented (all three server modules) |
 
+## Delivered in v0.7
+
+- **Connect-UDP-Bind** (draft-ietf-masque-connect-udp-listen-11):
+  multi-peer UDP proxying as a sibling of CONNECT-UDP. Uses the
+  existing `connect-udp` URI template plus a `Connect-UDP-Bind: ?1`
+  request and response header to negotiate. Supports both unscoped
+  binds (the bind socket on the proxy can talk to any peer the
+  operator's policy allows) and scoped binds (proxy enforces the
+  peer at the data plane).
+- **Per-session UDP bind socket** on the proxy: opens a `gen_udp`
+  socket per tunnel, advertises one or more public addresses on
+  the response via `Proxy-Public-Address` (RFC 9651 list of String
+  IP-port tuples), gates inbound packets via a `peer_filter_fun`
+  hook (default rejects RFC 1918 / link-local / multicast,
+  loopback allowed for testability), and runs an optional
+  `scrub_fun` policy hook for DDoS / per-packet filtering (default
+  identity).
+- **Compression Contexts** capsules (provisional IANA codes 0x11 /
+  0x12 / 0x13): `COMPRESSION_ASSIGN`, `COMPRESSION_ACK`,
+  `COMPRESSION_CLOSE` encode/decode, with strict draft-11 wire
+  validation (zero context-id rejected, IP Version 0 omits IP/Port,
+  `COMPRESSION_CLOSE` with id 0 always malformed).
+- **Per-session compression table** with parity (client-even /
+  proxy-odd context-IDs), duplicate-id detection, per-tuple
+  uniqueness with cross-side conflict resolution (close the
+  proxy-opened context) and same-side conflict treated as
+  malformed, singleton-uncompressed invariant on both sides,
+  ACK accounting (`pending_ack` -> `installed`), close removes
+  entries from id and tuple indexes, and bounded size for
+  hostile-peer protection.
+- **Listener / dispatch** wired across h1, h2, h3: opt-in via
+  `accept_bind => true' (default `false', so existing UDP / TCP /
+  IP listeners are unchanged); `bind_handler' opt picks the
+  module (default `masque_udp_bind_proxy_handler'). The matcher
+  reads `Connect-UDP-Bind' before choosing the URI matcher so the
+  percent-encoded `*' wildcard for unscoped bind only flows the
+  bind path; legacy CONNECT-UDP requests are bit-for-bit unchanged
+  when the header is absent or invalid.
+- **Public API** for clients: `masque:bind_connect/3',
+  `masque:send_to/3', `masque:assign_compression/2',
+  `masque:open_uncompressed_context/1',
+  `masque:close_compression/2',
+  `masque:proxy_public_address/1'.
+  Owner messages: `{masque_bind_packet, _, Peer, Bytes}',
+  `{masque_compression_assigned, _, ContextId, Peer}',
+  `{masque_compression_acked, _, ContextId}',
+  `{masque_compression_closed, _, ContextId}'.
+- **Documentation**: new `docs/connect_udp_bind.md' (quickstart,
+  wire format, coexistence with RFC 9298, compression policy
+  seam).
+
 ## Delivered in v0.6
 
 - **Drop-reason telemetry**: inbound packet gating split into a

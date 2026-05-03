@@ -578,6 +578,103 @@ Too Big (v6), Time Exceeded - with truncated invoking packets.
 
 Section-by-section compliance map: `docs/connect_ip.md`.
 
+## 11b. Connect-UDP-Bind
+
+Connect-UDP-Bind (draft-ietf-masque-connect-udp-listen-11) lives
+alongside CONNECT-UDP rather than replacing it. It is opt-in via
+the listener-level `accept_bind => true` flag. When enabled, the
+existing `connect-udp` dispatch additionally inspects a
+`Connect-UDP-Bind: ?1` request header (RFC 9651 Boolean): on
+match, the request routes to the bind matcher
+(`masque_uri_udp_bind`) and the bind handler / session; otherwise
+it flows through the legacy CONNECT-UDP path unchanged.
+
+Process model (h3 / h2):
+
+```
+masque_server                    masque_h2_session_sup
+  validate/7  ─reads Connect-UDP-Bind header
+   │
+   └─ on ?1 ─> masque_uri_udp_bind:match/2  (accepts %2A wildcard)
+                │
+                └─> masque_h2_session_sup:start_session(udp_bind)
+                                │
+                                └─> masque_udp_bind_server_session
+                                       │ owns:
+                                       │   - 2 compression tables
+                                       │     (own + peer)
+                                       │   - bind handler state
+                                       │     (which holds the
+                                       │      gen_udp socket)
+                                       │
+                                       └─> masque_udp_bind_proxy_handler
+                                            opens gen_udp; emits
+                                            response_headers action
+                                            with Connect-UDP-Bind +
+                                            Proxy-Public-Address
+```
+
+The h1 path mirrors h2/h3 but the session takes ownership of the
+upgraded TLS socket via `h1:accept_upgrade/3` and runs the same
+state machine.
+
+### Compression-table state machine
+
+Two tables per session, built in `masque_compression_table`:
+
+- **own**: outbound context-IDs we opened on the peer. Allocations
+  follow the parity rule (client even, proxy odd). Entries start
+  in `pending_ack` state; a `COMPRESSION_ACK` from the peer flips
+  them to `installed`. The session refuses to compress payloads on
+  a `pending_ack` entry.
+- **peer**: incoming context-IDs the peer opened on us. Entries
+  jump straight to `installed` on receipt of a valid
+  `COMPRESSION_ASSIGN`. The session emits the matching
+  `COMPRESSION_ACK` immediately.
+
+Invariants enforced inside the table:
+
+- Parity check on `install/2` rejects cross-parity ASSIGNs as
+  malformed.
+- Duplicate context-IDs are malformed.
+- Per-tuple uniqueness has two distinct draft-11 cases:
+  - Cross-side conflict (peer ASSIGNs a tuple our side opened):
+    table returns `{conflict, close_proxy_id, _}` so the session
+    can close the proxy-opened context.
+  - Same-side conflict (peer ASSIGNs a tuple it already has open):
+    `{error, malformed_duplicate_tuple}`.
+- Singleton uncompressed: at most one open IP Version 0 mapping.
+- Family gating: registrations and encodes for an unadvertised
+  address family are rejected.
+
+### Per-session gen_udp lifecycle
+
+The bind handler opens one `gen_udp` socket per session in
+`init/2`, computes its public address list (configured override,
+hook function, or sockname fallback when bound to a specific
+interface), and returns a `{response_headers, _}` action that the
+session splices into the 2xx response. On `terminate/2` the
+socket is closed.
+
+Inbound packets from the kernel arrive as `{udp, Sock, IP, Port,
+Bytes}` messages, are filtered by family (drop unadvertised) and
+then emitted as a `{send_bind_packet, {IP, Port}, Bytes}` action.
+The session encodes via `masque_udp_bind_payload`, picking the
+context-ID from the compression table (or the uncompressed channel
+if no compressed mapping exists for the peer).
+
+### Decision: auto-compression lives outside the library
+
+The library never auto-assigns context-IDs. It exposes
+`masque:assign_compression/2`,
+`masque:open_uncompressed_context/1`,
+`masque:close_compression/2` as primitives and surfaces lifecycle
+events as owner messages, so a downstream policy module can plug
+in LRU / top-N / hot-flow heuristics without touching the lib's
+core. The right policy depends on the consumer's traffic shape;
+baking a single one in would be wrong for at least half the use
+cases.
+
 ## 12. Metrics
 
 `src/masque_metrics.erl` exposes two metric surfaces with different
