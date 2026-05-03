@@ -30,6 +30,14 @@
          advertise_routes/2,
          ip_info/1]).
 
+%% Connect-UDP-Bind (draft-ietf-masque-connect-udp-listen-11) client API.
+-export([bind_connect/3,
+         send_to/3,
+         assign_compression/2,
+         open_uncompressed_context/1,
+         close_compression/2,
+         proxy_public_address/1]).
+
 -include("masque.hrl").
 -include("masque_ip.hrl").
 
@@ -450,6 +458,90 @@ advertise_routes(Sess, Routes) when is_pid(Sess) ->
 }.
 ip_info(Sess) when is_pid(Sess) ->
     masque_ip_client_session:ip_info(Sess).
+
+%%====================================================================
+%% Connect-UDP-Bind client API
+%% (draft-ietf-masque-connect-udp-listen-11)
+%%====================================================================
+
+%% @doc Open a Connect-UDP-Bind tunnel to `ProxyURI'. `Target' is
+%% either `unscoped' (the bind socket on the proxy can talk to any
+%% peer the proxy's policy allows) or `{Host, Port}' for a scoped
+%% bind. The session emits `{masque_bind_packet, _, Peer, Bytes}'
+%% messages to the owner; use `send_to/3' to send.
+-spec bind_connect(proxy_uri(),
+                   unscoped | {binary() | inet:hostname(), 1..65535},
+                   connect_opts()) -> {ok, session()} | {error, term()}.
+bind_connect(ProxyURI, Target, Opts) when is_map(Opts) ->
+    Opts1 = Opts#{protocol => udp_bind},
+    case parse_proxy_uri(ProxyURI) of
+        {ok, Host, Port} ->
+            Owner = maps:get(owner, Opts1, self()),
+            Opts2 = Opts1#{proxy => {Host, Port}},
+            Transports = normalize_transports(
+                           maps:get(transports, Opts2, [h3, h2])),
+            connect_via(Transports, Target, Opts2, Owner);
+        {error, _} = Err ->
+            Err
+    end.
+
+%% @doc Send a UDP payload to `Peer' via the bind tunnel. The session
+%% picks a context-id from the compression table; if none exists it
+%% falls back to the uncompressed-context channel if open, otherwise
+%% returns `{error, no_compression_context}'.
+-spec send_to(session(),
+              {inet:ip_address(), inet:port_number()},
+              binary()) -> ok | {error, term()}.
+send_to(Sess, Peer, Bytes)
+  when is_pid(Sess), is_binary(Bytes) ->
+    Mod = bind_session_module(Sess),
+    Mod:send_to(Sess, Peer, Bytes).
+
+%% @doc Open an outbound compressed context for `Peer'. Returns the
+%% allocated Context ID; the mapping is safe to use on send once the
+%% matching `{masque_compression_acked, _, ContextId}' message
+%% arrives.
+-spec assign_compression(session(),
+                         {inet:ip_address(), inet:port_number()}) ->
+    {ok, pos_integer()} | {error, term()}.
+assign_compression(Sess, Peer) when is_pid(Sess) ->
+    Mod = bind_session_module(Sess),
+    Mod:assign_compression(Sess, Peer).
+
+%% @doc Open the singleton uncompressed (IP Version 0) context.
+%% Client-only per draft-11.
+-spec open_uncompressed_context(session()) ->
+    {ok, pos_integer()} | {error, term()}.
+open_uncompressed_context(Sess) when is_pid(Sess) ->
+    Mod = bind_session_module(Sess),
+    Mod:open_uncompressed_context(Sess).
+
+%% @doc Retire a compression context.
+-spec close_compression(session(), pos_integer()) ->
+    ok | {error, term()}.
+close_compression(Sess, Id)
+  when is_pid(Sess), is_integer(Id), Id > 0 ->
+    Mod = bind_session_module(Sess),
+    Mod:close_compression(Sess, Id).
+
+%% @doc Read the parsed `Proxy-Public-Address' list the proxy
+%% advertised on the bind 2xx response.
+-spec proxy_public_address(session()) ->
+    {ok, [{inet:ip_address(), inet:port_number()}]} | {error, term()}.
+proxy_public_address(Sess) when is_pid(Sess) ->
+    Mod = bind_session_module(Sess),
+    Mod:proxy_public_address(Sess).
+
+%% Pick the right bind client module based on the session's
+%% transport. We can't do this from the pid alone without asking it,
+%% so we fall through to the h2/h3 module which handles both. The h1
+%% module accepts the same calls so dispatch via either is fine, but
+%% we route by querying `info/1' to be precise.
+bind_session_module(Sess) ->
+    case (catch gen_statem:call(Sess, info, 1000)) of
+        #{transport := h1} -> masque_udp_bind_h1_client_session;
+        _                  -> masque_udp_bind_client_session
+    end.
 
 %%====================================================================
 %% Server facade

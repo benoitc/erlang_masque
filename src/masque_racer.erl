@@ -272,22 +272,26 @@ resolve_mod(Transport, Opts) ->
 
 transport_mod(h3, Opts) ->
     case maps:get(protocol, Opts, udp) of
-        tcp -> masque_tcp_client_session;
-        ip  -> masque_ip_client_session;
-        _   -> masque_client_session
+        tcp      -> masque_tcp_client_session;
+        ip       -> masque_ip_client_session;
+        udp_bind -> masque_udp_bind_client_session;
+        _        -> masque_client_session
     end;
 transport_mod(h2, Opts) ->
     case maps:get(protocol, Opts, udp) of
-        tcp -> masque_tcp_client_session;
-        ip  -> masque_ip_client_session;
-        _   -> masque_h2_client_session
+        tcp      -> masque_tcp_client_session;
+        ip       -> masque_ip_client_session;
+        udp_bind -> masque_udp_bind_client_session;
+        _        -> masque_h2_client_session
     end;
 transport_mod(h1, Opts) ->
-    %% h1 implements CONNECT-UDP, CONNECT-IP, and classic CONNECT-TCP.
+    %% h1 implements CONNECT-UDP, CONNECT-IP, classic CONNECT-TCP,
+    %% and Connect-UDP-Bind.
     case maps:get(protocol, Opts, udp) of
-        udp -> masque_h1_client_session;
-        ip  -> masque_ip_h1_client_session;
-        tcp -> masque_tcp_h1_client_session
+        udp      -> masque_h1_client_session;
+        ip       -> masque_ip_h1_client_session;
+        tcp      -> masque_tcp_h1_client_session;
+        udp_bind -> masque_udp_bind_h1_client_session
     end.
 
 %% The session is in its `open' state when the winner reports, so
