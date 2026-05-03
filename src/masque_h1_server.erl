@@ -89,7 +89,9 @@ defaults(Opts) ->
         ip_uri_template => ?MASQUE_DEFAULT_IP_URI_PATH_PATTERN,
         handler         => masque_udp_proxy_handler,
         ip_handler      => masque_ip_proxy_handler,
-        tcp_handler     => masque_tcp_proxy_handler
+        tcp_handler     => masque_tcp_proxy_handler,
+        bind_handler    => masque_udp_bind_proxy_handler,
+        accept_bind     => false
     },
     maps:merge(D, Opts).
 
@@ -105,12 +107,24 @@ build_dispatch(Opts) ->
       ip_template  => maps:get(ip_uri_template, Opts),
       ip_handler   => maps:get(ip_handler, Opts),
       tcp_handler  => maps:get(tcp_handler, Opts),
+      bind_handler => maps:get(bind_handler, Opts),
+      accept_bind  => maps:get(accept_bind, Opts),
       resolver     => maps:get(resolver, Opts, fun default_resolver/1),
       handler_opts => maps:merge(
                         maps:with([address_pool, routes, mtu,
                                    resolver, allow, family,
                                    allow_private, connect_timeout,
-                                   socket_opts], Opts),
+                                   socket_opts,
+                                   bind_address, bind_port,
+                                   bind_socket_opts,
+                                   public_addresses, public_address_fun,
+                                   peer_filter_fun, scrub_fun,
+                                   allow_loopback,
+                                   max_compression_contexts,
+                                   max_compression_contexts_in,
+                                   max_compression_contexts_out,
+                                   max_pending_compression_responses],
+                                  Opts),
                         maps:get(handler_opts, Opts, #{})),
       name         => maps:get(drain_key, Opts, undefined)}.
 
@@ -149,13 +163,17 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
       ip_handler   := IpHandler,
       tcp_handler  := TcpHandler,
       handler_opts := HandlerOpts} = Dispatch,
-    case validate(Method, Path, Headers, UdpTpl, IpTpl) of
+    BindHandler = maps:get(bind_handler, Dispatch,
+                           masque_udp_bind_proxy_handler),
+    AcceptBind = maps:get(accept_bind, Dispatch, false),
+    case validate(Method, Path, Headers, UdpTpl, IpTpl, AcceptBind) of
         {ok, Req0} ->
             Protocol = maps:get(protocol, Req0),
             HandlerMod = case Protocol of
-                udp -> UdpHandler;
-                ip  -> IpHandler;
-                tcp -> TcpHandler
+                udp      -> UdpHandler;
+                ip       -> IpHandler;
+                tcp      -> TcpHandler;
+                udp_bind -> BindHandler
             end,
             Req = Req0#{handler_opts => HandlerOpts},
             case accept_request(HandlerMod, Req) of
@@ -186,34 +204,10 @@ map_init_error({reject, Err}) -> Err;
 map_init_error(_)             -> resolution_failed.
 
 validate(<<"GET">>, Path, Headers, UdpTemplate, IpTemplate) ->
-    %% RFC 9112 §3.2 requires a Host header on HTTP/1.1. Reject early
-    %% so every downstream branch can trust `host' is present.
-    case header(<<"host">>, Headers) of
-        undefined ->
-            {error, bad_host};
-        _ ->
-            Upgrade = header(<<"upgrade">>, Headers),
-            Capsule = header(<<"capsule-protocol">>, Headers),
-            UpgradeLc = lowercase_bin(Upgrade),
-            case {UpgradeLc, Capsule} of
-                {?MASQUE_CONNECT_UDP_PROTOCOL, <<"?1">>} ->
-                    match_path(Path, Headers, UdpTemplate);
-                {?MASQUE_CONNECT_IP_PROTOCOL, <<"?1">>} ->
-                    match_ip_path(Path, Headers, IpTemplate);
-                {Upgrade1, _} when Upgrade1 =:= ?MASQUE_CONNECT_UDP_PROTOCOL;
-                                   Upgrade1 =:= ?MASQUE_CONNECT_IP_PROTOCOL ->
-                    {error, bad_protocol};
-                {undefined, _} ->
-                    {error, bad_protocol};
-                _ ->
-                    {error, bad_protocol}
-            end
-    end;
+    validate_get(Path, Headers, UdpTemplate, IpTemplate, false);
 validate(<<"CONNECT">>, Path, Headers, _UdpTemplate, _IpTemplate) ->
     %% RFC 9110 §9.3.6 + RFC 9112 §3.2.3: CONNECT request-target is
-    %% authority-form (`host:port' / `[ipv6]:port'). RFC 9112 §3.2.3
-    %% also requires the Host header to match the request-target;
-    %% missing or mismatched Host is a 400.
+    %% authority-form (`host:port' / `[ipv6]:port').
     case masque_uri:parse_authority_form(Path) of
         {ok, Host, Port} ->
             case check_connect_host(Headers, Path) of
@@ -238,6 +232,68 @@ validate(<<"CONNECT">>, Path, Headers, _UdpTemplate, _IpTemplate) ->
     end;
 validate(_, _Path, _Headers, _UdpTemplate, _IpTemplate) ->
     {error, bad_method}.
+
+%% Same shape as `validate/5' plus the listener-level `AcceptBind'
+%% switch. When true, the GET branch additionally inspects the
+%% `Connect-UDP-Bind' request header and routes to the bind matcher.
+validate(<<"GET">>, Path, Headers, UdpTemplate, IpTemplate, AcceptBind) ->
+    validate_get(Path, Headers, UdpTemplate, IpTemplate, AcceptBind);
+validate(Method, Path, Headers, UdpTemplate, IpTemplate, _AcceptBind) ->
+    validate(Method, Path, Headers, UdpTemplate, IpTemplate).
+
+validate_get(Path, Headers, UdpTemplate, IpTemplate, AcceptBind) ->
+    case header(<<"host">>, Headers) of
+        undefined ->
+            {error, bad_host};
+        _ ->
+            Upgrade = header(<<"upgrade">>, Headers),
+            Capsule = header(<<"capsule-protocol">>, Headers),
+            UpgradeLc = lowercase_bin(Upgrade),
+            case {UpgradeLc, Capsule} of
+                {?MASQUE_CONNECT_UDP_PROTOCOL, <<"?1">>}
+                  when AcceptBind ->
+                    match_udp_or_bind_path(Path, Headers, UdpTemplate);
+                {?MASQUE_CONNECT_UDP_PROTOCOL, <<"?1">>} ->
+                    match_path(Path, Headers, UdpTemplate);
+                {?MASQUE_CONNECT_IP_PROTOCOL, <<"?1">>} ->
+                    match_ip_path(Path, Headers, IpTemplate);
+                {Upgrade1, _} when Upgrade1 =:= ?MASQUE_CONNECT_UDP_PROTOCOL;
+                                   Upgrade1 =:= ?MASQUE_CONNECT_IP_PROTOCOL ->
+                    {error, bad_protocol};
+                {undefined, _} ->
+                    {error, bad_protocol};
+                _ ->
+                    {error, bad_protocol}
+            end
+    end.
+
+%% When the listener has bind enabled, the bind matcher is tried
+%% against the same UDP template (per draft-11 the URI is shared)
+%% only when the Connect-UDP-Bind: ?1 header is present.
+match_udp_or_bind_path(Path, Headers, Template) ->
+    case masque_uri_udp_bind:parse_bind_header(Headers) of
+        bind ->
+            case masque_uri_udp_bind:match(Template, Path) of
+                {ok, #{target_host := Host, target_port := Port,
+                       bind        := Scope}} ->
+                    {ok, #{
+                        method      => <<"GET">>,
+                        protocol    => udp_bind,
+                        bind        => Scope,
+                        path        => Path,
+                        authority   => header(<<"host">>, Headers, <<"">>),
+                        scheme      => <<"https">>,
+                        target_host => Host,
+                        target_port => Port,
+                        headers     => Headers
+                    }};
+                {error, bad_port} -> {error, bad_port};
+                {error, bad_host} -> {error, bad_host};
+                {error, _}        -> {error, bad_path}
+            end;
+        _ ->
+            match_path(Path, Headers, Template)
+    end.
 
 %% Host header on a CONNECT request must be present and parse to the
 %% same host:port as the request-target (RFC 9112 §3.2.3). Case-
