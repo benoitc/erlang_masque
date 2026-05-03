@@ -10,6 +10,7 @@
 -behaviour(supervisor).
 
 -export([start_link/0, start_link_tcp/0, start_link_ip/0,
+         start_link_udp_bind/0,
          start_session/1]).
 -export([init/1]).
 
@@ -22,17 +23,24 @@ start_link_tcp() ->
 start_link_ip() ->
     supervisor:start_link({local, masque_h2_ip_session_sup}, ?MODULE, ip).
 
+start_link_udp_bind() ->
+    supervisor:start_link({local, masque_h2_udp_bind_session_sup},
+                          ?MODULE, udp_bind).
+
 -spec start_session(map()) -> {ok, pid()} | {error, term()}.
 start_session(#{protocol := tcp} = Args) ->
     supervisor:start_child(masque_h2_tcp_session_sup, [Args]);
 start_session(#{protocol := ip} = Args) ->
     supervisor:start_child(masque_h2_ip_session_sup, [Args]);
+start_session(#{protocol := udp_bind} = Args) ->
+    supervisor:start_child(masque_h2_udp_bind_session_sup, [Args]);
 start_session(Args) ->
     supervisor:start_child(?MODULE, [Args]).
 
-init(udp) -> {ok, spec(masque_h2_server_session)};
-init(tcp) -> {ok, spec(masque_tcp_server_session)};
-init(ip)  -> {ok, spec(masque_ip_server_session)}.
+init(udp)      -> {ok, spec(masque_h2_server_session)};
+init(tcp)      -> {ok, spec(masque_tcp_server_session)};
+init(ip)       -> {ok, spec(masque_ip_server_session)};
+init(udp_bind) -> {ok, spec(masque_udp_bind_server_session)}.
 
 spec(Mod) ->
     ChildSpec = #{

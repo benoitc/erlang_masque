@@ -94,7 +94,9 @@ defaults(Opts) ->
         ip_uri_template  => ?MASQUE_DEFAULT_IP_URI_PATH_PATTERN,
         handler          => masque_udp_proxy_handler,
         tcp_handler      => masque_tcp_proxy_handler,
-        ip_handler       => masque_ip_proxy_handler
+        ip_handler       => masque_ip_proxy_handler,
+        bind_handler     => masque_udp_bind_proxy_handler,
+        accept_bind      => false
     },
     maps:merge(D, Opts).
 
@@ -127,9 +129,21 @@ build_dispatch(Opts) ->
       udp_handler  => maps:get(handler, Opts),
       tcp_handler  => maps:get(tcp_handler, Opts),
       ip_handler   => maps:get(ip_handler, Opts),
+      bind_handler => maps:get(bind_handler, Opts),
+      accept_bind  => maps:get(accept_bind, Opts),
       resolver     => maps:get(resolver, Opts, fun default_resolver/1),
       handler_opts => maps:merge(
-                        maps:with([address_pool, routes, mtu], Opts),
+                        maps:merge(
+                          maps:with([address_pool, routes, mtu], Opts),
+                          maps:with(
+                            [bind_address, bind_port, bind_socket_opts,
+                             public_addresses, public_address_fun,
+                             peer_filter_fun, scrub_fun, allow_private,
+                             allow_loopback,
+                             max_compression_contexts,
+                             max_compression_contexts_in,
+                             max_compression_contexts_out,
+                             max_pending_compression_responses], Opts)),
                         maps:get(handler_opts, Opts, #{})),
       fallback     => maps:get(fallback, Opts, undefined),
       max_tunnels  => maps:get(max_tunnels_per_connection, Opts, 0),
@@ -154,15 +168,19 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
       ip_template  := IpTpl,
       udp_handler := UdpHandler, tcp_handler := TcpHandler,
       ip_handler  := IpHandler,
+      bind_handler := BindHandler,
+      accept_bind  := AcceptBind,
       resolver    := Resolver,
       handler_opts := HandlerOpts, fallback := Fallback} = Dispatch,
-    case validate(Method, Path, Headers, UdpTpl, TcpTpl, IpTpl) of
+    case validate(Method, Path, Headers, UdpTpl, TcpTpl, IpTpl,
+                  AcceptBind) of
         {ok, Req0} ->
             Protocol = maps:get(protocol, Req0),
             HandlerMod = case Protocol of
-                udp -> UdpHandler;
-                tcp -> TcpHandler;
-                ip  -> IpHandler
+                udp      -> UdpHandler;
+                tcp      -> TcpHandler;
+                ip       -> IpHandler;
+                udp_bind -> BindHandler
             end,
             Req1 = Req0#{handler_opts => HandlerOpts},
             case resolve_target(Protocol, Req1, Resolver) of
@@ -226,11 +244,14 @@ map_init_error({resolution_failed, _}) -> resolution_failed;
 map_init_error({reject, Err})          -> Err;
 map_init_error(_)                      -> resolution_failed.
 
-validate(Method, Path, Headers, UdpTemplate, TcpTemplate, IpTemplate) ->
+validate(Method, Path, Headers, UdpTemplate, TcpTemplate, IpTemplate,
+         AcceptBind) ->
     case Method of
         <<"CONNECT">> ->
             Protocol = header(<<":protocol">>, Headers),
             case Protocol of
+                ?MASQUE_CONNECT_UDP_PROTOCOL when AcceptBind ->
+                    match_udp_or_bind(Path, Headers, UdpTemplate);
                 ?MASQUE_CONNECT_UDP_PROTOCOL ->
                     match_path(Path, Headers, UdpTemplate, udp);
                 ?MASQUE_CONNECT_TCP_PROTOCOL ->
@@ -242,6 +263,39 @@ validate(Method, Path, Headers, UdpTemplate, TcpTemplate, IpTemplate) ->
             end;
         _ ->
             {error, bad_method}
+    end.
+
+match_udp_or_bind(Path, Headers, Template) ->
+    case masque_uri_udp_bind:parse_bind_header(Headers) of
+        bind ->
+            case masque_uri_udp_bind:match(Template, Path) of
+                {ok, #{target_host := Host, target_port := Port,
+                       bind        := Scope}} ->
+                    Authority = case header(<<":authority">>, Headers) of
+                        undefined -> <<"">>;
+                        A -> A
+                    end,
+                    Scheme = case header(<<":scheme">>, Headers) of
+                        undefined -> <<"https">>;
+                        S -> S
+                    end,
+                    {ok, #{
+                        method => <<"CONNECT">>,
+                        protocol => udp_bind,
+                        bind => Scope,
+                        path => Path,
+                        authority => Authority,
+                        scheme => Scheme,
+                        target_host => Host,
+                        target_port => Port,
+                        headers => Headers
+                    }};
+                {error, bad_port} -> {error, bad_port};
+                {error, bad_host} -> {error, bad_host};
+                {error, _}        -> {error, bad_path}
+            end;
+        _ ->
+            match_path(Path, Headers, Template, udp)
     end.
 
 %% h2_connection strips `:scheme' and `:authority' from the handler
