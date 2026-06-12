@@ -58,23 +58,23 @@ Current coverage of the `masque` library against the relevant RFCs.
   entries from id and tuple indexes, and bounded size for
   hostile-peer protection.
 - **Listener / dispatch** wired across h1, h2, h3: opt-in via
-  `accept_bind => true' (default `false', so existing UDP / TCP /
-  IP listeners are unchanged); `bind_handler' opt picks the
-  module (default `masque_udp_bind_proxy_handler'). The matcher
-  reads `Connect-UDP-Bind' before choosing the URI matcher so the
-  percent-encoded `*' wildcard for unscoped bind only flows the
+  `accept_bind => true` (default `false`, so existing UDP / TCP /
+  IP listeners are unchanged); `bind_handler` opt picks the
+  module (default `masque_udp_bind_proxy_handler`). The matcher
+  reads `Connect-UDP-Bind` before choosing the URI matcher so the
+  percent-encoded `*` wildcard for unscoped bind only flows the
   bind path; legacy CONNECT-UDP requests are bit-for-bit unchanged
   when the header is absent or invalid.
-- **Public API** for clients: `masque:bind_connect/3',
-  `masque:send_to/3', `masque:assign_compression/2',
-  `masque:open_uncompressed_context/1',
-  `masque:close_compression/2',
-  `masque:proxy_public_address/1'.
-  Owner messages: `{masque_bind_packet, _, Peer, Bytes}',
-  `{masque_compression_assigned, _, ContextId, Peer}',
-  `{masque_compression_acked, _, ContextId}',
-  `{masque_compression_closed, _, ContextId}'.
-- **Documentation**: new `docs/connect_udp_bind.md' (quickstart,
+- **Public API** for clients: `masque:bind_connect/3`,
+  `masque:send_to/3`, `masque:assign_compression/2`,
+  `masque:open_uncompressed_context/1`,
+  `masque:close_compression/2`,
+  `masque:proxy_public_address/1`.
+  Owner messages: `{masque_bind_packet, _, Peer, Bytes}`,
+  `{masque_compression_assigned, _, ContextId, Peer}`,
+  `{masque_compression_acked, _, ContextId}`,
+  `{masque_compression_closed, _, ContextId}`.
+- **Documentation**: new `docs/connect_udp_bind.md` (quickstart,
   wire format, coexistence with RFC 9298, compression policy
   seam).
 

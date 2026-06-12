@@ -319,16 +319,16 @@ nonzero-protocol ranges for the same IP version (RFC 9484 §4.7.3).
 | --- | --- | --- |
 | §3 URI template | Absolute URI Template (Level-1 path or Level-3 query); client expands, server matches `:path` | Client-side absolute-URI enforcement (`masque_uri_ip:parse_client_template/1`); server-side path+query match (`masque_uri_template`); both template forms supported |
 | §4 Request | `:method=CONNECT`, `:protocol=connect-ip`, `capsule-protocol: ?1` on the request | Emitted by the IP client session; `connect/3` forces `capsule_protocol => true` when `protocol => ip` |
-| §4 Response | 2xx carries `capsule-protocol: ?1`; no `content-length` / `content-type` | Validated by `masque_ip_client_session:validate_response/1`; non-compliant responses tear the session down |
+| §4 Response | 2xx carries `capsule-protocol: ?1`; no `content-length` / `content-type` | Validated by the `validate_response` check in `masque_ip_client_session`; non-compliant responses tear the session down |
 | §4.7.1 `ADDRESS_ASSIGN` | Nonzero Request ID echoes a prior `ADDRESS_REQUEST`; Request ID 0 = unprompted assignment | `masque_ip_capsule` + `masque_ip_server_session` track the pending set; `assign_addresses/2` rejects with `{no_such_pending_request, Id}` when violated |
 | §4.7.1 DNS resolution | Hostname targets MUST be resolved server-side before 2xx; resolved addresses advertised | `masque_server` / `masque_h2_server` run the configurable `resolver` before `accept/1`; result attached to `req()` under `resolved_addresses` |
 | §4.7.2 `ADDRESS_REQUEST` | ≥1 entry, unique nonzero Request IDs per sender | Enforced in `masque_ip_capsule` (encode and decode) |
-| §4.7.3 `ROUTE_ADVERTISEMENT` | Ordered by (Version, Protocol, Start); disjoint within (Version, Protocol); protocol-0 ranges MUST NOT overlap nonzero-protocol ranges | All three rules validated in `masque_ip_capsule:validate_routes_result/1` |
+| §4.7.3 `ROUTE_ADVERTISEMENT` | Ordered by (Version, Protocol, Start); disjoint within (Version, Protocol); protocol-0 ranges MUST NOT overlap nonzero-protocol ranges | All three rules validated by the `validate_routes_result` check in `masque_ip_capsule` |
 | §5 Control plane directionality | Both endpoints may send every capsule (site-to-site, §8.2) | Symmetric API: typed `request_addresses/2`, `assign_addresses/2`, `advertise_routes/2` on the client; matching actions (`{request_addresses,_}`, `{assign,_}`, `{advertise,_}`) on the server |
 | §6 Datagram framing | `Context ID (varint) | Payload`; context 0 = IP packet; unknown contexts dropped | `masque_datagram` (reused from RFC 9298) — exact shape; unknown contexts silently dropped in both session modules |
 | §7 Error handling | Malformed capsule → stream reset per RFC 9297 §3.3; non-2xx carries Proxy-Status | Sessions issue `H3_MESSAGE_ERROR` (H3) / `PROTOCOL_ERROR` (H2); rejects emit RFC 9209 `Proxy-Status` via `masque_errors` |
 | §7 ICMP synthesis | SHOULD forward ICMP error back when an IP packet can't be delivered | `masque_icmp` builds ICMPv4 / ICMPv6 errors with correct invoking-packet truncation (548 B / 1232 B) and IPv6 pseudo-header checksum; triggered from handlers via `{icmp_error, {Kind, Spec, Invoking}}` actions |
-| §8 MTU | Negotiated H3 datagram size ≥ 1280 B for IPv6 support, else abort | `masque_ip_client_session:check_datagram_mtu/1` aborts H3 handshake with `{mtu_too_low, Got, 1280}`; H2 uses reliable capsules and is exempt |
+| §8 MTU | Negotiated H3 datagram size ≥ 1280 B for IPv6 support, else abort | The `check_datagram_mtu` check in `masque_ip_client_session` aborts the H3 handshake with `{mtu_too_low, Got, 1280}`; H2 uses reliable capsules and is exempt |
 | §8 BCP-38 | Reject spoofed source addresses | Default handler's `src_filter_passes/2` drops inbound packets whose source is not a locally-assigned address |
 
 ## Not in scope
