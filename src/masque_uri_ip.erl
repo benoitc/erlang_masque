@@ -191,9 +191,10 @@ parse_target(Bin) when is_binary(Bin) ->
 -spec parse_ipproto(binary()) -> {ok, ip_ipproto()} | {error, bad_ipproto}.
 parse_ipproto(<<"*">>) -> {ok, '*'};
 parse_ipproto(Bin) when is_binary(Bin) ->
-    case catch binary_to_integer(Bin) of
+    try binary_to_integer(Bin) of
         N when is_integer(N), N >= 0, N =< 255 -> {ok, N};
         _ -> {error, bad_ipproto}
+    catch _:_ -> {error, bad_ipproto}
     end.
 
 %% @doc Render a typed target back to its wire-form binary.
@@ -224,9 +225,10 @@ parse_ip(Bin) when is_binary(Bin) ->
     end.
 
 parse_prefix(Bin) ->
-    case catch binary_to_integer(Bin) of
+    try binary_to_integer(Bin) of
         N when is_integer(N), N >= 0, N =< 128 -> {ok, N};
         _ -> {error, bad_prefix}
+    catch _:_ -> {error, bad_prefix}
     end.
 
 inet_addr_bin(IP) -> list_to_binary(inet:ntoa(IP)).

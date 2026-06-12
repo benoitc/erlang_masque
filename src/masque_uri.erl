@@ -130,9 +130,10 @@ is_ldh(_)                       -> false.
 %%====================================================================
 
 parse_port(Bin) when is_binary(Bin) ->
-    case catch binary_to_integer(Bin) of
+    try binary_to_integer(Bin) of
         P when is_integer(P), P >= 1, P =< 65535 -> {ok, P};
         _ -> error
+    catch _:_ -> error
     end;
 parse_port(Int) when is_integer(Int), Int >= 1, Int =< 65535 ->
     {ok, Int};

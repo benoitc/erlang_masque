@@ -202,7 +202,7 @@ round_trip(Sess) ->
     end.
 
 close_all_sessions(Sessions) ->
-    _ = [catch masque:close(S) || S <- Sessions],
+    _ = [try masque:close(S) catch _:_ -> ok end || S <- Sessions],
     ok.
 
 %% Count the live owner entries in the pool registry (one per

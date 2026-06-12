@@ -217,9 +217,10 @@ open(info, _Msg, Data) ->
     {keep_state, Data}.
 
 closing(internal, do_close, #data{conn = Conn, stream_id = StreamId} = Data) ->
-    case (catch h2:send_data(Conn, StreamId, <<>>, true)) of
+    _ = try h2:send_data(Conn, StreamId, <<>>, true) of
         ok -> ok;
-        _  -> catch h2:cancel(Conn, StreamId)
+        _  -> try h2:cancel(Conn, StreamId) catch _:_ -> ok end
+    catch _:_ -> try h2:cancel(Conn, StreamId) catch _:_ -> ok end
     end,
     _ = session_teardown(Data),
     {stop, normal, Data};
@@ -241,7 +242,7 @@ session_teardown(#data{pool_owner = Pool, stream_id = StreamId})
 session_teardown(#data{pool_owner = Pool}) when is_pid(Pool) ->
     ok;
 session_teardown(#data{conn = Conn}) when is_pid(Conn) ->
-    _ = (catch h2:close(Conn)),
+    _ = (try h2:close(Conn) catch _:_ -> ok end),
     ok;
 session_teardown(_) ->
     ok.
@@ -410,7 +411,7 @@ client_stream_abort(Reason,
             masque_upstream_owner:release_stream(Pool, StreamId);
         false ->
             %% HTTP/2 has no `H3_MESSAGE_ERROR'; use `protocol_error' (0x1).
-            _ = (catch h2:cancel(Conn, StreamId, protocol_error)),
+            _ = (try h2:cancel(Conn, StreamId, protocol_error) catch _:_ -> ok end),
             ok
     end,
     _ = notify_owner_closed(Reason, Data),

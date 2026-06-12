@@ -149,8 +149,8 @@ terminate(normal, #state{conn = Conn, stream_id = StreamId,
                           router = Router,
                           handler = Handler, h_state = HState} = S) ->
     emit_tunnel_closed(S),
-    _ = (catch quic_h3:send_data(Conn, StreamId, <<>>, true)),
-    _ = (catch masque_server_connection:unregister_session(Router, StreamId)),
+    _ = (try quic_h3:send_data(Conn, StreamId, <<>>, true) catch _:_ -> ok end),
+    _ = (try masque_server_connection:unregister_session(Router, StreamId) catch _:_ -> ok end),
     try_callback(Handler, terminate, [normal, HState]),
     ok;
 terminate(Reason, #state{router = Router, stream_id = StreamId,
@@ -159,7 +159,7 @@ terminate(Reason, #state{router = Router, stream_id = StreamId,
        Reason =:= router_gone;
        Reason =:= peer_reset ->
     emit_tunnel_closed(S),
-    _ = (catch masque_server_connection:unregister_session(Router, StreamId)),
+    _ = (try masque_server_connection:unregister_session(Router, StreamId) catch _:_ -> ok end),
     try_callback(Handler, terminate, [Reason, HState]),
     ok;
 terminate(Reason, #state{router = Router, stream_id = StreamId,
@@ -167,15 +167,15 @@ terminate(Reason, #state{router = Router, stream_id = StreamId,
   when Reason =:= truncated_capsule;
        Reason =:= capsule_buffer_overflow ->
     emit_tunnel_closed(S),
-    _ = (catch masque_server_connection:unregister_session(Router, StreamId)),
+    _ = (try masque_server_connection:unregister_session(Router, StreamId) catch _:_ -> ok end),
     try_callback(Handler, terminate, [Reason, HState]),
     ok;
 terminate(Reason, #state{conn = Conn, stream_id = StreamId,
                           router = Router,
                           handler = Handler, h_state = HState} = S) ->
     emit_tunnel_closed(S),
-    _ = (catch quic_h3:cancel(Conn, StreamId, ?MASQUE_H3_MESSAGE_ERROR)),
-    _ = (catch masque_server_connection:unregister_session(Router, StreamId)),
+    _ = (try quic_h3:cancel(Conn, StreamId, ?MASQUE_H3_MESSAGE_ERROR) catch _:_ -> ok end),
+    _ = (try masque_server_connection:unregister_session(Router, StreamId) catch _:_ -> ok end),
     try_callback(Handler, terminate, [Reason, HState]),
     ok.
 
@@ -309,7 +309,7 @@ drain_capsules(Buf, Fin, S) ->
     end.
 
 reset_and_stop(Reason, #state{conn = Conn, stream_id = StreamId} = S) ->
-    _ = (catch quic_h3:cancel(Conn, StreamId, ?MASQUE_H3_MESSAGE_ERROR)),
+    _ = (try quic_h3:cancel(Conn, StreamId, ?MASQUE_H3_MESSAGE_ERROR) catch _:_ -> ok end),
     {stop, Reason, S}.
 
 safe_apply(M, F, A) ->
@@ -325,7 +325,7 @@ safe_apply(M, F, A) ->
 try_callback(Mod, Fun, Args) ->
     Arity = length(Args),
     case erlang:function_exported(Mod, Fun, Arity) of
-        true -> (catch apply(Mod, Fun, Args));
+        true -> (try apply(Mod, Fun, Args) catch _:_ -> ok end);
         false -> ok
     end.
 

@@ -180,8 +180,8 @@ terminate(Reason, #state{} = S) ->
     terminate_transport(Reason, S),
     _ = case S#state.router of
             undefined -> ok;
-            R -> catch masque_server_connection:unregister_session(
-                          R, S#state.stream_id)
+            R -> try masque_server_connection:unregister_session(
+                          R, S#state.stream_id) catch _:_ -> ok end
         end,
     try_callback(S#state.handler, terminate,
                  [Reason, S#state.h_state]),
@@ -536,16 +536,16 @@ claim_stream(#state{transport = h2} = S) ->
 
 reset_and_stop(Reason, #state{transport = h3, conn = C,
                               stream_id = Sid} = S) ->
-    _ = (catch quic_h3:cancel(C, Sid, ?MASQUE_H3_MESSAGE_ERROR)),
+    _ = (try quic_h3:cancel(C, Sid, ?MASQUE_H3_MESSAGE_ERROR) catch _:_ -> ok end),
     {stop, Reason, S};
 reset_and_stop(Reason, #state{transport = h2, conn = C,
                               stream_id = Sid} = S) ->
-    _ = (catch h2:cancel(C, Sid, protocol_error)),
+    _ = (try h2:cancel(C, Sid, protocol_error) catch _:_ -> ok end),
     {stop, Reason, S}.
 
 terminate_transport(normal, #state{transport = h3, conn = C,
                                    stream_id = Sid}) ->
-    _ = (catch quic_h3:send_data(C, Sid, <<>>, true)),
+    _ = (try quic_h3:send_data(C, Sid, <<>>, true) catch _:_ -> ok end),
     ok;
 terminate_transport(_Reason, _S) ->
     ok.
@@ -584,7 +584,7 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
 try_callback(Mod, Fun, Args) ->
     Arity = length(Args),
     case erlang:function_exported(Mod, Fun, Arity) of
-        true  -> (catch apply(Mod, Fun, Args));
+        true  -> (try apply(Mod, Fun, Args) catch _:_ -> ok end);
         false -> ok
     end.
 

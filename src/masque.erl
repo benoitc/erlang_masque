@@ -342,7 +342,7 @@ dial_single(Mod, Target, Opts, Owner) ->
                 ok ->
                     {ok, Pid};
                 {error, Reason} ->
-                    catch exit(Pid, kill),
+                    try exit(Pid, kill) catch _:_ -> ok end,
                     {error, Reason}
             end;
         {error, Reason} ->
@@ -362,7 +362,7 @@ connect(ProxyURI, Target) ->
 -spec close(session()) -> ok.
 close(Sess) when is_pid(Sess) ->
     %% All session modules export stop/1.
-    _ = (catch gen_statem:call(Sess, stop, 5000)),
+    _ = (try gen_statem:call(Sess, stop, 5000) catch _:_ -> ok end),
     ok.
 
 %% @doc Return a map describing the session's current state and peers.
@@ -537,9 +537,10 @@ proxy_public_address(Sess) when is_pid(Sess) ->
 %% module accepts the same calls so dispatch via either is fine, but
 %% we route by querying `info/1' to be precise.
 bind_session_module(Sess) ->
-    case (catch gen_statem:call(Sess, info, 1000)) of
+    try gen_statem:call(Sess, info, 1000) of
         #{transport := h1} -> masque_udp_bind_h1_client_session;
         _                  -> masque_udp_bind_client_session
+    catch _:_ -> masque_udp_bind_client_session
     end.
 
 %%====================================================================

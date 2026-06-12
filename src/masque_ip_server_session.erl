@@ -216,7 +216,7 @@ terminate(Reason, #state{conn = Conn, transport = Transport,
                           handler = Handler, h_state = HState} = S) ->
     maybe_release_h2_tunnel(Transport, Conn),
     _ = unregister_from_router(Router, StreamId),
-    _ = (catch transport_send_data(S, <<>>, true)),
+    _ = (try transport_send_data(S, <<>>, true) catch _:_ -> ok end),
     try_callback(Handler, terminate, [Reason, HState]),
     emit_tunnel_closed(S),
     ok.
@@ -226,7 +226,7 @@ maybe_release_h2_tunnel(_, _)     -> ok.
 
 unregister_from_router(undefined, _) -> ok;
 unregister_from_router(Router, StreamId) ->
-    catch masque_server_connection:unregister_session(Router, StreamId).
+    try masque_server_connection:unregister_session(Router, StreamId) catch _:_ -> ok end.
 
 emit_tunnel_closed(#state{start_time = undefined}) -> ok;
 emit_tunnel_closed(#state{start_time = T, transport = Transport}) ->
@@ -331,11 +331,11 @@ dispatch_capsule(Type, Inner, S) when is_integer(Type) ->
 
 reset_and_stop(Reason, #state{transport = h3, conn = Conn,
                               stream_id = StreamId} = S) ->
-    _ = (catch quic_h3:cancel(Conn, StreamId, ?MASQUE_H3_MESSAGE_ERROR)),
+    _ = (try quic_h3:cancel(Conn, StreamId, ?MASQUE_H3_MESSAGE_ERROR) catch _:_ -> ok end),
     {stop, Reason, S};
 reset_and_stop(Reason, #state{transport = h2, conn = Conn,
                               stream_id = StreamId} = S) ->
-    _ = (catch h2:cancel(Conn, StreamId, protocol_error)),
+    _ = (try h2:cancel(Conn, StreamId, protocol_error) catch _:_ -> ok end),
     {stop, Reason, S}.
 
 %%====================================================================
@@ -524,6 +524,6 @@ safe_apply(M, F, A) ->
 try_callback(Mod, Fun, Args) ->
     Arity = length(Args),
     case erlang:function_exported(Mod, Fun, Arity) of
-        true  -> (catch apply(Mod, Fun, Args));
+        true  -> (try apply(Mod, Fun, Args) catch _:_ -> ok end);
         false -> ok
     end.

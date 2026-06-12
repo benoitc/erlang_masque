@@ -405,9 +405,9 @@ reject(Conn, StreamId, Reason, ExtraHeaders) ->
         {<<"proxy-status">>, proxy_status_field(Reason)}
     ],
     Headers = merge_extra_headers(Base, ExtraHeaders),
-    _ = catch h1:send_response(Conn, StreamId, Status, Headers),
-    _ = catch h1:send_data(Conn, StreamId, Body, true),
-    _ = catch h1:close(Conn),
+    _ = (try h1:send_response(Conn, StreamId, Status, Headers) catch _:_ -> ok end),
+    _ = (try h1:send_data(Conn, StreamId, Body, true) catch _:_ -> ok end),
+    _ = (try h1:close(Conn) catch _:_ -> ok end),
     ok.
 
 merge_extra_headers(Base, []) ->

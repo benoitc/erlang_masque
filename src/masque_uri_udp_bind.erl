@@ -122,9 +122,10 @@ decode_port(Bin) when is_binary(Bin) ->
     end.
 
 parse_port_value(Bin) ->
-    case catch binary_to_integer(Bin) of
+    try binary_to_integer(Bin) of
         N when is_integer(N), N >= 1, N =< 65535 -> {ok, N};
         _ -> not_port
+    catch _:_ -> not_port
     end.
 
 %% @doc Expand a CONNECT-UDP URI template for a bind handshake.

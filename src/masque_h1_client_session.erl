@@ -123,7 +123,7 @@ connecting(internal, {do_handshake, Opts}, Data) ->
                                cap_buf = Buffer,
                                handshake_from = undefined}};
                 {error, Reason} ->
-                    _ = catch ssl:close(Socket),
+                    _ = (try ssl:close(Socket) catch _:_ -> ok end),
                     reply_handshake(Data, {error, {setopts, Reason}}),
                     {stop, {setopts, Reason}}
             end;
@@ -202,7 +202,7 @@ open(info, _Msg, Data) ->
 closing(internal, do_close, #data{socket = Socket} = Data) ->
     _ = case Socket of
         undefined -> ok;
-        _         -> catch ssl:close(Socket)
+        _         -> try ssl:close(Socket) catch _:_ -> ok end
     end,
     {stop, normal, Data};
 closing(_Event, _Msg, Data) ->
@@ -214,7 +214,7 @@ terminate(_Reason, _State, #data{socket = undefined} = D) ->
 terminate(_Reason, _State, #data{socket = Socket} = D) ->
     _ = erlang:demonitor(D#data.owner_ref, [flush]),
     cancel_all_waiters(D),
-    _ = (catch ssl:close(Socket)),
+    _ = (try ssl:close(Socket) catch _:_ -> ok end),
     ok.
 
 cancel_all_waiters(#data{rx_waiters = Ws}) ->
@@ -249,7 +249,7 @@ do_connect(Data, Opts) ->
                 ok ->
                     do_upgrade(Conn, Data, Timeout);
                 {error, Reason} ->
-                    _ = catch h1:close(Conn),
+                    _ = (try h1:close(Conn) catch _:_ -> ok end),
                     {error, {connect, Reason}}
             end;
         {error, Reason} ->
@@ -264,11 +264,11 @@ do_upgrade(Conn, Data, Timeout) ->
                 ok ->
                     {ok, Socket, Buffer};
                 {error, _} = Err ->
-                    _ = catch ssl:close(Socket),
+                    _ = (try ssl:close(Socket) catch _:_ -> ok end),
                     Err
             end;
         {error, Reason} ->
-            _ = catch h1:close(Conn),
+            _ = (try h1:close(Conn) catch _:_ -> ok end),
             {error, classify_upgrade_error(Reason)}
     end.
 
@@ -355,7 +355,7 @@ deliver_capsule(Type, Inner, #data{owner = Owner} = Data)
 abort(Reason, #data{socket = Socket} = Data) ->
     _ = case Socket of
         undefined -> ok;
-        _         -> catch ssl:close(Socket)
+        _         -> try ssl:close(Socket) catch _:_ -> ok end
     end,
     _ = notify_owner_closed(Reason, Data),
     {stop, Reason, Data}.

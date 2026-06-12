@@ -155,7 +155,7 @@ terminate(Reason, #state{conn = Conn, transport = Transport,
 terminate(Reason, #state{conn = Conn, transport = Transport,
                           handler = Handler, h_state = HState} = S) ->
     maybe_release_h2_tunnel(Transport, Conn),
-    _ = (catch transport_send_data(S, <<>>, true)),
+    _ = (try transport_send_data(S, <<>>, true) catch _:_ -> ok end),
     try_callback(Handler, terminate, [Reason, HState]),
     ok.
 
@@ -257,6 +257,6 @@ safe_apply(M, F, A) ->
 try_callback(Mod, Fun, Args) ->
     Arity = length(Args),
     case erlang:function_exported(Mod, Fun, Arity) of
-        true  -> (catch apply(Mod, Fun, Args));
+        true  -> (try apply(Mod, Fun, Args) catch _:_ -> ok end);
         false -> ok
     end.

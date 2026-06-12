@@ -108,7 +108,7 @@ handle_attempt_ready(Pid, Transport, Sess, S) ->
             %% that have not reported yet) and keep racing what's
             %% pending; otherwise a lost winner would strand the
             %% other attempts with no-one to reply `lose' to them.
-            _ = catch exit(Sess, kill),
+            _ = (try exit(Sess, kill) catch _:_ -> ok end),
             handle_attempt_failed(Pid, Transport, Reason, S)
     end.
 
@@ -187,10 +187,10 @@ start_attempt(Racer, Transport, Target, Opts, Mod) ->
                     Racer ! {attempt_ready, self(), Transport, Pid},
                     receive
                         win  -> ok;
-                        lose -> _ = catch Mod:stop(Pid), ok
+                        lose -> _ = (try Mod:stop(Pid) catch _:_ -> ok end), ok
                     end;
                 {error, Reason} ->
-                    catch exit(Pid, kill),
+                    try exit(Pid, kill) catch _:_ -> ok end,
                     Racer ! {attempt_failed, self(), Transport, Reason},
                     ok
             end;
@@ -299,9 +299,10 @@ transport_mod(h1, Opts) ->
 %% hides real bugs. 500 ms is comfortably above any reasonable
 %% scheduler hiccup on a healthy node.
 transfer_owner(_Transport, Pid, Owner) ->
-    case (catch gen_statem:call(Pid, {set_owner, Owner}, 500)) of
+    try gen_statem:call(Pid, {set_owner, Owner}, 500) of
         ok -> ok;
         _  -> {error, owner_transfer_failed}
+    catch _:_ -> {error, owner_transfer_failed}
     end.
 
 notify_result(Pid, Tag) ->

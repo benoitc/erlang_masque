@@ -435,7 +435,7 @@ dispatch(CB, Extra, #state{handler = H, h_state = HS} = S) ->
 try_callback(Mod, Fun, Args) ->
     Arity = length(Args),
     case erlang:function_exported(Mod, Fun, Arity) of
-        true  -> (catch apply(Mod, Fun, Args));
+        true  -> (try apply(Mod, Fun, Args) catch _:_ -> ok end);
         false -> ok
     end.
 
@@ -461,9 +461,9 @@ arm_once(#state{transport = gen_tcp, socket = S}) ->
     _ = inet:setopts(S, [{active, once}]), ok.
 
 close_socket(#state{transport = ssl, socket = S}) ->
-    _ = (catch ssl:close(S)), ok;
+    _ = (try ssl:close(S) catch _:_ -> ok end), ok;
 close_socket(#state{transport = gen_tcp, socket = S}) ->
-    _ = (catch gen_tcp:close(S)), ok.
+    _ = (try gen_tcp:close(S) catch _:_ -> ok end), ok.
 
 socket_transport(Sock) when is_tuple(Sock), element(1, Sock) =:= sslsocket -> ssl;
 socket_transport(_) -> gen_tcp.

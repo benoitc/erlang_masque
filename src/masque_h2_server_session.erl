@@ -115,7 +115,7 @@ handle_info(Msg, S) ->
 terminate(normal, #state{conn = Conn, stream_id = StreamId,
                           handler = Handler, h_state = HState}) ->
     masque_h2_server:release_tunnel(Conn),
-    _ = (catch h2:send_data(Conn, StreamId, <<>>, true)),
+    _ = (try h2:send_data(Conn, StreamId, <<>>, true) catch _:_ -> ok end),
     try_callback(Handler, terminate, [normal, HState]),
     ok;
 terminate(Reason, #state{conn = Conn,
@@ -128,7 +128,7 @@ terminate(Reason, #state{conn = Conn,
 terminate(Reason, #state{conn = Conn, stream_id = StreamId,
                           handler = Handler, h_state = HState}) ->
     masque_h2_server:release_tunnel(Conn),
-    _ = (catch h2:cancel(Conn, StreamId, protocol_error)),
+    _ = (try h2:cancel(Conn, StreamId, protocol_error) catch _:_ -> ok end),
     try_callback(Handler, terminate, [Reason, HState]),
     ok.
 
@@ -167,7 +167,7 @@ dispatch_capsule(Type, Inner, S) when is_integer(Type) ->
     dispatch(handle_capsule, [Type, Inner], S).
 
 reset_and_stop(Reason, #state{conn = Conn, stream_id = StreamId} = S) ->
-    _ = (catch h2:cancel(Conn, StreamId, protocol_error)),
+    _ = (try h2:cancel(Conn, StreamId, protocol_error) catch _:_ -> ok end),
     {stop, Reason, S}.
 
 %%====================================================================
@@ -258,6 +258,6 @@ safe_apply(M, F, A) ->
 try_callback(Mod, Fun, Args) ->
     Arity = length(Args),
     case erlang:function_exported(Mod, Fun, Arity) of
-        true  -> (catch apply(Mod, Fun, Args));
+        true  -> (try apply(Mod, Fun, Args) catch _:_ -> ok end);
         false -> ok
     end.

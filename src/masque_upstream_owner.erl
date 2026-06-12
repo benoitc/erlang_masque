@@ -286,7 +286,7 @@ at_capacity(_N, dynamic) -> false;
 at_capacity(N, Max) when is_integer(Max) -> N >= Max.
 
 resolve_max_streams(h2, Mod, Conn, default) ->
-    case catch Mod:get_peer_settings(Conn) of
+    try Mod:get_peer_settings(Conn) of
         Map when is_map(Map) ->
             %% RFC 9113 §6.5.2: default is 100 when absent or 0.
             %% erlang_h2 may also surface `unlimited'; treat as dynamic.
@@ -297,6 +297,8 @@ resolve_max_streams(h2, Mod, Conn, default) ->
                 _               -> 100
             end;
         _ ->
+            100
+    catch _:_ ->
             100
     end;
 resolve_max_streams(quic_h3, _Mod, _Conn, default) ->
@@ -311,7 +313,7 @@ issue_request(#state{mod = Mod, conn = Conn}, Headers, Opts) ->
     Mod:request(Conn, Headers, Opts).
 
 cancel_transport_stream(#state{mod = Mod, conn = Conn}, StreamId) ->
-    catch Mod:cancel(Conn, StreamId).
+    try Mod:cancel(Conn, StreamId) catch _:_ -> ok end.
 
 register_stream(StreamId, SessionPid,
                 #state{mod = Mod, conn = Conn, refs = Refs} = S) ->
@@ -347,7 +349,7 @@ drop_stream(StreamId, #state{refs = Refs} = S) ->
     end.
 
 unset_stream_handler(#state{mod = Mod, conn = Conn}, StreamId) ->
-    catch Mod:unset_stream_handler(Conn, StreamId).
+    try Mod:unset_stream_handler(Conn, StreamId) catch _:_ -> ok end.
 
 release_by_monitor(MRef, _Pid, #state{refs = Refs} = S) ->
     Entries = maps:to_list(Refs),
@@ -379,7 +381,7 @@ tagged_closed(#state{transport = h2})      -> h2;
 tagged_closed(#state{transport = quic_h3}) -> quic_h3.
 
 close_transport(#state{mod = Mod, conn = Conn}) ->
-    catch Mod:close(Conn).
+    try Mod:close(Conn) catch _:_ -> ok end.
 
 arm_idle(#state{idle_ms = infinity} = S) -> S;
 arm_idle(#state{idle_ms = 0} = S) -> S;

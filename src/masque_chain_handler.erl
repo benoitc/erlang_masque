@@ -135,7 +135,7 @@ handle_capsule(Type, Value, #state{upstream = Sess} = State) ->
 
 -spec handle_eof(#state{}) -> {ok, #state{}} | {stop, term(), #state{}}.
 handle_eof(#state{upstream = Sess} = State) ->
-    _ = (catch masque:shutdown_write(Sess)),
+    _ = (try masque:shutdown_write(Sess) catch _:_ -> ok end),
     {ok, State}.
 
 -spec handle_info(term(), #state{}) ->

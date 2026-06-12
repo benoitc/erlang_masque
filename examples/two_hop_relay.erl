@@ -126,8 +126,8 @@ stop() ->
     case persistent_term:get({?MODULE, echoes}, undefined) of
         undefined -> ok;
         {UdpPid, TcpPid} ->
-            _ = (catch exit(UdpPid, shutdown)),
-            _ = (catch exit(TcpPid, shutdown))
+            _ = (try exit(UdpPid, shutdown) catch _:_ -> ok end),
+            _ = (try exit(TcpPid, shutdown) catch _:_ -> ok end)
     end,
     case persistent_term:get({?MODULE, tmp_dir}, undefined) of
         undefined -> ok;

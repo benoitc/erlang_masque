@@ -357,8 +357,8 @@ client_stream_abort(Reason,
         true ->
             masque_upstream_owner:release_stream(Pool, StreamId);
         false ->
-            _ = (catch quic_h3:cancel(Conn, StreamId,
-                                       ?MASQUE_H3_MESSAGE_ERROR)),
+            _ = (try quic_h3:cancel(Conn, StreamId,
+                                     ?MASQUE_H3_MESSAGE_ERROR) catch _:_ -> ok end),
             ok
     end,
     _ = notify_owner_closed(Reason, Data),
@@ -379,9 +379,10 @@ closing(internal, do_close, #data{conn = Conn, stream_id = StreamId} = Data) ->
     %% Prefer a graceful half-close (FIN on an empty DATA frame) to
     %% signal end-of-tunnel per HTTP semantics. Fall back to cancel
     %% if the stream is already gone.
-    case (catch quic_h3:send_data(Conn, StreamId, <<>>, true)) of
+    try quic_h3:send_data(Conn, StreamId, <<>>, true) of
         ok  -> ok;
-        _   -> catch quic_h3:cancel(Conn, StreamId)
+        _   -> try quic_h3:cancel(Conn, StreamId) catch _:_ -> ok end
+    catch _:_ -> try quic_h3:cancel(Conn, StreamId) catch _:_ -> ok end
     end,
     _ = session_teardown(Data),
     {stop, normal, Data};
@@ -403,7 +404,7 @@ session_teardown(#data{pool_owner = Pool, stream_id = StreamId})
 session_teardown(#data{pool_owner = Pool}) when is_pid(Pool) ->
     ok;
 session_teardown(#data{conn = Conn}) when is_pid(Conn) ->
-    _ = (catch quic_h3:close(Conn)),
+    _ = (try quic_h3:close(Conn) catch _:_ -> ok end),
     ok;
 session_teardown(_) ->
     ok.

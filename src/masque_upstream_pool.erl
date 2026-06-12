@@ -169,7 +169,7 @@ handle_info(_, S) ->
     {noreply, S}.
 
 terminate(_Reason, S) ->
-    _ = [catch exit(E#entry.owner, shutdown)
+    _ = [(try exit(E#entry.owner, shutdown) catch _:_ -> ok end)
          || {_FP, Entries} <- maps:to_list(S#state.cache),
             E <- Entries],
     ok.

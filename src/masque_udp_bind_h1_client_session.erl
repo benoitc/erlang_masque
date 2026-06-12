@@ -127,7 +127,7 @@ connecting(internal, {do_handshake, Opts}, Data) ->
                     reply_handshake(Data, ok),
                     {next_state, open, Data1};
                 {error, Reason} ->
-                    _ = (catch ssl:close(Socket)),
+                    _ = (try ssl:close(Socket) catch _:_ -> ok end),
                     reply_handshake(Data, {error, Reason}),
                     {stop, {handshake_failed, Reason}}
             end;
@@ -196,18 +196,18 @@ open(info, _Msg, Data) ->
     {keep_state, Data}.
 
 closing(internal, do_close, #data{socket = Socket} = Data) ->
-    _ = case Socket of undefined -> ok; _ -> catch ssl:close(Socket) end,
+    _ = case Socket of undefined -> ok; _ -> try ssl:close(Socket) catch _:_ -> ok end end,
     {stop, normal, Data};
 closing(_, _, Data) ->
     {keep_state, Data}.
 
 terminate(Reason, _State, #data{owner = Owner, mode = message,
                                 socket = Socket}) ->
-    _ = case Socket of undefined -> ok; _ -> catch ssl:close(Socket) end,
+    _ = case Socket of undefined -> ok; _ -> try ssl:close(Socket) catch _:_ -> ok end end,
     Owner ! {masque_closed, self(), Reason},
     ok;
 terminate(_Reason, _State, #data{socket = Socket}) ->
-    _ = case Socket of undefined -> ok; _ -> catch ssl:close(Socket) end,
+    _ = case Socket of undefined -> ok; _ -> try ssl:close(Socket) catch _:_ -> ok end end,
     ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->

@@ -123,7 +123,7 @@ connecting({call, From}, handshake_await,
                     Data2 = deliver_bytes(InitialBuffer, Data1),
                     {next_state, open, Data2, [{reply, From, ok}]};
                 {error, Reason} ->
-                    _ = catch ssl:close(Socket),
+                    _ = (try ssl:close(Socket) catch _:_ -> ok end),
                     {stop_and_reply, normal,
                      [{reply, From, {error, {setopts, Reason}}}],
                      Data}
@@ -189,7 +189,7 @@ open(info, _Msg, Data) ->
 closing(internal, do_close, #data{socket = Socket} = Data) ->
     _ = case Socket of
         undefined -> ok;
-        _         -> catch ssl:close(Socket)
+        _         -> try ssl:close(Socket) catch _:_ -> ok end
     end,
     {stop, normal, Data};
 closing(_Event, _Msg, Data) ->
@@ -201,7 +201,7 @@ terminate(_Reason, _State, #data{socket = undefined} = D) ->
 terminate(_Reason, _State, #data{socket = Socket} = D) ->
     _ = erlang:demonitor(D#data.owner_ref, [flush]),
     cancel_all_waiters(D),
-    _ = (catch ssl:close(Socket)),
+    _ = (try ssl:close(Socket) catch _:_ -> ok end),
     ok.
 
 cancel_all_waiters(#data{rx_waiters = Ws}) ->
@@ -328,14 +328,14 @@ parse_status(HdrBlock) ->
                 [_Ver, Rest] ->
                     case binary:split(Rest, <<" ">>, []) of
                         [CodeBin, Phrase] ->
-                            case catch binary_to_integer(CodeBin) of
-                                C when is_integer(C) -> {ok, C, Phrase};
-                                _ -> {error, bad_status}
+                            try binary_to_integer(CodeBin) of
+                                C when is_integer(C) -> {ok, C, Phrase}
+                            catch _:_ -> {error, bad_status}
                             end;
                         [CodeBin] ->
-                            case catch binary_to_integer(CodeBin) of
-                                C when is_integer(C) -> {ok, C, <<>>};
-                                _ -> {error, bad_status}
+                            try binary_to_integer(CodeBin) of
+                                C when is_integer(C) -> {ok, C, <<>>}
+                            catch _:_ -> {error, bad_status}
                             end
                     end;
                 _ ->

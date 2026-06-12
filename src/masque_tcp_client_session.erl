@@ -224,9 +224,10 @@ closing(internal, do_close, #data{write_closed = true} = Data) ->
     _ = session_teardown(Data),
     {stop, normal, Data};
 closing(internal, do_close, Data) ->
-    case (catch transport_send_data(Data, <<>>, true)) of
+    _ = try transport_send_data(Data, <<>>, true) of
         ok  -> ok;
-        _   -> catch transport_cancel(Data)
+        _   -> try transport_cancel(Data) catch _:_ -> ok end
+    catch _:_ -> try transport_cancel(Data) catch _:_ -> ok end
     end,
     _ = session_teardown(Data),
     {stop, normal, Data};
@@ -248,7 +249,7 @@ session_teardown(#data{pool_owner = Pool, stream_id = StreamId})
 session_teardown(#data{pool_owner = Pool}) when is_pid(Pool) ->
     ok;
 session_teardown(#data{conn = Conn} = Data) when is_pid(Conn) ->
-    _ = (catch transport_close(Data)),
+    _ = (try transport_close(Data) catch _:_ -> ok end),
     ok;
 session_teardown(_) ->
     ok.

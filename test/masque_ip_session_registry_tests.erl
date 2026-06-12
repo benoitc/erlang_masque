@@ -45,7 +45,7 @@ teardown(Pid) when is_pid(Pid) ->
     %% gen_server:stop is synchronous and unregisters the name before
     %% returning, which is what we need to keep masque_upstream_pool_tests
     %% (which boots the whole masque application) happy.
-    catch gen_server:stop(masque_ip_session_registry, normal, 1000),
+    try gen_server:stop(masque_ip_session_registry, normal, 1000) catch _:_ -> ok end,
     case is_process_alive(Pid) of
         true ->
             exit(Pid, kill),
@@ -54,7 +54,7 @@ teardown(Pid) when is_pid(Pid) ->
     end.
 
 clear() ->
-    _ = (catch ets:delete_all_objects(masque_ip_session_registry)),
+    _ = (try ets:delete_all_objects(masque_ip_session_registry) catch _:_ -> ok end),
     ok.
 
 %%====================================================================

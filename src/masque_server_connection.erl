@@ -134,7 +134,7 @@ handle_info({session_init_done, StreamId, {ok, Pid}}, S) ->
         {{From, _WorkerPid, Buf}, Pending2} ->
             link(Pid),
             MRef = erlang:monitor(process, Pid),
-            case (catch gen_server:call(Pid, finalize, 5000)) of
+            try gen_server:call(Pid, finalize, 5000) of
                 ok ->
                     _ = [Pid ! Msg || Msg <- lists:reverse(Buf)],
                     gen_server:reply(From, {ok, Pid}),
@@ -148,13 +148,19 @@ handle_info({session_init_done, StreamId, {ok, Pid}}, S) ->
                 _ ->
                     unlink(Pid),
                     erlang:demonitor(MRef, [flush]),
-                    catch gen_server:stop(Pid, finalize_failed, 5000),
+                    try gen_server:stop(Pid, finalize_failed, 5000) catch _:_ -> ok end,
+                    gen_server:reply(From, {error, finalize_failed}),
+                    {noreply, S#state{pending = Pending2}}
+            catch _:_ ->
+                    unlink(Pid),
+                    erlang:demonitor(MRef, [flush]),
+                    try gen_server:stop(Pid, finalize_failed, 5000) catch _:_ -> ok end,
                     gen_server:reply(From, {error, finalize_failed}),
                     {noreply, S#state{pending = Pending2}}
             end;
         error ->
             %% Cancelled (caller timed out)
-            catch gen_server:stop(Pid, cancelled, 5000),
+            try gen_server:stop(Pid, cancelled, 5000) catch _:_ -> ok end,
             {noreply, S}
     end;
 handle_info({session_init_done, StreamId, {error, Reason}}, S) ->

@@ -292,15 +292,15 @@ init_per_testcase(_Case, Config) ->
 
 end_per_testcase(_Case, Config) ->
     Server = ?config(server, Config),
-    _ = (catch masque_test_helpers:stop_masque_server(Server)),
-    _ = (catch quic_h3:stop_server(maps:get(name, Server))),
+    _ = (try masque_test_helpers:stop_masque_server(Server) catch _:_ -> ok end),
+    _ = (try quic_h3:stop_server(maps:get(name, Server)) catch _:_ -> ok end),
     case maps:find(h2_ref, Server) of
-        {ok, Ref} -> _ = (catch h2:stop_server(Ref));
+        {ok, Ref} -> _ = (try h2:stop_server(Ref) catch _:_ -> ok end);
         error     -> ok
     end,
     case ?config(egress, Config) of
         undefined -> ok;
-        Egress    -> catch masque_test_helpers:stop_masque_server(Egress)
+        Egress    -> try masque_test_helpers:stop_masque_server(Egress) catch _:_ -> ok end
     end,
     case ?config(udp_pid, Config) of
         undefined -> ok;

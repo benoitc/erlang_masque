@@ -293,11 +293,11 @@ open(info, _Msg, Data) ->
 
 closing(internal, do_close, #data{transport = h3, conn = Conn,
                                   stream_id = StreamId} = Data) ->
-    _ = (catch quic_h3:send_data(Conn, StreamId, <<>>, true)),
+    _ = (try quic_h3:send_data(Conn, StreamId, <<>>, true) catch _:_ -> ok end),
     {stop, normal, Data};
 closing(internal, do_close, #data{transport = h2, conn = Conn,
                                   stream_id = StreamId} = Data) ->
-    _ = (catch h2:send_data(Conn, StreamId, <<>>, true)),
+    _ = (try h2:send_data(Conn, StreamId, <<>>, true) catch _:_ -> ok end),
     {stop, normal, Data};
 closing(_, _, Data) ->
     {keep_state, Data}.
@@ -659,7 +659,7 @@ do_connect(#data{transport = h3} = Data, Opts) ->
                                  #{end_stream => false}) of
                 {ok, StreamId} -> {ok, Conn, StreamId};
                 {error, R} ->
-                    _ = (catch quic_h3:close(Conn)),
+                    _ = (try quic_h3:close(Conn) catch _:_ -> ok end),
                     {error, {request, R}}
             end;
         {error, R} ->
@@ -685,7 +685,7 @@ do_connect(#data{transport = h2} = Data, Opts) ->
                             #{protocol => ?MASQUE_CONNECT_UDP_PROTOCOL}) of
                 {ok, StreamId} -> {ok, Conn, StreamId};
                 {error, R} ->
-                    _ = (catch h2:close(Conn)),
+                    _ = (try h2:close(Conn) catch _:_ -> ok end),
                     {error, {request, R}}
             end;
         {error, R} ->
