@@ -29,6 +29,11 @@
     cap_buf = <<>>       :: binary(),
     max_cap              :: pos_integer(),
     pending_actions      :: [term()] | undefined,
+    %% Handler actions produced before the 200 is sent and the stream
+    %% is claimed (e.g. an upstream ROUTE_ADVERTISEMENT forwarded by a
+    %% chain handler whose init/2 raced ahead of finalize). Held in
+    %% order and flushed once the stream is open.
+    pending_out = []     :: [term()],
     %% Request IDs received from the client (from ADDRESS_REQUEST) but
     %% not yet answered by this server session.
     peer_pending = #{}   :: #{pos_integer() => true},
@@ -131,15 +136,18 @@ claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
 %%====================================================================
 
 handle_call(finalize, _From,
-            #state{pending_actions = Actions} = S)
+            #state{pending_actions = Actions, pending_out = Out} = S)
   when Actions =/= undefined ->
     case send_response(S, 200, response_headers()) of
         ok ->
             case claim_stream(S) of
                 Ok when Ok =:= ok; is_tuple(Ok) ->
+                    %% Stream is now open: run the handler's init actions,
+                    %% then flush any actions buffered before finalize.
                     {reply, ok,
-                     run_init_actions(Actions,
+                     run_init_actions(Actions ++ Out,
                          S#state{pending_actions = undefined,
+                                 pending_out = [],
                                  start_time =
                                      erlang:monotonic_time(millisecond)})};
                 {error, _} ->
@@ -374,6 +382,14 @@ exported(Mod, Fun, Arity) ->
     _ = code:ensure_loaded(Mod),
     erlang:function_exported(Mod, Fun, Arity).
 
+%% Before finalize (pending_actions =/= undefined) the 200 has not been
+%% sent and the stream is not claimed, so any outbound capsule would be
+%% dropped. Hold these actions and let finalize flush them in order once
+%% the stream is open.
+apply_actions_noreply(Actions, #state{pending_actions = Pending,
+                                      pending_out = Out} = State)
+  when Pending =/= undefined ->
+    {noreply, State#state{pending_out = Out ++ Actions}};
 apply_actions_noreply(Actions, State) ->
     case do_actions(Actions, State) of
         {ok, S2}           -> {noreply, S2};
