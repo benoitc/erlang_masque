@@ -6,6 +6,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-13
+
 ### Added
 
 - HTTP/1.1 fallback for all three tunnel protocols. CONNECT-UDP
@@ -70,6 +72,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
   still call `masque:start_listener/2` directly and set each
   handler. Same change applies to the new `_h2' and `_h1'
   wrappers.
+- Build and test suite now run on OTP 29. The deprecated prefix
+  `catch` operator was migrated to `try ... catch ... end` across
+  the session modules. Dependencies bumped: `h1` moved to the hex
+  `erlang_h1` 0.6.2 package, `h2` to 0.9.0, `instrument` to v1.1.3
+  (OTP 29 support), `hackney` to 4.3.0, and `proper` to 1.5.0 for
+  tests.
+
+### Fixed
+
+- Chained CONNECT-IP no longer drops the egress's initial
+  `ROUTE_ADVERTISEMENT`. The ingress IP server session could
+  forward the advertisement before it sent its own 200 and claimed
+  the downstream stream, so the capsule went to a not-yet-open
+  stream and was lost. Handler actions produced before finalize are
+  now buffered and flushed in order once the stream is open.
 
 ## [0.5.0] - 2026-04-19
 
