@@ -26,8 +26,8 @@ are shipped in this library.
   allocator, listener-owned DNS resolution before `accept/1`,
   BCP-38 source filter, ICMPv4+v6 error synthesis (`masque_icmp`),
   H3 datagram MTU enforcement per §8. See
-  [`docs/connect_ip.md`](docs/connect_ip.md) for the §-mapped
-  compliance table.
+  [the CONNECT-IP guide](https://hexdocs.pm/masque/connect_ip.html) for
+  the §-mapped compliance table.
 - draft-ietf-httpbis-connect-tcp (`:protocol = connect-tcp`): TCP
   tunneling with END_STREAM = TCP FIN semantics.
 - One listener serves all three protocols; `:protocol` pseudo-header
@@ -43,21 +43,21 @@ are shipped in this library.
 - End-to-end compliance CT suites (UDP + IP) and eunit codecs (URI,
   capsule, datagram, ICMP) + skippable external-peer interop suite.
 
-- **[Usage guide](docs/usage.md)** - client modes, multiple tunnels,
-  integration with an existing `quic_h3` or `h2` server, handler
-  lifecycle, transport selection, connection pooling, metrics.
-- **[Design](docs/design.md)** - architecture overview, supervision
-  tree, client and server request paths, upstream pool internals,
-  extension points.
-- **[Relay guide](docs/relay.md)** - end-to-end walkthrough of
-  building an Apple-Private-Relay-shaped ingress + egress app on
-  top of the library.
-- **[API reference](docs/api.md)** - type signatures, option maps,
-  handler callbacks, built-in handlers.
-- **[CONNECT-IP guide](docs/connect_ip.md)** - RFC 9484 usage and
-  section-by-section compliance mapping.
-- **[Feature matrix](docs/features.md)** - RFC coverage and
-  intentional non-goals.
+- **[Usage guide](https://hexdocs.pm/masque/usage.html)** - client modes,
+  multiple tunnels, integration with an existing `quic_h3` or `h2` server,
+  handler lifecycle, transport selection, connection pooling, metrics.
+- **[Design](https://hexdocs.pm/masque/design.html)** - architecture
+  overview, supervision tree, client and server request paths, upstream
+  pool internals, extension points.
+- **[Relay guide](https://hexdocs.pm/masque/relay.html)** - end-to-end
+  walkthrough of building an Apple-Private-Relay-shaped ingress + egress
+  app on top of the library.
+- **[API reference](https://hexdocs.pm/masque/api.html)** - type
+  signatures, option maps, handler callbacks, built-in handlers.
+- **[CONNECT-IP guide](https://hexdocs.pm/masque/connect_ip.html)** -
+  RFC 9484 usage and section-by-section compliance mapping.
+- **[Feature matrix](https://hexdocs.pm/masque/features.html)** - RFC
+  coverage and intentional non-goals.
 
 [rfc9484]: https://www.rfc-editor.org/rfc/rfc9484
 
