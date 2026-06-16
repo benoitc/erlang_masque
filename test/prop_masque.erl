@@ -1,4 +1,4 @@
--module(masque_prop_tests).
+-module(prop_masque).
 
 -include_lib("proper/include/proper.hrl").
 
@@ -65,6 +65,8 @@ prop_capsule_roundtrip() ->
 non_neg_integer_upto(Bits) ->
     ?LET(N, proper_types:integer(0, (1 bsl Bits) - 1), N).
 
+%% A reg-name `masque_uri' accepts: dot-joined labels, each label a run
+%% of letters / digits / hyphen with no leading or trailing hyphen.
 hostname() ->
     ?LET(
         Labels,
@@ -73,19 +75,20 @@ hostname() ->
     ).
 
 label() ->
-    ?LET(
-        Chars,
-        non_empty(list(label_char())),
-        Chars
-    ).
-
-label_char() ->
     oneof([
-        integer($a, $z),
-        integer($A, $Z),
-        integer($0, $9),
-        $-
+        ?LET(C, alnum_char(), [C]),
+        ?LET(
+            {First, Middle, Last},
+            {alnum_char(), list(ldh_char()), alnum_char()},
+            [First | Middle] ++ [Last]
+        )
     ]).
+
+alnum_char() ->
+    oneof([integer($a, $z), integer($A, $Z), integer($0, $9)]).
+
+ldh_char() ->
+    oneof([integer($a, $z), integer($A, $Z), integer($0, $9), $-]).
 
 port_number() ->
     integer(1, 65535).
