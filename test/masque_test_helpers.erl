@@ -33,7 +33,9 @@ generate_certs() ->
     Cmd = lists:flatten(
         io_lib:format(
             "openssl req -x509 -newkey rsa:2048 -keyout ~s -out ~s "
-            "-days 1 -nodes -subj '/CN=localhost' 2>/dev/null",
+            "-days 1 -nodes -subj '/CN=localhost' "
+            "-addext 'subjectAltName=DNS:localhost,IP:127.0.0.1,IP:0:0:0:0:0:0:0:1' "
+            "2>/dev/null",
             [KeyFile, CertFile]
         )
     ),
