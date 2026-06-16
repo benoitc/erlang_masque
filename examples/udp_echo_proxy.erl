@@ -25,10 +25,10 @@ start(Port) ->
     {ok, TmpDir, Cert, Key} = ephemeral_cert(),
     persistent_term:put({?MODULE, tmp_dir}, TmpDir),
     Opts = #{
-        port     => Port,
-        cert     => Cert,
-        key      => Key,
-        handler  => masque_udp_proxy_handler
+        port => Port,
+        cert => Cert,
+        key => Key,
+        handler => masque_udp_proxy_handler
     },
     masque:start_listener(?LISTENER, Opts).
 
@@ -36,7 +36,7 @@ stop() ->
     _ = masque:stop_listener(?LISTENER),
     case persistent_term:get({?MODULE, tmp_dir}, undefined) of
         undefined -> ok;
-        Dir       -> os:cmd("rm -rf " ++ Dir)
+        Dir -> os:cmd("rm -rf " ++ Dir)
     end,
     persistent_term:erase({?MODULE, tmp_dir}),
     ok.
@@ -45,18 +45,23 @@ stop() ->
 %% for local testing; bring your own for anything else.
 ephemeral_cert() ->
     Dir = filename:join(
-        "/tmp", "masque_echo_proxy_" ++
-            integer_to_list(erlang:unique_integer([positive]))),
+        "/tmp",
+        "masque_echo_proxy_" ++
+            integer_to_list(erlang:unique_integer([positive]))
+    ),
     ok = filelib:ensure_dir(filename:join(Dir, ".keep")),
     CertFile = filename:join(Dir, "cert.pem"),
-    KeyFile  = filename:join(Dir, "key.pem"),
-    Cmd = lists:flatten(io_lib:format(
-        "openssl req -x509 -newkey rsa:2048 -keyout ~s -out ~s "
-        "-days 1 -nodes -subj '/CN=localhost' 2>/dev/null",
-        [KeyFile, CertFile])),
+    KeyFile = filename:join(Dir, "key.pem"),
+    Cmd = lists:flatten(
+        io_lib:format(
+            "openssl req -x509 -newkey rsa:2048 -keyout ~s -out ~s "
+            "-days 1 -nodes -subj '/CN=localhost' 2>/dev/null",
+            [KeyFile, CertFile]
+        )
+    ),
     os:cmd(Cmd),
     {ok, CertPem} = file:read_file(CertFile),
-    {ok, KeyPem}  = file:read_file(KeyFile),
+    {ok, KeyPem} = file:read_file(KeyFile),
     [{'Certificate', CertDer, _}] = public_key:pem_decode(CertPem),
     [{KeyType, KeyDerRaw, not_encrypted}] = public_key:pem_decode(KeyPem),
     KeyDer = public_key:der_decode(KeyType, KeyDerRaw),

@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (OTP ${{ matrix.otp }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        otp: ['26', '27', '28', '29']
+    steps:
+      - uses: actions/checkout@v4
+
+      # The `instrument` dependency builds its NIF with CMake.
+      - name: Install CMake
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: '3.25.0'
+
+      - name: Cache Hex packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: ${{ runner.os }}-rebar3-otp${{ matrix.otp }}-${{ hashFiles('rebar.config') }}
+          restore-keys: |
+            ${{ runner.os }}-rebar3-otp${{ matrix.otp }}-
+
+      - name: Compile (warnings as errors)
+        run: rebar3 compile
+
+      - name: Xref
+        run: rebar3 xref
+
+      - name: EUnit
+        run: rebar3 eunit
+
+      - name: Common Test
+        run: rebar3 ct
+
+      - name: Upload CT logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ct-logs-otp${{ matrix.otp }}
+          path: _build/test/logs/
+          if-no-files-found: ignore
+
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `rebar3 lint` compiles the project, which builds the instrument NIF.
+      - name: Install CMake
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          rebar3-version: '3.25.0'
+
+      - name: Cache Hex packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: ${{ runner.os }}-rebar3-lint-${{ hashFiles('rebar.config') }}
+          restore-keys: |
+            ${{ runner.os }}-rebar3-lint-
+
+      - name: Check formatting (erlfmt)
+        run: rebar3 fmt --check
+
+      - name: Elvis
+        run: rebar3 lint
+
+  dialyzer:
+    name: Dialyzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CMake
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          rebar3-version: '3.25.0'
+
+      - name: Cache PLT
+        uses: actions/cache@v4
+        with:
+          path: _build/default/rebar3_*_plt
+          key: ${{ runner.os }}-dialyzer-otp28-${{ hashFiles('rebar.config') }}
+          restore-keys: |
+            ${{ runner.os }}-dialyzer-otp28-
+
+      - name: Dialyzer
+        run: rebar3 dialyzer

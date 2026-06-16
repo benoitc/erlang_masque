@@ -23,10 +23,16 @@ init(_Req, _Opts) ->
     {ok, #{sent => false}}.
 
 handle_ip_packet(Pkt, #{sent := false} = S) ->
-    Assign = #ip_assignment{request_id = 0, version = 4,
-                            address = {10,77,0,1}, prefix_len = 32},
-    {ok, S#{sent := true}, [{assign, [Assign]},
-                             {send_ip_packet, Pkt}]};
+    Assign = #ip_assignment{
+        request_id = 0,
+        version = 4,
+        address = {10, 77, 0, 1},
+        prefix_len = 32
+    },
+    {ok, S#{sent := true}, [
+        {assign, [Assign]},
+        {send_ip_packet, Pkt}
+    ]};
 handle_ip_packet(Pkt, S) ->
     {ok, S, [{send_ip_packet, Pkt}]}.
 

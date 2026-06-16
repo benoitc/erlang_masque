@@ -27,8 +27,8 @@
 %%====================================================================
 
 -define(MASQUE_CAPSULE_COMPRESSION_ASSIGN, 16#11).
--define(MASQUE_CAPSULE_COMPRESSION_ACK,    16#12).
--define(MASQUE_CAPSULE_COMPRESSION_CLOSE,  16#13).
+-define(MASQUE_CAPSULE_COMPRESSION_ACK, 16#12).
+-define(MASQUE_CAPSULE_COMPRESSION_CLOSE, 16#13).
 
 %%====================================================================
 %% IP Version field (draft-11 sections 3.1 and 4)
@@ -52,8 +52,8 @@
 -record(compression_assign, {
     context_id :: pos_integer(),
     ip_version :: 0 | 4 | 6,
-    address    :: undefined | inet:ip_address(),
-    port       :: undefined | inet:port_number()
+    address :: undefined | inet:ip_address(),
+    port :: undefined | inet:port_number()
 }).
 
 %% A COMPRESSION_ACK capsule.
@@ -73,16 +73,16 @@
 -record(compression_entry, {
     context_id :: pos_integer(),
     ip_version :: 0 | 4 | 6,
-    address    :: undefined | inet:ip_address(),
-    port       :: undefined | inet:port_number(),
-    state      :: pending_ack | installed | closing,
-    direction  :: outbound | inbound
+    address :: undefined | inet:ip_address(),
+    port :: undefined | inet:port_number(),
+    state :: pending_ack | installed | closing,
+    direction :: outbound | inbound
 }).
 
 %% A peer tuple as advertised in `Proxy-Public-Address'.
 -record(public_address, {
     address :: inet:ip_address(),
-    port    :: inet:port_number()
+    port :: inet:port_number()
 }).
 
 -endif.

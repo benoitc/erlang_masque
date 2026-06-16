@@ -19,19 +19,31 @@
 %% Transport API (owner calls these - must match the h2 / quic_h3
 %% shape the owner relies on).
 -export([connect/3]).
--export([request/3, set_stream_handler/3, unset_stream_handler/2,
-         cancel/2, close/1, get_peer_settings/1]).
+-export([
+    request/3,
+    set_stream_handler/3,
+    unset_stream_handler/2,
+    cancel/2,
+    close/1,
+    get_peer_settings/1
+]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 -record(state, {
-    next_stream_id    :: non_neg_integer(),
-    peer_settings     :: map(),
-    request_result    :: {ok, non_neg_integer()} | {error, term()} | auto,
+    next_stream_id :: non_neg_integer(),
+    peer_settings :: map(),
+    request_result :: {ok, non_neg_integer()} | {error, term()} | auto,
     set_handler_result :: ok | {ok, [term()]} | {error, term()},
-    handlers          :: #{non_neg_integer() => pid()},
-    calls = []        :: [term()]
+    handlers :: #{non_neg_integer() => pid()},
+    calls = [] :: [term()]
 }).
 
 %%====================================================================
@@ -100,8 +112,10 @@ resolve_connect({delay, Ms, Inner}) ->
 resolve_connect({notify, NotifyPid, Inner}) ->
     NotifyPid ! {mock_connected, self()},
     resolve_connect(Inner);
-resolve_connect({ok, _} = R) -> R;
-resolve_connect({error, _} = E) -> E.
+resolve_connect({ok, _} = R) ->
+    R;
+resolve_connect({error, _} = E) ->
+    E.
 
 request(MockPid, Headers, Opts) ->
     gen_server:call(MockPid, {request, Headers, Opts}).
@@ -127,11 +141,11 @@ get_peer_settings(MockPid) ->
 
 init(Opts) ->
     {ok, #state{
-        next_stream_id    = maps:get(start_stream_id, Opts, 1),
-        peer_settings     = maps:get(peer_settings, Opts, #{}),
-        request_result    = maps:get(request_result, Opts, auto),
+        next_stream_id = maps:get(start_stream_id, Opts, 1),
+        peer_settings = maps:get(peer_settings, Opts, #{}),
+        request_result = maps:get(request_result, Opts, auto),
         set_handler_result = maps:get(set_handler_result, Opts, ok),
-        handlers          = #{}
+        handlers = #{}
     }}.
 
 handle_call({configure, Overrides}, _From, S) ->
@@ -149,41 +163,48 @@ handle_call({deliver_to_stream, StreamId, Msg}, _From, S) ->
     end;
 handle_call({request, Headers, Opts}, _From, S) ->
     S1 = record({request, [Headers, Opts]}, S),
-    {Reply, S2} = case S1#state.request_result of
-        auto ->
-            Id = S1#state.next_stream_id,
-            {{ok, Id}, S1#state{next_stream_id = Id + 4}};
-        {ok, _Id} = R ->
-            {R, S1};
-        {error, _} = R ->
-            {R, S1}
-    end,
+    {Reply, S2} =
+        case S1#state.request_result of
+            auto ->
+                Id = S1#state.next_stream_id,
+                {{ok, Id}, S1#state{next_stream_id = Id + 4}};
+            {ok, _Id} = R ->
+                {R, S1};
+            {error, _} = R ->
+                {R, S1}
+        end,
     {reply, Reply, S2};
 handle_call({set_stream_handler, StreamId, HandlerPid}, _From, S) ->
     S1 = record({set_stream_handler, [StreamId, HandlerPid]}, S),
     case S1#state.set_handler_result of
         ok ->
-            {reply, ok,
-             S1#state{handlers = maps:put(StreamId, HandlerPid,
-                                           S1#state.handlers)}};
+            {reply, ok, S1#state{
+                handlers = maps:put(
+                    StreamId,
+                    HandlerPid,
+                    S1#state.handlers
+                )
+            }};
         {ok, _} = R ->
-            {reply, R,
-             S1#state{handlers = maps:put(StreamId, HandlerPid,
-                                           S1#state.handlers)}};
+            {reply, R, S1#state{
+                handlers = maps:put(
+                    StreamId,
+                    HandlerPid,
+                    S1#state.handlers
+                )
+            }};
         {error, _} = Err ->
             {reply, Err, S1}
     end;
 handle_call({unset_stream_handler, StreamId}, _From, S) ->
     S1 = record({unset_stream_handler, [StreamId]}, S),
-    {reply, ok,
-     S1#state{handlers = maps:remove(StreamId, S1#state.handlers)}};
+    {reply, ok, S1#state{handlers = maps:remove(StreamId, S1#state.handlers)}};
 handle_call({cancel, StreamId}, _From, S) ->
     {reply, ok, record({cancel, [StreamId]}, S)};
 handle_call(close, _From, S) ->
     {reply, ok, record({close, []}, S)};
 handle_call(get_peer_settings, _From, S) ->
-    {reply, S#state.peer_settings,
-     record({get_peer_settings, []}, S)};
+    {reply, S#state.peer_settings, record({get_peer_settings, []}, S)};
 handle_call(_, _From, S) ->
     {reply, {error, unknown}, S}.
 

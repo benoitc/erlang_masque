@@ -12,8 +12,12 @@
 %%% `ipproto' is matched against.
 -module(masque_ip_packet).
 
--export([destination/1, upper_protocol/1,
-         scope_passes/3, scope_check/3]).
+-export([
+    destination/1,
+    upper_protocol/1,
+    scope_passes/3,
+    scope_check/3
+]).
 
 -type version() :: 4 | 6.
 -type address() :: inet:ip4_address() | inet:ip6_address().
@@ -24,13 +28,15 @@
 %% @doc Extract the IP version and destination address from `Packet'.
 -spec destination(binary()) ->
     {ok, version(), address()} | {error, term()}.
-destination(<<4:4, _:4, _:8, _:16, _:16, _:16, _:8, _:8, _:16,
-              _:32, A:8, B:8, C:8, D:8, _/binary>>) ->
-    {ok, 4, {A,B,C,D}};
-destination(<<6:4, _:4, _:8, _:16, _:16, _:8, _:8,
-              _Src:128, A:16, B:16, C:16, D:16,
-              E:16, F:16, G:16, H:16, _/binary>>) ->
-    {ok, 6, {A,B,C,D,E,F,G,H}};
+destination(
+    <<4:4, _:4, _:8, _:16, _:16, _:16, _:8, _:8, _:16, _:32, A:8, B:8, C:8, D:8, _/binary>>
+) ->
+    {ok, 4, {A, B, C, D}};
+destination(
+    <<6:4, _:4, _:8, _:16, _:16, _:8, _:8, _Src:128, A:16, B:16, C:16, D:16, E:16, F:16, G:16, H:16,
+        _/binary>>
+) ->
+    {ok, 6, {A, B, C, D, E, F, G, H}};
 destination(_) ->
     {error, malformed}.
 
@@ -38,31 +44,35 @@ destination(_) ->
 %% headers (Hop-by-Hop 0, Routing 43, Fragment 44, Destination 60,
 %% AH 51) to find the first non-extension Next Header.
 -spec upper_protocol(binary()) -> {ok, proto()} | {error, term()}.
-upper_protocol(<<4:4, IHL:4, _Rest:64, Proto:8, _/binary>> = Pkt)
-  when IHL >= 5, byte_size(Pkt) >= IHL * 4 ->
+upper_protocol(<<4:4, IHL:4, _Rest:64, Proto:8, _/binary>> = Pkt) when
+    IHL >= 5, byte_size(Pkt) >= IHL * 4
+->
     {ok, Proto};
-upper_protocol(<<6:4, _:4, _:8, _:16, _:16, NextHdr:8, _:8,
-                 _Src:128, _Dst:128, Rest/binary>>) ->
+upper_protocol(<<6:4, _:4, _:8, _:16, _:16, NextHdr:8, _:8, _Src:128, _Dst:128, Rest/binary>>) ->
     walk_v6_ext(NextHdr, Rest);
 upper_protocol(_) ->
     {error, malformed}.
 
 %% @doc Combined `target' / `ipproto' scope check used by the
 %% data plane. `*' means "any" on either axis.
--spec scope_passes(binary(),
-                   masque_uri_ip:ip_target(),
-                   masque_uri_ip:ip_ipproto()) -> boolean().
+-spec scope_passes(
+    binary(),
+    masque_uri_ip:ip_target(),
+    masque_uri_ip:ip_ipproto()
+) -> boolean().
 scope_passes(Packet, Target, IPProto) ->
     case scope_check(Packet, Target, IPProto) of
-        ok         -> true;
+        ok -> true;
         {error, _} -> false
     end.
 
 %% @doc Reasonful variant of `scope_passes/3' for telemetry. Returns
 %% the first failing axis instead of a boolean.
--spec scope_check(binary(),
-                  masque_uri_ip:ip_target(),
-                  masque_uri_ip:ip_ipproto()) ->
+-spec scope_check(
+    binary(),
+    masque_uri_ip:ip_target(),
+    masque_uri_ip:ip_ipproto()
+) ->
     ok | {error, malformed | scope_target | scope_ipproto}.
 scope_check(Packet, Target, IPProto) ->
     case destination(Packet) of
@@ -70,7 +80,7 @@ scope_check(Packet, Target, IPProto) ->
             case target_matches(V, Dst, Target) of
                 true ->
                     case ipproto_matches(Packet, IPProto) of
-                        true  -> ok;
+                        true -> ok;
                         false -> {error, scope_ipproto}
                     end;
                 false ->
@@ -84,9 +94,12 @@ scope_check(Packet, Target, IPProto) ->
 %% Internal
 %%====================================================================
 
-target_matches(_V, _Dst, '*') -> true;
-target_matches(4, Dst, {_,_,_,_} = Want) -> Dst =:= Want;
-target_matches(6, Dst, {_,_,_,_,_,_,_,_} = Want) -> Dst =:= Want;
+target_matches(_V, _Dst, '*') ->
+    true;
+target_matches(4, Dst, {_, _, _, _} = Want) ->
+    Dst =:= Want;
+target_matches(6, Dst, {_, _, _, _, _, _, _, _} = Want) ->
+    Dst =:= Want;
 target_matches(4, Dst, {4, Net, Pfx}) ->
     in_v4_prefix(Dst, Net, Pfx);
 target_matches(6, Dst, {6, Net, Pfx}) ->
@@ -96,31 +109,35 @@ target_matches(_V, _Dst, Bin) when is_binary(Bin) ->
     %% resolved addresses become routes, so packets are scoped via
     %% the route table rather than here.
     true;
-target_matches(_, _, _) -> false.
+target_matches(_, _, _) ->
+    false.
 
-in_v4_prefix({A,B,C,D}, {NA,NB,NC,ND}, Pfx) when Pfx =< 32 ->
+in_v4_prefix({A, B, C, D}, {NA, NB, NC, ND}, Pfx) when Pfx =< 32 ->
     Mask = bnot ((1 bsl (32 - Pfx)) - 1) band 16#FFFFFFFF,
-    Net  = (NA bsl 24) bor (NB bsl 16) bor (NC bsl 8) bor ND,
-    Addr = (A  bsl 24) bor (B  bsl 16) bor (C  bsl 8) bor D,
+    Net = (NA bsl 24) bor (NB bsl 16) bor (NC bsl 8) bor ND,
+    Addr = (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D,
     (Addr band Mask) =:= (Net band Mask).
 
 in_v6_prefix(Addr, Net, Pfx) when Pfx =< 128 ->
-    {A,B,C,D,E,F,G,H} = Addr,
-    {NA,NB,NC,ND,NE,NF,NG,NH} = Net,
-    AInt = (A bsl 112) bor (B bsl 96) bor (C bsl 80) bor (D bsl 64)
-            bor (E bsl 48) bor (F bsl 32) bor (G bsl 16) bor H,
-    NInt = (NA bsl 112) bor (NB bsl 96) bor (NC bsl 80) bor (ND bsl 64)
-            bor (NE bsl 48) bor (NF bsl 32) bor (NG bsl 16) bor NH,
+    {A, B, C, D, E, F, G, H} = Addr,
+    {NA, NB, NC, ND, NE, NF, NG, NH} = Net,
+    AInt =
+        (A bsl 112) bor (B bsl 96) bor (C bsl 80) bor (D bsl 64) bor
+            (E bsl 48) bor (F bsl 32) bor (G bsl 16) bor H,
+    NInt =
+        (NA bsl 112) bor (NB bsl 96) bor (NC bsl 80) bor (ND bsl 64) bor
+            (NE bsl 48) bor (NF bsl 32) bor (NG bsl 16) bor NH,
     HostBits = 128 - Pfx,
     Mask = bnot ((1 bsl HostBits) - 1) band ((1 bsl 128) - 1),
     (AInt band Mask) =:= (NInt band Mask).
 
-ipproto_matches(_Packet, '*') -> true;
+ipproto_matches(_Packet, '*') ->
+    true;
 ipproto_matches(Packet, P) when is_integer(P) ->
     case upper_protocol(Packet) of
-        {ok, P}      -> true;
-        {ok, _}      -> false;
-        {error, _}   -> false
+        {ok, P} -> true;
+        {ok, _} -> false;
+        {error, _} -> false
     end.
 
 %% IPv6 extension-header chain. Each header is 8 + Hdr_Ext_Len*8 bytes

@@ -22,25 +22,35 @@
 
 generate_certs() ->
     TmpDir = filename:join(
-        ["/tmp",
-         "masque_test_" ++ integer_to_list(erlang:unique_integer([positive]))]),
+        [
+            "/tmp",
+            "masque_test_" ++ integer_to_list(erlang:unique_integer([positive]))
+        ]
+    ),
     ok = filelib:ensure_dir(filename:join(TmpDir, "dummy")),
     CertFile = filename:join(TmpDir, "cert.pem"),
     KeyFile = filename:join(TmpDir, "key.pem"),
-    Cmd = lists:flatten(io_lib:format(
-        "openssl req -x509 -newkey rsa:2048 -keyout ~s -out ~s "
-        "-days 1 -nodes -subj '/CN=localhost' 2>/dev/null",
-        [KeyFile, CertFile])),
+    Cmd = lists:flatten(
+        io_lib:format(
+            "openssl req -x509 -newkey rsa:2048 -keyout ~s -out ~s "
+            "-days 1 -nodes -subj '/CN=localhost' 2>/dev/null",
+            [KeyFile, CertFile]
+        )
+    ),
     os:cmd(Cmd),
     case {filelib:is_file(CertFile), filelib:is_file(KeyFile)} of
         {true, true} ->
             {ok, CertPem} = file:read_file(CertFile),
-            {ok, KeyPem}  = file:read_file(KeyFile),
+            {ok, KeyPem} = file:read_file(KeyFile),
             [{'Certificate', CertDer, _}] = public_key:pem_decode(CertPem),
             KeyDer = decode_key(KeyPem),
-            {ok, #{tmp_dir => TmpDir,
-                   cert => CertDer, key => KeyDer,
-                   cert_file => CertFile, key_file => KeyFile}};
+            {ok, #{
+                tmp_dir => TmpDir,
+                cert => CertDer,
+                key => KeyDer,
+                cert_file => CertFile,
+                key_file => KeyFile
+            }};
         _ ->
             os:cmd("rm -rf " ++ TmpDir),
             {error, cert_generation_failed}
@@ -52,10 +62,10 @@ cleanup_certs(#{tmp_dir := TmpDir}) ->
 
 decode_key(KeyPem) ->
     case public_key:pem_decode(KeyPem) of
-        [{'RSAPrivateKey', Der, not_encrypted}]    -> public_key:der_decode('RSAPrivateKey', Der);
-        [{'ECPrivateKey', Der, not_encrypted}]     -> public_key:der_decode('ECPrivateKey', Der);
-        [{'PrivateKeyInfo', Der, not_encrypted}]   -> public_key:der_decode('PrivateKeyInfo', Der);
-        [{_Type, Der, not_encrypted}]              -> Der
+        [{'RSAPrivateKey', Der, not_encrypted}] -> public_key:der_decode('RSAPrivateKey', Der);
+        [{'ECPrivateKey', Der, not_encrypted}] -> public_key:der_decode('ECPrivateKey', Der);
+        [{'PrivateKeyInfo', Der, not_encrypted}] -> public_key:der_decode('PrivateKeyInfo', Der);
+        [{_Type, Der, not_encrypted}] -> Der
     end.
 
 %%====================================================================
@@ -63,12 +73,15 @@ decode_key(KeyPem) ->
 %%====================================================================
 
 start_masque_server(#{cert := Cert, key := Key} = Ctx) ->
-    Name = list_to_atom("masque_test_" ++
-                        integer_to_list(erlang:unique_integer([positive]))),
+    Name = list_to_atom(
+        "masque_test_" ++
+            integer_to_list(erlang:unique_integer([positive]))
+    ),
     Extra = maps:without([cert, key, tmp_dir], Ctx),
     Opts = maps:merge(
         #{port => 0, cert => Cert, key => Key},
-        Extra),
+        Extra
+    ),
     {ok, _} = masque_server:start_listener(Name, Opts),
     {ok, Port} = quic:get_server_port(Name),
     {ok, #{name => Name, port => Port}}.
@@ -90,7 +103,8 @@ h3_client_connect(Port, Opts0) ->
             h3_datagram_enabled => true,
             max_datagram_frame_size => 65535
         },
-        Opts0),
+        Opts0
+    ),
     quic_h3:connect("127.0.0.1", Port, Opts).
 
 %% Wait for the server to produce a response on StreamId; returns

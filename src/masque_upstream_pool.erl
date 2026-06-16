@@ -28,24 +28,32 @@
 -export([checkout/2, close_all/0]).
 -export([fingerprint/4]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
--type fingerprint() :: {Host :: binary() | string(),
-                         Port :: inet:port_number(),
-                         Transport :: h2 | quic_h3,
-                         OptsHash :: binary()}.
+-type fingerprint() :: {
+    Host :: binary() | string(),
+    Port :: inet:port_number(),
+    Transport :: h2 | quic_h3,
+    OptsHash :: binary()
+}.
 
 -export_type([fingerprint/0]).
 
 -record(entry, {
-    owner   :: pid(),
+    owner :: pid(),
     mon_ref :: reference()
 }).
 
 -record(state, {
-    cache    = #{} :: #{fingerprint() => [#entry{}]},
-    dialing  = #{} :: #{fingerprint() => [gen_server:from()]},
+    cache = #{} :: #{fingerprint() => [#entry{}]},
+    dialing = #{} :: #{fingerprint() => [gen_server:from()]},
     owner_ix = #{} :: #{reference() => fingerprint()}
 }).
 
@@ -80,17 +88,26 @@ close_all() ->
 %% connection-affecting subset of `Opts'. Stable under re-ordering
 %% of list-valued opts so two callers that pass `ssl_opts' in
 %% different order still hash to the same key.
--spec fingerprint(binary() | string(), inet:port_number(),
-                  h2 | quic_h3, map()) -> fingerprint().
+-spec fingerprint(
+    binary() | string(),
+    inet:port_number(),
+    h2 | quic_h3,
+    map()
+) -> fingerprint().
 fingerprint(Host, Port, Transport, Opts) when is_map(Opts) ->
     Canon = #{
-        verify   => maps:get(verify, Opts, verify_peer),
-        cacerts  => maps:get(cacerts, Opts, default),
+        verify => maps:get(verify, Opts, verify_peer),
+        cacerts => maps:get(cacerts, Opts, default),
         ssl_opts => canonical_ssl_opts(maps:get(ssl_opts, Opts, [])),
-        alpn     => maps:get(alpn, Opts, default)
+        alpn => maps:get(alpn, Opts, default)
     },
-    Hash = crypto:hash(sha256, term_to_binary(Canon,
-                                                [{minor_version, 2}])),
+    Hash = crypto:hash(
+        sha256,
+        term_to_binary(
+            Canon,
+            [{minor_version, 2}]
+        )
+    ),
     {to_bin(Host), Port, Transport, Hash}.
 
 %%====================================================================
@@ -111,25 +128,36 @@ handle_call({checkout, FP, Opts}, From, S) ->
                     %% A dial is already in flight for this FP; join
                     %% the queue. Caller will be replied to when the
                     %% dial completes.
-                    {noreply,
-                     S#state{dialing =
-                                 maps:put(FP, [From | Waiters],
-                                          S#state.dialing)}};
+                    {noreply, S#state{
+                        dialing =
+                            maps:put(
+                                FP,
+                                [From | Waiters],
+                                S#state.dialing
+                            )
+                    }};
                 error ->
                     %% Cold key: spawn a self-dialing owner. Registry
                     %% never blocks on the handshake.
                     _ = masque_upstream_owner:start_for_pool(
-                          self(), FP, Opts),
-                    {noreply,
-                     S#state{dialing = maps:put(FP, [From],
-                                                 S#state.dialing)}}
+                        self(), FP, Opts
+                    ),
+                    {noreply, S#state{
+                        dialing = maps:put(
+                            FP,
+                            [From],
+                            S#state.dialing
+                        )
+                    }}
             end
     end;
 handle_call(close_all, _From, S) ->
     reply_all_dialing({error, shutdown}, S),
-    _ = [exit(E#entry.owner, shutdown)
-         || {_FP, Entries} <- maps:to_list(S#state.cache),
-            E <- Entries],
+    _ = [
+        exit(E#entry.owner, shutdown)
+     || {_FP, Entries} <- maps:to_list(S#state.cache),
+        E <- Entries
+    ],
     {reply, ok, #state{}};
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
@@ -140,9 +168,12 @@ handle_info({dial_result, FP, {ok, Owner}}, S) ->
     MRef = erlang:monitor(process, Owner),
     Entry = #entry{owner = Owner, mon_ref = MRef},
     S1 = S#state{
-        cache = maps:update_with(FP,
-                                  fun(L) -> [Entry | L] end,
-                                  [Entry], S#state.cache),
+        cache = maps:update_with(
+            FP,
+            fun(L) -> [Entry | L] end,
+            [Entry],
+            S#state.cache
+        ),
         owner_ix = maps:put(MRef, FP, S#state.owner_ix)
     },
     S2 = reply_dialing(FP, {ok, Owner}, S1),
@@ -153,14 +184,16 @@ handle_info({dial_result, FP, {error, _} = Err}, S) ->
 handle_info({'DOWN', MRef, process, _Pid, _Reason}, S) ->
     case maps:take(MRef, S#state.owner_ix) of
         {FP, Ix2} ->
-            Cache2 = case maps:find(FP, S#state.cache) of
-                {ok, Entries} ->
-                    case [E || E <- Entries, E#entry.mon_ref =/= MRef] of
-                        []   -> maps:remove(FP, S#state.cache);
-                        Left -> maps:put(FP, Left, S#state.cache)
-                    end;
-                error -> S#state.cache
-            end,
+            Cache2 =
+                case maps:find(FP, S#state.cache) of
+                    {ok, Entries} ->
+                        case [E || E <- Entries, E#entry.mon_ref =/= MRef] of
+                            [] -> maps:remove(FP, S#state.cache);
+                            Left -> maps:put(FP, Left, S#state.cache)
+                        end;
+                    error ->
+                        S#state.cache
+                end,
             {noreply, S#state{cache = Cache2, owner_ix = Ix2}};
         error ->
             {noreply, S}
@@ -169,9 +202,15 @@ handle_info(_, S) ->
     {noreply, S}.
 
 terminate(_Reason, S) ->
-    _ = [(try exit(E#entry.owner, shutdown) catch _:_ -> ok end)
-         || {_FP, Entries} <- maps:to_list(S#state.cache),
-            E <- Entries],
+    _ = [
+        (try
+            exit(E#entry.owner, shutdown)
+        catch
+            _:_ -> ok
+        end)
+     || {_FP, Entries} <- maps:to_list(S#state.cache),
+        E <- Entries
+    ],
     ok.
 
 code_change(_, S, _) -> {ok, S}.
@@ -184,7 +223,7 @@ pick_owner(FP, #state{cache = Cache}) ->
     case maps:find(FP, Cache) of
         {ok, [#entry{owner = O} | _]} when is_pid(O) ->
             case erlang:is_process_alive(O) of
-                true  -> {ok, O};
+                true -> {ok, O};
                 false -> none
             end;
         _ ->
@@ -202,9 +241,11 @@ reply_dialing(FP, Reply, S) ->
 
 reply_all_dialing(Reply, #state{dialing = D}) ->
     maps:foreach(
-      fun(_FP, Waiters) ->
-          [gen_server:reply(From, Reply) || From <- Waiters]
-      end, D),
+        fun(_FP, Waiters) ->
+            [gen_server:reply(From, Reply) || From <- Waiters]
+        end,
+        D
+    ),
     ok.
 
 canonical_ssl_opts(Opts) when is_list(Opts) ->
@@ -213,4 +254,4 @@ canonical_ssl_opts(Other) ->
     Other.
 
 to_bin(B) when is_binary(B) -> B;
-to_bin(L) when is_list(L)   -> list_to_binary(L).
+to_bin(L) when is_list(L) -> list_to_binary(L).

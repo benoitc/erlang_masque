@@ -12,12 +12,16 @@
 -include_lib("stdlib/include/assert.hrl").
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
--export([udp_round_trip_through_example/1,
-         tcp_round_trip_through_example/1]).
+-export([
+    udp_round_trip_through_example/1,
+    tcp_round_trip_through_example/1
+]).
 
 all() ->
-    [udp_round_trip_through_example,
-     tcp_round_trip_through_example].
+    [
+        udp_round_trip_through_example,
+        tcp_round_trip_through_example
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(masque),

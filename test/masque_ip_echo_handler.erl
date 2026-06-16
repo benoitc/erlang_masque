@@ -4,8 +4,13 @@
 -module(masque_ip_echo_handler).
 -behaviour(masque_handler).
 
--export([accept/1, init/2, handle_ip_packet/2,
-         handle_address_request/2, terminate/2]).
+-export([
+    accept/1,
+    init/2,
+    handle_ip_packet/2,
+    handle_address_request/2,
+    terminate/2
+]).
 
 accept(_Req) -> accept.
 

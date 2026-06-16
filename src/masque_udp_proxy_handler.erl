@@ -33,9 +33,9 @@
 -export([accept/1, init/2, handle_packet/2, handle_info/2, terminate/2]).
 
 -record(state, {
-    socket       :: gen_udp:socket(),
-    target_ip    :: inet:ip_address(),
-    target_port  :: 1..65535
+    socket :: gen_udp:socket(),
+    target_ip :: inet:ip_address(),
+    target_port :: 1..65535
 }).
 
 %%====================================================================
@@ -47,7 +47,7 @@ accept(#{target_host := Host, target_port := Port} = Req) ->
     Opts = maps:get(handler_opts, Req, #{}),
     AllowFun = maps:get(allow, Opts, fun default_allow/1),
     case AllowFun({Host, Port}) of
-        true  -> accept;
+        true -> accept;
         false -> {reject, forbidden}
     end.
 
@@ -55,8 +55,11 @@ accept(#{target_host := Host, target_port := Port} = Req) ->
 init(#{target_host := Host, target_port := Port} = Req, Opts) ->
     ResolverFun = maps:get(resolver, Opts, fun default_resolver/1),
     Family = pick_family(maps:get(family, Opts, auto), Host),
-    SocketOpts = [binary, {active, true}
-                  | maps:get(socket_opts, Opts, [])],
+    SocketOpts = [
+        binary,
+        {active, true}
+        | maps:get(socket_opts, Opts, [])
+    ],
     BindPort = maps:get(port, Opts, 0),
     AllowPrivate = maps:get(allow_private, Opts, false),
     case resolve(ResolverFun, Host, Family) of
@@ -77,9 +80,11 @@ handle_packet(Data, #state{socket = S} = State) ->
     case gen_udp:send(S, Data) of
         ok ->
             {ok, State};
-        {error, Reason} when Reason =:= closed;
-                             Reason =:= einval;
-                             Reason =:= enotconn ->
+        {error, Reason} when
+            Reason =:= closed;
+            Reason =:= einval;
+            Reason =:= enotconn
+        ->
             %% Socket is unusable - close the tunnel rather than
             %% silently black-holing every packet.
             {stop, {target_socket_lost, Reason}, State};
@@ -92,13 +97,19 @@ handle_packet(Data, #state{socket = S} = State) ->
 %% Defensive double-check: on connected UDP the kernel already drops
 %% non-target sources, but we re-validate at application level in
 %% case a platform ever weakens that guarantee.
--spec handle_info(term(), #state{}) -> {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
-handle_info({udp, Socket, FromIP, FromPort, Bytes},
-            #state{socket = Socket, target_ip = IP, target_port = Port} = State)
-  when FromIP =:= IP, FromPort =:= Port ->
+-spec handle_info(term(), #state{}) ->
+    {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
+handle_info(
+    {udp, Socket, FromIP, FromPort, Bytes},
+    #state{socket = Socket, target_ip = IP, target_port = Port} = State
+) when
+    FromIP =:= IP, FromPort =:= Port
+->
     {ok, State, [{send, Bytes}]};
-handle_info({udp, Socket, _FromIP, _FromPort, _Bytes},
-            #state{socket = Socket} = State) ->
+handle_info(
+    {udp, Socket, _FromIP, _FromPort, _Bytes},
+    #state{socket = Socket} = State
+) ->
     %% Source mismatch - drop silently.
     {ok, State};
 handle_info({udp_passive, Socket}, #state{socket = Socket} = State) ->
@@ -132,8 +143,8 @@ default_resolver(Host) when is_list(Host) ->
             {ok, IP};
         _ ->
             case inet:getaddr(Host, inet) of
-                {ok, IP}    -> {ok, IP};
-                {error, _}  -> inet:getaddr(Host, inet6)
+                {ok, IP} -> {ok, IP};
+                {error, _} -> inet:getaddr(Host, inet6)
             end
     end.
 
@@ -142,9 +153,11 @@ open_udp(IP, Port, BindPort, BindFamily, SocketOpts) ->
         {ok, Socket} ->
             case gen_udp:connect(Socket, IP, Port) of
                 ok ->
-                    {ok, #state{socket = Socket,
-                                target_ip = IP,
-                                target_port = Port}};
+                    {ok, #state{
+                        socket = Socket,
+                        target_ip = IP,
+                        target_port = Port
+                    }};
                 {error, CReason} ->
                     _ = gen_udp:close(Socket),
                     {stop, {resolution_failed, {connect, CReason}}}
@@ -157,11 +170,17 @@ open_udp(IP, Port, BindPort, BindFamily, SocketOpts) ->
 %% Helpers
 %%====================================================================
 
-pick_family(inet, _Host)   -> inet;
-pick_family(inet6, _Host)  -> inet6;
-pick_family(auto, Host)    ->
+pick_family(inet, _Host) ->
+    inet;
+pick_family(inet6, _Host) ->
+    inet6;
+pick_family(auto, Host) ->
     %% Auto-pick based on whether the host string looks like an IPv6 literal.
-    HostStr = if is_binary(Host) -> binary_to_list(Host); true -> Host end,
+    HostStr =
+        if
+            is_binary(Host) -> binary_to_list(Host);
+            true -> Host
+        end,
     case inet:parse_address(HostStr) of
         {ok, {_, _, _, _, _, _, _, _}} -> inet6;
         _ -> inet
@@ -170,9 +189,11 @@ pick_family(auto, Host)    ->
 resolve(ResolverFun, Host, Family) ->
     case ResolverFun(Host) of
         {ok, IP} ->
-            ActualFamily = if tuple_size(IP) =:= 8 -> inet6;
-                              true                 -> Family
-                           end,
+            ActualFamily =
+                if
+                    tuple_size(IP) =:= 8 -> inet6;
+                    true -> Family
+                end,
             {ok, IP, ActualFamily};
         Err ->
             Err

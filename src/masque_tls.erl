@@ -33,15 +33,17 @@
 client_opts(Host, Opts) ->
     HostBin = to_bin(Host),
     IsIpLiteral = is_ip_literal(HostBin),
-    Base = [
-        {mode, binary},
-        {active, false},
-        {alpn_advertised_protocols, [<<"http/1.1">>]},
-        {verify, maps:get(verify, Opts, verify_peer)},
-        {cacerts, cacerts()},
-        {customize_hostname_check,
-            [{match_fun, public_key:pkix_verify_hostname_match_fun(https)}]}
-    ] ++ sni_opt(HostBin, IsIpLiteral),
+    Base =
+        [
+            {mode, binary},
+            {active, false},
+            {alpn_advertised_protocols, [<<"http/1.1">>]},
+            {verify, maps:get(verify, Opts, verify_peer)},
+            {cacerts, cacerts()},
+            {customize_hostname_check, [
+                {match_fun, public_key:pkix_verify_hostname_match_fun(https)}
+            ]}
+        ] ++ sni_opt(HostBin, IsIpLiteral),
     User = maps:get(ssl_opts, Opts, []),
     merge(Base, User).
 
@@ -50,8 +52,10 @@ client_opts(Host, Opts) ->
 %%====================================================================
 
 cacerts() ->
-    try public_key:cacerts_get()
-    catch _:_ -> []
+    try
+        public_key:cacerts_get()
+    catch
+        _:_ -> []
     end.
 
 sni_opt(_HostBin, true) ->
@@ -62,7 +66,7 @@ sni_opt(HostBin, false) ->
 is_ip_literal(HostBin) when is_binary(HostBin) ->
     case inet:parse_address(binary_to_list(HostBin)) of
         {ok, _} -> true;
-        _       -> false
+        _ -> false
     end.
 
 %% Caller-supplied options win on a per-key basis. Non-tuple atoms
@@ -75,17 +79,20 @@ merge(Default, Override) ->
 sort_unique(Opts) ->
     %% Drop earlier duplicates on the same key; keep the last value.
     lists:foldl(
-      fun(O, Acc) ->
-          K = key_of(O),
-          [O | [X || X <- Acc, key_of(X) =/= K]]
-      end, [], Opts).
+        fun(O, Acc) ->
+            K = key_of(O),
+            [O | [X || X <- Acc, key_of(X) =/= K]]
+        end,
+        [],
+        Opts
+    ).
 
 has_key(K, L) ->
     lists:any(fun(X) -> key_of(X) =:= K end, L).
 
 key_of(T) when is_tuple(T), tuple_size(T) >= 1 -> element(1, T);
-key_of(A) when is_atom(A)                      -> A.
+key_of(A) when is_atom(A) -> A.
 
 to_bin(X) when is_binary(X) -> X;
-to_bin(X) when is_list(X)   -> list_to_binary(X);
-to_bin(X) when is_atom(X)   -> atom_to_binary(X, utf8).
+to_bin(X) when is_list(X) -> list_to_binary(X);
+to_bin(X) when is_atom(X) -> atom_to_binary(X, utf8).

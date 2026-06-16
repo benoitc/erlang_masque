@@ -19,8 +19,12 @@
 
 -export([start_link/3, start/3, stop/1, info/1]).
 -export([send_ip_packet/2, recv/2, set_mode/2]).
--export([request_addresses/2, assign_addresses/2,
-         advertise_routes/2, ip_info/1]).
+-export([
+    request_addresses/2,
+    assign_addresses/2,
+    advertise_routes/2,
+    ip_info/1
+]).
 -export([send_capsule/3]).
 
 -export([init/1, callback_mode/0, terminate/3, code_change/4]).
@@ -29,29 +33,36 @@
 -include("masque.hrl").
 -include("masque_ip.hrl").
 
--dialyzer({nowarn_function, [do_connect/2, do_upgrade/3, request_headers/1,
-                              build_authority/2, is_ipv6_literal/1]}).
+-dialyzer(
+    {nowarn_function, [
+        do_connect/2,
+        do_upgrade/3,
+        request_headers/1,
+        build_authority/2,
+        is_ipv6_literal/1
+    ]}
+).
 
 -record(data, {
-    owner            :: pid(),
-    owner_ref        :: reference(),
-    proxy_host       :: binary(),
-    proxy_port       :: inet:port_number(),
-    template         :: masque_uri_template:template(),
-    target           :: masque_uri_ip:ip_target(),
-    ipproto          :: masque_uri_ip:ip_ipproto(),
-    mtu              :: 1280..65535,
-    socket           :: ssl:sslsocket() | undefined,
-    handshake_from   :: gen_statem:from() | undefined,
-    mode             :: message | queue,
-    rx_buf           :: queue:queue(binary()),
-    rx_waiters       :: queue:queue({gen_statem:from(), reference()}),
-    cap_buf = <<>>   :: binary(),
-    max_cap          :: pos_integer(),
+    owner :: pid(),
+    owner_ref :: reference(),
+    proxy_host :: binary(),
+    proxy_port :: inet:port_number(),
+    template :: masque_uri_template:template(),
+    target :: masque_uri_ip:ip_target(),
+    ipproto :: masque_uri_ip:ip_ipproto(),
+    mtu :: 1280..65535,
+    socket :: ssl:sslsocket() | undefined,
+    handshake_from :: gen_statem:from() | undefined,
+    mode :: message | queue,
+    rx_buf :: queue:queue(binary()),
+    rx_waiters :: queue:queue({gen_statem:from(), reference()}),
+    cap_buf = <<>> :: binary(),
+    max_cap :: pos_integer(),
     peer_pending = #{} :: #{pos_integer() => true},
-    next_req_id = 1   :: pos_integer(),
-    assigned = []     :: [masque_ip_capsule:address_entry()],
-    routes   = []     :: [masque_ip_capsule:route_entry()],
+    next_req_id = 1 :: pos_integer(),
+    assigned = [] :: [masque_ip_capsule:address_entry()],
+    routes = [] :: [masque_ip_capsule:route_entry()],
     %% Extra request headers prepended to the GET+Upgrade request.
     extra_headers = [] :: [{binary(), binary()}]
 }).
@@ -112,8 +123,11 @@ init({{Target, IPProto}, Opts, Owner}) ->
     {ProxyHost, ProxyPort} = maps:get(proxy, Opts),
     MRef = erlang:monitor(process, Owner),
     Mode = maps:get(mode, Opts, message),
-    MaxCap = maps:get(max_capsule_size, Opts,
-                      ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE),
+    MaxCap = maps:get(
+        max_capsule_size,
+        Opts,
+        ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE
+    ),
     Mtu = maps:get(mtu, Opts, 1500),
     Template = build_template(Opts, ProxyHost, ProxyPort),
     Data = #data{
@@ -130,23 +144,21 @@ init({{Target, IPProto}, Opts, Owner}) ->
         rx_waiters = queue:new(),
         max_cap = MaxCap,
         extra_headers = sanitise_extra_headers(
-                          maps:get(request_headers, Opts, []))
+            maps:get(request_headers, Opts, [])
+        )
     },
-    {ok, connecting, Data,
-     [{next_event, internal, {do_handshake, Opts}}]}.
+    {ok, connecting, Data, [{next_event, internal, {do_handshake, Opts}}]}.
 
 build_template(Opts, ProxyHost, ProxyPort) ->
     case maps:find(uri_template, Opts) of
         {ok, Raw} ->
             case masque_uri_ip:parse_client_template(Raw) of
                 {ok, T} -> T;
-                {error, Err} ->
-                    erlang:error({bad_template, Err})
+                {error, Err} -> erlang:error({bad_template, Err})
             end;
         error ->
             Authority = build_authority(to_bin(ProxyHost), ProxyPort),
-            Raw = <<"https://", Authority/binary,
-                    ?MASQUE_DEFAULT_IP_URI_PATH_PATTERN/binary>>,
+            Raw = <<"https://", Authority/binary, ?MASQUE_DEFAULT_IP_URI_PATH_PATTERN/binary>>,
             {ok, T} = masque_uri_ip:parse_client_template(Raw),
             T
     end.
@@ -161,12 +173,18 @@ connecting(internal, {do_handshake, Opts}, Data) ->
             case setopts_active_once(Socket) of
                 ok ->
                     reply_handshake(Data, ok),
-                    {next_state, open,
-                     Data#data{socket = Socket,
-                               cap_buf = Buffer,
-                               handshake_from = undefined}};
+                    {next_state, open, Data#data{
+                        socket = Socket,
+                        cap_buf = Buffer,
+                        handshake_from = undefined
+                    }};
                 {error, Reason} ->
-                    _ = (try ssl:close(Socket) catch _:_ -> ok end),
+                    _ =
+                        (try
+                            ssl:close(Socket)
+                        catch
+                            _:_ -> ok
+                        end),
                     reply_handshake(Data, {error, {setopts, Reason}}),
                     {stop, {setopts, Reason}}
             end;
@@ -184,8 +202,11 @@ connecting({call, From}, stop, Data) ->
     {stop_and_reply, normal, [{reply, From, ok}], Data};
 connecting({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
-connecting(info, {'DOWN', Ref, process, _, _},
-           #data{owner_ref = Ref}) ->
+connecting(
+    info,
+    {'DOWN', Ref, process, _, _},
+    #data{owner_ref = Ref}
+) ->
     {stop, owner_gone};
 connecting(info, _Msg, Data) ->
     {keep_state, Data}.
@@ -195,18 +216,19 @@ open({call, From}, handshake_await, Data) ->
 open({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, open)}]};
 open({call, From}, ip_info, Data) ->
-    {keep_state, Data,
-     [{reply, From, #{assigned  => Data#data.assigned,
-                      routes    => Data#data.routes,
-                      mtu       => Data#data.mtu,
-                      transport => h1}}]};
+    {keep_state, Data, [
+        {reply, From, #{
+            assigned => Data#data.assigned,
+            routes => Data#data.routes,
+            mtu => Data#data.mtu,
+            transport => h1
+        }}
+    ]};
 open({call, From}, {send_ip_packet, Pkt}, Data) ->
     PktSz = byte_size(Pkt),
     case PktSz > Data#data.mtu of
         true ->
-            {keep_state, Data,
-             [{reply, From,
-               {error, {packet_too_large, PktSz, Data#data.mtu}}}]};
+            {keep_state, Data, [{reply, From, {error, {packet_too_large, PktSz, Data#data.mtu}}}]};
         false ->
             Reply = send_datagram(Data, ?MASQUE_CONTEXT_ID_IP, Pkt),
             {keep_state, Data, [{reply, From, Reply}]}
@@ -227,13 +249,15 @@ open({call, From}, {send_capsule, Type, Value}, #data{socket = Sock} = Data) ->
     Reply = h1_upgrade:send_capsule(ssl, Sock, Type, Value),
     {keep_state, Data, [{reply, From, Reply}]};
 open({call, From}, stop, Data) ->
-    {next_state, closing, Data,
-     [{reply, From, ok}, {next_event, internal, do_close}]};
-open(info, {ssl, Sock, Bytes},
-     #data{socket = Sock, cap_buf = Buf, max_cap = Max} = Data) ->
+    {next_state, closing, Data, [{reply, From, ok}, {next_event, internal, do_close}]};
+open(
+    info,
+    {ssl, Sock, Bytes},
+    #data{socket = Sock, cap_buf = Buf, max_cap = Max} = Data
+) ->
     New = <<Buf/binary, Bytes/binary>>,
     case byte_size(New) > Max of
-        true  -> abort(capsule_buffer_overflow, Data);
+        true -> abort(capsule_buffer_overflow, Data);
         false -> drain_capsules(New, Data)
     end;
 open(info, {ssl_closed, Sock}, #data{socket = Sock} = Data) ->
@@ -244,17 +268,27 @@ open(info, {ssl_error, Sock, Reason}, #data{socket = Sock} = Data) ->
     {stop, {ssl_error, Reason}, Data};
 open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
-open(info, {'DOWN', Ref, process, _, _},
-     #data{owner_ref = Ref} = Data) ->
+open(
+    info,
+    {'DOWN', Ref, process, _, _},
+    #data{owner_ref = Ref} = Data
+) ->
     {next_state, closing, Data, [{next_event, internal, do_close}]};
 open(info, _Msg, Data) ->
     {keep_state, Data}.
 
 closing(internal, do_close, #data{socket = Socket} = Data) ->
-    _ = case Socket of
-        undefined -> ok;
-        _         -> try ssl:close(Socket) catch _:_ -> ok end
-    end,
+    _ =
+        case Socket of
+            undefined ->
+                ok;
+            _ ->
+                try
+                    ssl:close(Socket)
+                catch
+                    _:_ -> ok
+                end
+        end,
     {stop, normal, Data};
 closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
@@ -265,7 +299,12 @@ terminate(_Reason, _State, #data{socket = undefined} = D) ->
 terminate(_Reason, _State, #data{socket = Socket} = D) ->
     _ = erlang:demonitor(D#data.owner_ref, [flush]),
     cancel_all_waiters(D),
-    _ = (try ssl:close(Socket) catch _:_ -> ok end),
+    _ =
+        (try
+            ssl:close(Socket)
+        catch
+            _:_ -> ok
+        end),
     ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
@@ -280,19 +319,28 @@ do_connect(Data, Opts) ->
     SSLOpts = masque_tls:client_opts(Data#data.proxy_host, Opts),
     ConnOpts = #{
         transport => ssl,
-        ssl_opts  => SSLOpts,
+        ssl_opts => SSLOpts,
         connect_timeout => Timeout,
-        timeout   => Timeout
+        timeout => Timeout
     },
-    case h1_client:connect(binary_to_list(Data#data.proxy_host),
-                            Data#data.proxy_port,
-                            ConnOpts) of
+    case
+        h1_client:connect(
+            binary_to_list(Data#data.proxy_host),
+            Data#data.proxy_port,
+            ConnOpts
+        )
+    of
         {ok, Conn} ->
             case h1:wait_connected(Conn, Timeout) of
                 ok ->
                     do_upgrade(Conn, Data, Timeout);
                 {error, Reason} ->
-                    _ = (try h1:close(Conn) catch _:_ -> ok end),
+                    _ =
+                        (try
+                            h1:close(Conn)
+                        catch
+                            _:_ -> ok
+                        end),
                     {error, {connect, Reason}}
             end;
         {error, Reason} ->
@@ -307,21 +355,36 @@ do_upgrade(Conn, Data, Timeout) ->
                 ok ->
                     {ok, Socket, Buffer};
                 {error, _} = Err ->
-                    _ = (try ssl:close(Socket) catch _:_ -> ok end),
+                    _ =
+                        (try
+                            ssl:close(Socket)
+                        catch
+                            _:_ -> ok
+                        end),
                     Err
             end;
         {error, Reason} ->
-            _ = (try h1:close(Conn) catch _:_ -> ok end),
+            _ =
+                (try
+                    h1:close(Conn)
+                catch
+                    _:_ -> ok
+                end),
             {error, classify_upgrade_error(Reason)}
     end.
 
 classify_upgrade_error({http_status, Code, _} = R) -> {handshake_rejected, Code, R};
-classify_upgrade_error(timeout)                    -> handshake_timeout;
-classify_upgrade_error(Other)                      -> {upgrade, Other}.
+classify_upgrade_error(timeout) -> handshake_timeout;
+classify_upgrade_error(Other) -> {upgrade, Other}.
 
-request_headers(#data{template = T, target = Target, ipproto = IPProto,
-                      proxy_host = ProxyHost, proxy_port = ProxyPort,
-                      extra_headers = Extra}) ->
+request_headers(#data{
+    template = T,
+    target = Target,
+    ipproto = IPProto,
+    proxy_host = ProxyHost,
+    proxy_port = ProxyPort,
+    extra_headers = Extra
+}) ->
     Url = masque_uri_ip:expand(T, #{target => Target, ipproto => IPProto}),
     {_Scheme, _Authority, Path} = split_url(Url),
     Authority = build_authority(ProxyHost, ProxyPort),
@@ -332,11 +395,20 @@ request_headers(#data{template = T, target = Target, ipproto = IPProto,
     ] ++ Extra.
 
 sanitise_extra_headers(List) when is_list(List) ->
-    Reserved = [<<":path">>, <<"host">>, <<"capsule-protocol">>,
-                <<"upgrade">>, <<"connection">>],
-    [{K, V} || {K, V} <- List,
-               is_binary(K), is_binary(V),
-               not lists:member(lowercase_bin(K), Reserved)].
+    Reserved = [
+        <<":path">>,
+        <<"host">>,
+        <<"capsule-protocol">>,
+        <<"upgrade">>,
+        <<"connection">>
+    ],
+    [
+        {K, V}
+     || {K, V} <- List,
+        is_binary(K),
+        is_binary(V),
+        not lists:member(lowercase_bin(K), Reserved)
+    ].
 
 lowercase_bin(B) when is_binary(B) ->
     list_to_binary(string:to_lower(binary_to_list(B))).
@@ -391,8 +463,11 @@ deliver_capsule(datagram, Inner, Data) ->
         {error, _} ->
             Data
     end;
-deliver_capsule(?MASQUE_CAPSULE_ADDRESS_ASSIGN, Inner,
-                #data{owner = Owner} = Data) ->
+deliver_capsule(
+    ?MASQUE_CAPSULE_ADDRESS_ASSIGN,
+    Inner,
+    #data{owner = Owner} = Data
+) ->
     case masque_ip_capsule:decode_address_assign(Inner) of
         {ok, Entries} ->
             Owner ! {masque_address_assign, self(), Entries},
@@ -400,22 +475,31 @@ deliver_capsule(?MASQUE_CAPSULE_ADDRESS_ASSIGN, Inner,
         {error, _} ->
             {abort, malformed_capsule}
     end;
-deliver_capsule(?MASQUE_CAPSULE_ADDRESS_REQUEST, Inner,
-                #data{owner = Owner, peer_pending = Pend} = Data) ->
+deliver_capsule(
+    ?MASQUE_CAPSULE_ADDRESS_REQUEST,
+    Inner,
+    #data{owner = Owner, peer_pending = Pend} = Data
+) ->
     case masque_ip_capsule:decode_address_request(Inner) of
         {ok, Entries} ->
             Owner ! {masque_address_request, self(), Entries},
             Pend1 = lists:foldl(
-                      fun(R, Acc) ->
-                          Id = element(2, R),
-                          Acc#{Id => true}
-                      end, Pend, Entries),
+                fun(R, Acc) ->
+                    Id = element(2, R),
+                    Acc#{Id => true}
+                end,
+                Pend,
+                Entries
+            ),
             Data#data{peer_pending = Pend1};
         {error, _} ->
             {abort, malformed_capsule}
     end;
-deliver_capsule(?MASQUE_CAPSULE_ROUTE_ADVERTISEMENT, Inner,
-                #data{owner = Owner} = Data) ->
+deliver_capsule(
+    ?MASQUE_CAPSULE_ROUTE_ADVERTISEMENT,
+    Inner,
+    #data{owner = Owner} = Data
+) ->
     case masque_ip_capsule:decode_route_advertisement(Inner) of
         {ok, Entries} ->
             Owner ! {masque_route_advertisement, self(), Entries},
@@ -423,16 +507,24 @@ deliver_capsule(?MASQUE_CAPSULE_ROUTE_ADVERTISEMENT, Inner,
         {error, _} ->
             {abort, malformed_capsule}
     end;
-deliver_capsule(Type, Inner, #data{owner = Owner} = Data)
-  when is_integer(Type) ->
+deliver_capsule(Type, Inner, #data{owner = Owner} = Data) when
+    is_integer(Type)
+->
     Owner ! {masque_capsule, self(), Type, Inner},
     Data.
 
 abort(Reason, #data{socket = Socket} = Data) ->
-    _ = case Socket of
-        undefined -> ok;
-        _         -> try ssl:close(Socket) catch _:_ -> ok end
-    end,
+    _ =
+        case Socket of
+            undefined ->
+                ok;
+            _ ->
+                try
+                    ssl:close(Socket)
+                catch
+                    _:_ -> ok
+                end
+        end,
     _ = notify_owner_closed(Reason, Data),
     {stop, Reason, Data}.
 
@@ -444,8 +536,13 @@ handle_request_addresses(From, Prefixes, Data) ->
     case build_request_entries(Prefixes, Data) of
         {ok, Entries, Data1} ->
             Body = masque_ip_capsule:encode_address_request(Entries),
-            case send_wrapped_capsule(Data1,
-                   ?MASQUE_CAPSULE_ADDRESS_REQUEST, Body) of
+            case
+                send_wrapped_capsule(
+                    Data1,
+                    ?MASQUE_CAPSULE_ADDRESS_REQUEST,
+                    Body
+                )
+            of
                 ok ->
                     Ids = [R#ip_prefix_request.request_id || R <- Entries],
                     {keep_state, Data1, [{reply, From, {ok, Ids}}]};
@@ -462,26 +559,39 @@ build_request_entries(Prefixes, Data) ->
             fun({V, Addr, Pfx}, {Acc, N}) ->
                 ok = check_prefix(V, Addr, Pfx),
                 R = #ip_prefix_request{
-                       request_id = N, version = V,
-                       address = Addr, prefix_len = Pfx},
+                    request_id = N,
+                    version = V,
+                    address = Addr,
+                    prefix_len = Pfx
+                },
                 {[R | Acc], N + 1}
-            end, {[], Data#data.next_req_id}, Prefixes),
+            end,
+            {[], Data#data.next_req_id},
+            Prefixes
+        ),
         {ok, lists:reverse(Rev), Data#data{next_req_id = Next}}
     catch
         throw:Err -> {error, Err};
-        error:_   -> {error, bad_prefix}
+        error:_ -> {error, bad_prefix}
     end.
 
-handle_assign_addresses(From, Assignments,
-                        #data{peer_pending = Pend} = Data) ->
+handle_assign_addresses(
+    From,
+    Assignments,
+    #data{peer_pending = Pend} = Data
+) ->
     case validate_assignments(Assignments, Pend) of
         {ok, Pend1} ->
             Body = masque_ip_capsule:encode_address_assign(Assignments),
-            case send_wrapped_capsule(Data,
-                   ?MASQUE_CAPSULE_ADDRESS_ASSIGN, Body) of
+            case
+                send_wrapped_capsule(
+                    Data,
+                    ?MASQUE_CAPSULE_ADDRESS_ASSIGN,
+                    Body
+                )
+            of
                 ok ->
-                    {keep_state, Data#data{peer_pending = Pend1},
-                     [{reply, From, ok}]};
+                    {keep_state, Data#data{peer_pending = Pend1}, [{reply, From, ok}]};
                 {error, _} = Err ->
                     {keep_state, Data, [{reply, From, Err}]}
             end;
@@ -492,32 +602,54 @@ handle_assign_addresses(From, Assignments,
 validate_assignments(Assignments, Pend) ->
     try
         Pend1 = lists:foldl(
-            fun(#ip_assignment{request_id = 0, version = V,
-                               address = A, prefix_len = P}, Acc) ->
+            fun
+                (
+                    #ip_assignment{
+                        request_id = 0,
+                        version = V,
+                        address = A,
+                        prefix_len = P
+                    },
+                    Acc
+                ) ->
                     ok = check_prefix(V, A, P),
                     Acc;
-               (#ip_assignment{request_id = Id, version = V,
-                               address = A, prefix_len = P}, Acc) ->
+                (
+                    #ip_assignment{
+                        request_id = Id,
+                        version = V,
+                        address = A,
+                        prefix_len = P
+                    },
+                    Acc
+                ) ->
                     ok = check_prefix(V, A, P),
                     case maps:is_key(Id, Acc) of
-                        true  -> maps:remove(Id, Acc);
+                        true -> maps:remove(Id, Acc);
                         false -> throw({no_such_pending_request, Id})
                     end
-            end, Pend, Assignments),
+            end,
+            Pend,
+            Assignments
+        ),
         {ok, Pend1}
     catch
         throw:Err -> {error, Err};
-        error:_   -> {error, bad_prefix}
+        error:_ -> {error, bad_prefix}
     end.
 
 handle_advertise_routes(From, Routes, Data) ->
     try masque_ip_capsule:encode_route_advertisement(Routes) of
         Body ->
-            case send_wrapped_capsule(Data,
-                   ?MASQUE_CAPSULE_ROUTE_ADVERTISEMENT, Body) of
+            case
+                send_wrapped_capsule(
+                    Data,
+                    ?MASQUE_CAPSULE_ROUTE_ADVERTISEMENT,
+                    Body
+                )
+            of
                 ok -> {keep_state, Data, [{reply, From, ok}]};
-                {error, _} = Err ->
-                    {keep_state, Data, [{reply, From, Err}]}
+                {error, _} = Err -> {keep_state, Data, [{reply, From, Err}]}
             end
     catch
         error:Reason ->
@@ -529,15 +661,27 @@ send_wrapped_capsule(#data{socket = Sock}, Type, Body) ->
     %% RFC 9484 capsule type as-is (no outer wrapping).
     h1_upgrade:send_capsule(ssl, Sock, Type, Body).
 
-check_prefix(4, {A,B,C,D}, P)
-  when P >= 0, P =< 32,
-       A >= 0, A =< 255, B >= 0, B =< 255,
-       C >= 0, C =< 255, D >= 0, D =< 255 -> ok;
-check_prefix(6, Addr, P) when P >= 0, P =< 128, tuple_size(Addr) =:= 8 ->
-    true = lists:all(fun(X) -> is_integer(X) andalso X >= 0 andalso X =< 16#FFFF end,
-                     tuple_to_list(Addr)),
+check_prefix(4, {A, B, C, D}, P) when
+    P >= 0,
+    P =< 32,
+    A >= 0,
+    A =< 255,
+    B >= 0,
+    B =< 255,
+    C >= 0,
+    C =< 255,
+    D >= 0,
+    D =< 255
+->
     ok;
-check_prefix(V, _, P) -> throw({bad_prefix_length, P, V}).
+check_prefix(6, Addr, P) when P >= 0, P =< 128, tuple_size(Addr) =:= 8 ->
+    true = lists:all(
+        fun(X) -> is_integer(X) andalso X >= 0 andalso X =< 16#FFFF end,
+        tuple_to_list(Addr)
+    ),
+    ok;
+check_prefix(V, _, P) ->
+    throw({bad_prefix_length, P, V}).
 
 %%====================================================================
 %% Response validation
@@ -548,8 +692,8 @@ validate_response(Headers) ->
     HasCT = header_present(<<"content-type">>, Headers),
     case header_value(<<"capsule-protocol">>, Headers) of
         <<"?1">> when not HasCL, not HasCT -> ok;
-        <<"?1">>                           -> {error, malformed_response};
-        _                                  -> {error, capsule_protocol_missing}
+        <<"?1">> -> {error, malformed_response};
+        _ -> {error, capsule_protocol_missing}
     end.
 
 header_present(Name, Headers) ->
@@ -558,12 +702,12 @@ header_present(Name, Headers) ->
 header_value(Name, Headers) ->
     case lists:search(fun({N, _}) -> ci_eq(N, Name) end, Headers) of
         {value, {_, V}} -> V;
-        false           -> undefined
+        false -> undefined
     end.
 
 ci_eq(A, B) ->
     string:to_lower(binary_to_list(iolist_to_binary(A))) =:=
-    string:to_lower(binary_to_list(iolist_to_binary(B))).
+        string:to_lower(binary_to_list(iolist_to_binary(B))).
 
 %%====================================================================
 %% Rx buffering
@@ -572,20 +716,26 @@ ci_eq(A, B) ->
 handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
     case queue:out(Buf) of
         {{value, Bytes}, Buf2} ->
-            {keep_state, Data#data{rx_buf = Buf2},
-             [{reply, From, {ok, Bytes}}]};
+            {keep_state, Data#data{rx_buf = Buf2}, [{reply, From, {ok, Bytes}}]};
         {empty, _} ->
             TRef = erlang:start_timer(Timeout, self(), {recv_timeout, From}),
-            {keep_state, Data#data{rx_waiters =
-                queue:in({From, TRef}, Data#data.rx_waiters)}}
+            {keep_state, Data#data{
+                rx_waiters =
+                    queue:in({From, TRef}, Data#data.rx_waiters)
+            }}
     end.
 
 deliver_packet(Pkt, #data{mode = message, owner = Owner} = Data) ->
     Owner ! {masque_ip_packet, self(), Pkt},
     Data;
-deliver_packet(Pkt, #data{mode = queue,
-                          rx_waiters = Ws,
-                          rx_buf = Buf} = Data) ->
+deliver_packet(
+    Pkt,
+    #data{
+        mode = queue,
+        rx_waiters = Ws,
+        rx_buf = Buf
+    } = Data
+) ->
     case queue:out(Ws) of
         {{value, {From, TRef}}, Ws2} ->
             _ = erlang:cancel_timer(TRef),
@@ -593,26 +743,34 @@ deliver_packet(Pkt, #data{mode = queue,
             Data#data{rx_waiters = Ws2};
         {empty, _} ->
             case queue:len(Buf) < 1000 of
-                true  -> Data#data{rx_buf = queue:in(Pkt, Buf)};
+                true -> Data#data{rx_buf = queue:in(Pkt, Buf)};
                 false -> Data
             end
     end.
 
 drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->
     Ws2 = queue:filter(
-        fun({F, T}) when F =:= From, T =:= TRef ->
+        fun
+            ({F, T}) when F =:= From, T =:= TRef ->
                 gen_statem:reply(F, {error, timeout}),
                 false;
-           (_) -> true
-        end, Ws),
+            (_) ->
+                true
+        end,
+        Ws
+    ),
     Data#data{rx_waiters = Ws2}.
 
 cancel_all_waiters(#data{rx_waiters = Ws}) ->
-    _ = queue:fold(fun({From, TRef}, _) ->
-        _ = erlang:cancel_timer(TRef),
-        gen_statem:reply(From, {error, closed}),
-        ok
-    end, ok, Ws),
+    _ = queue:fold(
+        fun({From, TRef}, _) ->
+            _ = erlang:cancel_timer(TRef),
+            gen_statem:reply(From, {error, closed}),
+            ok
+        end,
+        ok,
+        Ws
+    ),
     ok.
 
 %%====================================================================
@@ -620,32 +778,46 @@ cancel_all_waiters(#data{rx_waiters = Ws}) ->
 %%====================================================================
 
 reply_handshake(#data{handshake_from = undefined}, _Reply) -> ok;
-reply_handshake(#data{handshake_from = From}, Reply) ->
-    gen_statem:reply(From, Reply).
+reply_handshake(#data{handshake_from = From}, Reply) -> gen_statem:reply(From, Reply).
 
 notify_owner_closed(Reason, #data{owner = Owner, mode = message}) ->
     Owner ! {masque_closed, self(), Reason};
-notify_owner_closed(_Reason, _Data) -> ok.
+notify_owner_closed(_Reason, _Data) ->
+    ok.
 
 swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
     _ = erlang:demonitor(OldRef, [flush]),
     NewRef = erlang:monitor(process, NewOwner),
     Data#data{owner = NewOwner, owner_ref = NewRef}.
 
-session_info(#data{target = T, ipproto = P, proxy_host = PH,
-                   proxy_port = PP}, State) ->
-    #{state => State, protocol => ip, transport => h1,
-      proxy => {PH, PP}, target => T, ipproto => P}.
+session_info(
+    #data{
+        target = T,
+        ipproto = P,
+        proxy_host = PH,
+        proxy_port = PP
+    },
+    State
+) ->
+    #{
+        state => State,
+        protocol => ip,
+        transport => h1,
+        proxy => {PH, PP},
+        target => T,
+        ipproto => P
+    }.
 
 to_bin(X) when is_binary(X) -> X;
-to_bin(X) when is_list(X)   -> list_to_binary(X);
-to_bin(X) when is_atom(X)   -> atom_to_binary(X, utf8).
+to_bin(X) when is_list(X) -> list_to_binary(X);
+to_bin(X) when is_atom(X) -> atom_to_binary(X, utf8).
 
 build_authority(Host, Port) ->
-    HostPart = case is_ipv6_literal(Host) of
-                   true  -> <<"[", Host/binary, "]">>;
-                   false -> Host
-               end,
+    HostPart =
+        case is_ipv6_literal(Host) of
+            true -> <<"[", Host/binary, "]">>;
+            false -> Host
+        end,
     iolist_to_binary([HostPart, ":", integer_to_binary(Port)]).
 
 is_ipv6_literal(Host) ->

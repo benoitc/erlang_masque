@@ -15,7 +15,8 @@
 %%====================================================================
 
 -define(setup(F),
-        {setup, fun setup/0, fun cleanup/1, F}).
+    {setup, fun setup/0, fun cleanup/1, F}
+).
 
 setup() ->
     %% Apps already started when eunit pulls in masque; the pool is
@@ -39,21 +40,41 @@ fingerprint_differs_on_verify_test() ->
     ?assertNotEqual(A, B).
 
 fingerprint_stable_under_ssl_opts_reorder_test() ->
-    A = ?M:fingerprint(<<"host">>, 443, h2,
-                        #{ssl_opts => [{verify, verify_peer},
-                                        {cacerts, []}]}),
-    B = ?M:fingerprint(<<"host">>, 443, h2,
-                        #{ssl_opts => [{cacerts, []},
-                                        {verify, verify_peer}]}),
+    A = ?M:fingerprint(
+        <<"host">>,
+        443,
+        h2,
+        #{
+            ssl_opts => [
+                {verify, verify_peer},
+                {cacerts, []}
+            ]
+        }
+    ),
+    B = ?M:fingerprint(
+        <<"host">>,
+        443,
+        h2,
+        #{
+            ssl_opts => [
+                {cacerts, []},
+                {verify, verify_peer}
+            ]
+        }
+    ),
     ?assertEqual(A, B).
 
 fingerprint_ignores_per_tunnel_opts_test() ->
-    A = ?M:fingerprint(<<"host">>, 443, h2, #{timeout => 1000,
-                                                 protocol => udp,
-                                                 owner => self()}),
-    B = ?M:fingerprint(<<"host">>, 443, h2, #{timeout => 9000,
-                                                 protocol => tcp,
-                                                 owner => self()}),
+    A = ?M:fingerprint(<<"host">>, 443, h2, #{
+        timeout => 1000,
+        protocol => udp,
+        owner => self()
+    }),
+    B = ?M:fingerprint(<<"host">>, 443, h2, #{
+        timeout => 9000,
+        protocol => tcp,
+        owner => self()
+    }),
     ?assertEqual(A, B).
 
 fingerprint_differs_on_host_port_transport_test() ->
@@ -103,10 +124,7 @@ checkout_different_verify_opens_new() ->
 %%====================================================================
 
 checkout_coalesces_during_dial_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     fun checkout_coalesces_during_dial/0}.
+    {setup, fun setup/0, fun cleanup/1, fun checkout_coalesces_during_dial/0}.
 
 checkout_coalesces_during_dial() ->
     %% Stage the mock's `connect' to sleep 150 ms and notify us so
@@ -114,15 +132,19 @@ checkout_coalesces_during_dial() ->
     %% for the same FP must all get the same owner and the mock
     %% must have been connected exactly once.
     Self = self(),
-    persistent_term:put({?MOCK, connect_result},
-                         {delay, 150, {notify, Self, auto}}),
+    persistent_term:put(
+        {?MOCK, connect_result},
+        {delay, 150, {notify, Self, auto}}
+    ),
     FP = ?M:fingerprint(<<"coalesce">>, 443, h2, #{}),
     try
         Pids = [spawn_checkout(FP, pool_opts(h2)) || _ <- lists:seq(1, 5)],
         Owners = [recv_result(P, 3000) || P <- Pids],
         [First | Rest] = Owners,
         [?assertEqual(First, O) || O <- Rest],
-        receive after 300 -> ok end,
+        receive
+        after 300 -> ok
+        end,
         Count = length([x || {mock_connected, _} <- drain_mailbox()]),
         ?assertEqual(1, Count)
     after
@@ -134,10 +156,7 @@ checkout_coalesces_during_dial() ->
 %%====================================================================
 
 dial_failure_replies_to_all_waiters_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     fun dial_failure_replies_to_all_waiters/0}.
+    {setup, fun setup/0, fun cleanup/1, fun dial_failure_replies_to_all_waiters/0}.
 
 dial_failure_replies_to_all_waiters() ->
     persistent_term:put({?MOCK, connect_result}, {error, econnrefused}),
@@ -161,7 +180,8 @@ owner_death_evicts_entry() ->
     {ok, O1} = ?M:checkout(FP, pool_opts(h2)),
     MRef = erlang:monitor(process, O1),
     exit(O1, kill),
-    receive {'DOWN', MRef, process, O1, _} -> ok
+    receive
+        {'DOWN', MRef, process, O1, _} -> ok
     after 1000 -> ct:fail(no_down)
     end,
     %% Give the registry a tick to handle its own monitor.
@@ -174,17 +194,16 @@ owner_death_evicts_entry() ->
 %%====================================================================
 
 registry_does_not_block_on_dial_test_() ->
-    {setup,
-     fun setup/0,
-     fun cleanup/1,
-     fun registry_does_not_block_on_dial/0}.
+    {setup, fun setup/0, fun cleanup/1, fun registry_does_not_block_on_dial/0}.
 
 registry_does_not_block_on_dial() ->
     %% Two different FPs both dial slowly (400 ms each). If the
     %% registry serialises dials across keys the total wall time is
     %% ~800 ms; the parallel-dial design should complete in ~400 ms.
-    persistent_term:put({?MOCK, connect_result},
-                         {delay, 400, auto}),
+    persistent_term:put(
+        {?MOCK, connect_result},
+        {delay, 400, auto}
+    ),
     FPA = ?M:fingerprint(<<"slow-a">>, 443, h2, #{}),
     FPB = ?M:fingerprint(<<"slow-b">>, 443, h2, #{}),
     try
@@ -196,9 +215,13 @@ registry_does_not_block_on_dial() ->
         Elapsed = erlang:monotonic_time(millisecond) - T0,
         %% 600 ms headroom above the 400 ms dial; serialised would
         %% land around 800 ms.
-        ?assert(Elapsed < 600,
-                io_lib:format("parallel dials took ~p ms, expected < 600",
-                               [Elapsed]))
+        ?assert(
+            Elapsed < 600,
+            io_lib:format(
+                "parallel dials took ~p ms, expected < 600",
+                [Elapsed]
+            )
+        )
     after
         persistent_term:erase({?MOCK, connect_result})
     end.
@@ -208,12 +231,14 @@ registry_does_not_block_on_dial() ->
 %%====================================================================
 
 pool_opts(Transport) ->
-    #{transport => Transport,
-      transport_mod => ?MOCK,
-      host => <<"127.0.0.1">>,
-      port => 1,
-      connect_opts => #{},
-      idle_timeout_ms => 30000}.
+    #{
+        transport => Transport,
+        transport_mod => ?MOCK,
+        host => <<"127.0.0.1">>,
+        port => 1,
+        connect_opts => #{},
+        idle_timeout_ms => 30000
+    }.
 
 spawn_checkout(FP, Opts) ->
     Self = self(),
@@ -225,12 +250,13 @@ spawn_checkout(FP, Opts) ->
 recv_result(Pid, Timeout) ->
     receive
         {result, Pid, {ok, Owner}} -> Owner;
-        {result, Pid, Other}       -> Other
+        {result, Pid, Other} -> Other
     after Timeout ->
         ct:fail({no_result, Pid})
     end.
 
 drain_mailbox() ->
-    receive Msg -> [Msg | drain_mailbox()]
+    receive
+        Msg -> [Msg | drain_mailbox()]
     after 0 -> []
     end.

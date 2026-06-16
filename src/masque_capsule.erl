@@ -28,8 +28,8 @@ encode(Type, Value) ->
 %% @doc Decode a single capsule from the head of `Bin'.
 -spec decode(binary()) ->
     {ok, {type(), value(), binary()}}
-  | {more, non_neg_integer()}
-  | {error, term()}.
+    | {more, non_neg_integer()}
+    | {error, term()}.
 decode(Bin) ->
     quic_h3_capsule:decode(Bin).
 

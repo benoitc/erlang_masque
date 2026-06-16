@@ -21,18 +21,24 @@
 
 -export([start_link/1]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 -record(state, {
-    transport  :: gen_tcp | ssl,
-    socket     :: ssl:sslsocket() | gen_tcp:socket(),
-    handler    :: module(),
-    h_state    :: term(),
-    req        :: map(),
+    transport :: gen_tcp | ssl,
+    socket :: ssl:sslsocket() | gen_tcp:socket(),
+    handler :: module(),
+    h_state :: term(),
+    req :: map(),
     start_time :: integer() | undefined,
-    idle_ms    :: non_neg_integer() | infinity,
-    idle_ref   :: reference() | undefined
+    idle_ms :: non_neg_integer() | infinity,
+    idle_ref :: reference() | undefined
 }).
 
 %%====================================================================
@@ -47,8 +53,13 @@ start_link(Args) ->
 %% gen_server
 %%====================================================================
 
-init(#{conn := Conn, stream_id := StreamId,
-       handler := Handler, handler_opts := HOpts, req := Req}) ->
+init(#{
+    conn := Conn,
+    stream_id := StreamId,
+    handler := Handler,
+    handler_opts := HOpts,
+    req := Req
+}) ->
     process_flag(trap_exit, true),
     IdleMs = maps:get(idle_timeout_ms, HOpts, 300000),
     case init_handler(Handler, Req, HOpts) of
@@ -56,13 +67,13 @@ init(#{conn := Conn, stream_id := StreamId,
             case h1:accept_connect(Conn, StreamId, []) of
                 {ok, Transport, Socket, Buffer} ->
                     State0 = arm_idle(#state{
-                        transport  = Transport,
-                        socket     = Socket,
-                        handler    = Handler,
-                        h_state    = HState,
-                        req        = Req,
+                        transport = Transport,
+                        socket = Socket,
+                        handler = Handler,
+                        h_state = HState,
+                        req = Req,
                         start_time = erlang:monotonic_time(millisecond),
-                        idle_ms    = IdleMs
+                        idle_ms = IdleMs
                     }),
                     case apply_init_actions(InitActions, State0) of
                         {ok, State1} ->
@@ -85,8 +96,11 @@ init(#{conn := Conn, stream_id := StreamId,
                             {stop, Reason}
                     end;
                 {error, Reason} ->
-                    try_callback(Handler, terminate,
-                                  [{accept_connect, Reason}, HState]),
+                    try_callback(
+                        Handler,
+                        terminate,
+                        [{accept_connect, Reason}, HState]
+                    ),
                     {stop, {accept_connect, Reason}}
             end;
         {stop, Reason} ->
@@ -107,8 +121,10 @@ handle_info({ssl, Sock, Bytes}, #state{socket = Sock} = S) ->
     handle_proxy_bytes(Bytes, arm_idle(S));
 handle_info({tcp, Sock, Bytes}, #state{socket = Sock} = S) ->
     handle_proxy_bytes(Bytes, arm_idle(S));
-handle_info({timeout, Ref, idle},
-            #state{idle_ref = Ref} = S) ->
+handle_info(
+    {timeout, Ref, idle},
+    #state{idle_ref = Ref} = S
+) ->
     {stop, idle_timeout, S};
 handle_info({ssl_closed, Sock}, #state{socket = Sock} = S) ->
     handle_proxy_eof(S);
@@ -123,8 +139,14 @@ handle_info({'EXIT', _Pid, _Reason}, S) ->
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
-terminate(Reason, #state{handler = Handler, h_state = HState,
-                          start_time = Start} = S) ->
+terminate(
+    Reason,
+    #state{
+        handler = Handler,
+        h_state = HState,
+        start_time = Start
+    } = S
+) ->
     _ = cancel_idle(S),
     _ = safe_close_socket(S),
     try_callback(Handler, terminate, [Reason, HState]),
@@ -134,11 +156,14 @@ terminate(Reason, #state{handler = Handler, h_state = HState,
 code_change(_OldVsn, S, _Extra) ->
     {ok, S}.
 
-emit_tunnel_closed(undefined) -> ok;
+emit_tunnel_closed(undefined) ->
+    ok;
 emit_tunnel_closed(T) ->
     Duration = erlang:monotonic_time(millisecond) - T,
-    masque_metrics:tunnel_closed(Duration,
-                                 #{protocol => tcp, transport => h1}).
+    masque_metrics:tunnel_closed(
+        Duration,
+        #{protocol => tcp, transport => h1}
+    ).
 
 %%====================================================================
 %% Proxy-side data path
@@ -157,7 +182,7 @@ handle_proxy_eof(#state{handler = Handler} = S) ->
     case exported(Handler, handle_eof, 1) of
         true ->
             case dispatch(handle_eof, [], S) of
-                {noreply, S2}       -> {stop, normal, S2};
+                {noreply, S2} -> {stop, normal, S2};
                 {stop, _, _} = Stop -> Stop
             end;
         false ->
@@ -168,8 +193,8 @@ seed_handler(<<>>, S) ->
     S;
 seed_handler(Bytes, S) ->
     case dispatch(handle_data, [Bytes], S) of
-        {noreply, S2}        -> S2;
-        {stop, Reason, _S2}  -> {stop, Reason}
+        {noreply, S2} -> S2;
+        {stop, Reason, _S2} -> {stop, Reason}
     end.
 
 %%====================================================================
@@ -180,10 +205,10 @@ init_handler(Handler, Req, HOpts) ->
     case exported(Handler, init, 2) of
         true ->
             case safe_apply(Handler, init, [Req, HOpts]) of
-                {ok, HState}          -> {ok, HState, []};
+                {ok, HState} -> {ok, HState, []};
                 {ok, HState, Actions} -> {ok, HState, Actions};
-                {stop, Reason}        -> {stop, Reason};
-                Other                 -> {stop, {bad_init, Other}}
+                {stop, Reason} -> {stop, Reason};
+                Other -> {stop, {bad_init, Other}}
             end;
         false ->
             {ok, undefined, []}
@@ -193,12 +218,16 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
     case exported(Handler, CB, length(Extra) + 1) of
         true ->
             case safe_apply(Handler, CB, Extra ++ [HS]) of
-                {ok, HS2}           -> {noreply, S#state{h_state = HS2}};
-                {ok, HS2, Actions}  -> apply_actions_noreply(
-                                         Actions, S#state{h_state = HS2});
-                {stop, Reason, HS2} -> {stop, Reason,
-                                              S#state{h_state = HS2}};
-                _                   -> {noreply, S}
+                {ok, HS2} ->
+                    {noreply, S#state{h_state = HS2}};
+                {ok, HS2, Actions} ->
+                    apply_actions_noreply(
+                        Actions, S#state{h_state = HS2}
+                    );
+                {stop, Reason, HS2} ->
+                    {stop, Reason, S#state{h_state = HS2}};
+                _ ->
+                    {noreply, S}
             end;
         false ->
             {noreply, S}
@@ -210,13 +239,13 @@ exported(Mod, Fun, Arity) ->
 
 apply_init_actions(Actions, State) ->
     case do_actions(Actions, State) of
-        {ok, S2}           -> {ok, S2};
+        {ok, S2} -> {ok, S2};
         {stop, Reason, S2} -> {stop, Reason, S2}
     end.
 
 apply_actions_noreply(Actions, State) ->
     case do_actions(Actions, State) of
-        {ok, S2}           -> {noreply, S2};
+        {ok, S2} -> {noreply, S2};
         {stop, Reason, S2} -> {stop, Reason, S2}
     end.
 
@@ -248,9 +277,13 @@ arm_once(#state{transport = gen_tcp, socket = Sock}) ->
     inet:setopts(Sock, [{active, once}, {mode, binary}]).
 
 safe_close_socket(State) ->
-    try close_socket(State) catch _:_ -> ok end.
+    try
+        close_socket(State)
+    catch
+        _:_ -> ok
+    end.
 
-close_socket(#state{transport = ssl, socket = S})     -> ssl:close(S);
+close_socket(#state{transport = ssl, socket = S}) -> ssl:close(S);
 close_socket(#state{transport = gen_tcp, socket = S}) -> gen_tcp:close(S).
 
 %%====================================================================
@@ -258,37 +291,51 @@ close_socket(#state{transport = gen_tcp, socket = S}) -> gen_tcp:close(S).
 %%====================================================================
 
 safe_apply(M, F, A) ->
-    try apply(M, F, A)
+    try
+        apply(M, F, A)
     catch
         Class:Reason:Stack ->
             error_logger:error_msg(
                 "masque tcp-h1 handler ~p:~p/~p failed: ~p:~p~n~p~n",
-                [M, F, length(A), Class, Reason, Stack]),
+                [M, F, length(A), Class, Reason, Stack]
+            ),
             {stop, {handler_crash, Reason}}
     end.
 
 try_callback(Mod, Fun, Args) ->
     Arity = length(Args),
     case erlang:function_exported(Mod, Fun, Arity) of
-        true  -> (try apply(Mod, Fun, Args) catch _:_ -> ok end);
-        false -> ok
+        true ->
+            (try
+                apply(Mod, Fun, Args)
+            catch
+                _:_ -> ok
+            end);
+        false ->
+            ok
     end.
 
 %%====================================================================
 %% Idle timer
 %%====================================================================
 
-arm_idle(#state{idle_ms = infinity} = S) -> S;
-arm_idle(#state{idle_ms = 0}        = S) -> S;
+arm_idle(#state{idle_ms = infinity} = S) ->
+    S;
+arm_idle(#state{idle_ms = 0} = S) ->
+    S;
 arm_idle(#state{idle_ref = OldRef, idle_ms = Ms} = S) ->
     case OldRef of
-        undefined -> ok;
-        _         -> _ = erlang:cancel_timer(OldRef), ok
+        undefined ->
+            ok;
+        _ ->
+            _ = erlang:cancel_timer(OldRef),
+            ok
     end,
     Ref = erlang:start_timer(Ms, self(), idle),
     S#state{idle_ref = Ref}.
 
-cancel_idle(#state{idle_ref = undefined}) -> ok;
+cancel_idle(#state{idle_ref = undefined}) ->
+    ok;
 cancel_idle(#state{idle_ref = Ref}) ->
     _ = erlang:cancel_timer(Ref),
     ok.

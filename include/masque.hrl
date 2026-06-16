@@ -22,9 +22,11 @@
 %% Variables: `target_host' (IP literal, reg-name, or percent-encoded)
 %%            `target_port' (1..65535)
 -define(MASQUE_DEFAULT_URI_TEMPLATE,
-        <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
+    <<"/.well-known/masque/udp/{target_host}/{target_port}/">>
+).
 -define(MASQUE_DEFAULT_TCP_URI_TEMPLATE,
-        <<"/.well-known/masque/tcp/{target_host}/{target_port}/">>).
+    <<"/.well-known/masque/tcp/{target_host}/{target_port}/">>
+).
 
 %%====================================================================
 %% Inner datagram framing (RFC 9298 §5)
@@ -60,12 +62,19 @@
 %% Error mapping (RFC 9298 §3)
 %%====================================================================
 
--define(MASQUE_STATUS_BAD_REQUEST,       400). %% malformed request or path
--define(MASQUE_STATUS_NOT_FOUND,         404). %% template did not match
--define(MASQUE_STATUS_METHOD_NOT_ALLOWED,405). %% :method != CONNECT
--define(MASQUE_STATUS_BAD_GATEWAY,       502). %% resolution / upstream failure
--define(MASQUE_STATUS_GATEWAY_TIMEOUT,   504). %% upstream did not respond
--define(MASQUE_STATUS_LOOP_DETECTED,     508). %% policy: self-loop
--define(MASQUE_STATUS_NOT_IMPLEMENTED,   501). %% :protocol not recognized
+%% malformed request or path
+-define(MASQUE_STATUS_BAD_REQUEST, 400).
+%% template did not match
+-define(MASQUE_STATUS_NOT_FOUND, 404).
+%% :method != CONNECT
+-define(MASQUE_STATUS_METHOD_NOT_ALLOWED, 405).
+%% resolution / upstream failure
+-define(MASQUE_STATUS_BAD_GATEWAY, 502).
+%% upstream did not respond
+-define(MASQUE_STATUS_GATEWAY_TIMEOUT, 504).
+%% policy: self-loop
+-define(MASQUE_STATUS_LOOP_DETECTED, 508).
+%% :protocol not recognized
+-define(MASQUE_STATUS_NOT_IMPLEMENTED, 501).
 
 -endif.

@@ -27,8 +27,14 @@
 -export([start_link/0]).
 -export([register/5, release/3, release_pid/1, lookup/1, all/0]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 -define(TABLE, ?MODULE).
 
@@ -45,30 +51,40 @@ start_link() ->
 %% Returns `{error, conflict}' if the proposed range overlaps any
 %% existing registration; otherwise `ok'. Idempotent for an exact
 %% repeat by the same pid.
--spec register(4 | 6,
-               inet:ip4_address() | inet:ip6_address(),
-               non_neg_integer(),
-               pid(),
-               non_neg_integer()) -> ok | {error, conflict}.
-register(V, Addr, Pfx, Pid, ContextId)
-  when (V =:= 4 orelse V =:= 6),
-       is_integer(Pfx), is_pid(Pid), is_integer(ContextId) ->
+-spec register(
+    4 | 6,
+    inet:ip4_address() | inet:ip6_address(),
+    non_neg_integer(),
+    pid(),
+    non_neg_integer()
+) -> ok | {error, conflict}.
+register(V, Addr, Pfx, Pid, ContextId) when
+    (V =:= 4 orelse V =:= 6),
+    is_integer(Pfx),
+    is_pid(Pid),
+    is_integer(ContextId)
+->
     case whereis(?MODULE) of
-        undefined -> ok;
-        _Server   ->
-            gen_server:call(?MODULE,
-                            {register, V, Addr, Pfx, Pid, ContextId})
+        undefined ->
+            ok;
+        _Server ->
+            gen_server:call(
+                ?MODULE,
+                {register, V, Addr, Pfx, Pid, ContextId}
+            )
     end.
 
 %% @doc Release a previously-registered range. No-op if the range was
 %% not registered.
--spec release(4 | 6,
-              inet:ip4_address() | inet:ip6_address(),
-              non_neg_integer()) -> ok.
+-spec release(
+    4 | 6,
+    inet:ip4_address() | inet:ip6_address(),
+    non_neg_integer()
+) -> ok.
 release(V, Addr, Pfx) when V =:= 4; V =:= 6 ->
     case whereis(?MODULE) of
         undefined -> ok;
-        _Server   -> gen_server:call(?MODULE, {release, V, Addr, Pfx})
+        _Server -> gen_server:call(?MODULE, {release, V, Addr, Pfx})
     end.
 
 %% @doc Release every range owned by `Pid'. Used by the registry's
@@ -77,7 +93,7 @@ release(V, Addr, Pfx) when V =:= 4; V =:= 6 ->
 release_pid(Pid) when is_pid(Pid) ->
     case whereis(?MODULE) of
         undefined -> ok;
-        _Server   -> gen_server:call(?MODULE, {release_pid, Pid})
+        _Server -> gen_server:call(?MODULE, {release_pid, Pid})
     end.
 
 %% @doc Look up the session serving `IP'. Reads ETS directly.
@@ -87,19 +103,22 @@ lookup(IP) ->
     try
         case normalise(IP) of
             {V, Int} -> lookup_int(V, Int);
-            error    -> not_found
+            error -> not_found
         end
     catch
-        error:badarg -> not_found      %% table absent
+        %% table absent
+        error:badarg -> not_found
     end.
 
 %% @doc Snapshot of every registration. Intended for diagnostics.
--spec all() -> [{4 | 6, non_neg_integer(), non_neg_integer(),
-                 non_neg_integer(), pid(), non_neg_integer()}].
+-spec all() ->
+    [{4 | 6, non_neg_integer(), non_neg_integer(), non_neg_integer(), pid(), non_neg_integer()}].
 all() ->
     try
-        [{V, Start, End, Pfx, Pid, Ctx}
-         || {{V, Start}, End, Pfx, Pid, Ctx, _MRef} <- ets:tab2list(?TABLE)]
+        [
+            {V, Start, End, Pfx, Pid, Ctx}
+         || {{V, Start}, End, Pfx, Pid, Ctx, _MRef} <- ets:tab2list(?TABLE)
+        ]
     catch
         error:badarg -> []
     end.
@@ -109,9 +128,16 @@ all() ->
 %%====================================================================
 
 init([]) ->
-    _ = ets:new(?TABLE,
-                [ordered_set, named_table, public,
-                 {read_concurrency, true}, {write_concurrency, true}]),
+    _ = ets:new(
+        ?TABLE,
+        [
+            ordered_set,
+            named_table,
+            public,
+            {read_concurrency, true},
+            {write_concurrency, true}
+        ]
+    ),
     {ok, #state{}}.
 
 handle_call({register, V, Addr, Pfx, Pid, Ctx}, _From, S) ->
@@ -124,11 +150,14 @@ handle_call({register, V, Addr, Pfx, Pid, Ctx}, _From, S) ->
             case overlap_check(V, Start, End) of
                 ok ->
                     MRef = erlang:monitor(process, Pid),
-                    true = ets:insert(?TABLE,
-                                      {Key, End, Pfx, Pid, Ctx, MRef}),
+                    true = ets:insert(
+                        ?TABLE,
+                        {Key, End, Pfx, Pid, Ctx, MRef}
+                    ),
                     Mon = maps:get(MRef, S#state.monitors, []),
                     Mons = (S#state.monitors)#{
-                        MRef => [{V, Start, Pfx} | Mon]},
+                        MRef => [{V, Start, Pfx} | Mon]
+                    },
                     {reply, ok, S#state{monitors = Mons}};
                 conflict ->
                     {reply, {error, conflict}, S}
@@ -150,19 +179,25 @@ handle_call(_Other, _From, S) ->
 
 handle_cast(_Msg, S) -> {noreply, S}.
 
-handle_info({'DOWN', MRef, process, _Pid, _Reason},
-            #state{monitors = Mons} = S) ->
+handle_info(
+    {'DOWN', MRef, process, _Pid, _Reason},
+    #state{monitors = Mons} = S
+) ->
     case maps:take(MRef, Mons) of
         {Ranges, Mons1} ->
-            lists:foreach(fun({V, Start, _Pfx}) ->
-                                  _ = ets:delete(?TABLE, {V, Start}),
-                                  masque_metrics:ip_release_inc()
-                          end, Ranges),
+            lists:foreach(
+                fun({V, Start, _Pfx}) ->
+                    _ = ets:delete(?TABLE, {V, Start}),
+                    masque_metrics:ip_release_inc()
+                end,
+                Ranges
+            ),
             {noreply, S#state{monitors = Mons1}};
         error ->
             {noreply, S}
     end;
-handle_info(_Other, S) -> {noreply, S}.
+handle_info(_Other, S) ->
+    {noreply, S}.
 
 terminate(_Reason, _S) -> ok.
 
@@ -172,17 +207,26 @@ code_change(_OldVsn, S, _Extra) -> {ok, S}.
 %% Internal
 %%====================================================================
 
-normalise({_,_,_,_} = A) -> {4, to_int(4, A)};
-normalise({_,_,_,_,_,_,_,_} = A) -> {6, to_int(6, A)};
+normalise({_, _, _, _} = A) -> {4, to_int(4, A)};
+normalise({_, _, _, _, _, _, _, _} = A) -> {6, to_int(6, A)};
 normalise(_) -> error.
 
-to_int(4, {A,B,C,D}) when A >= 0, A =< 255, B >= 0, B =< 255,
-                          C >= 0, C =< 255, D >= 0, D =< 255 ->
+to_int(4, {A, B, C, D}) when
+    A >= 0,
+    A =< 255,
+    B >= 0,
+    B =< 255,
+    C >= 0,
+    C =< 255,
+    D >= 0,
+    D =< 255
+->
     (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D;
-to_int(6, {A,B,C,D,E,F,G,H}) ->
-    (A bsl 112) bor (B bsl 96) bor (C bsl 80) bor (D bsl 64)
-    bor (E bsl 48) bor (F bsl 32) bor (G bsl 16) bor H;
-to_int(_, _) -> error.
+to_int(6, {A, B, C, D, E, F, G, H}) ->
+    (A bsl 112) bor (B bsl 96) bor (C bsl 80) bor (D bsl 64) bor
+        (E bsl 48) bor (F bsl 32) bor (G bsl 16) bor H;
+to_int(_, _) ->
+    error.
 
 range_end(Start, 4, Pfx) when Pfx >= 0, Pfx =< 32 ->
     Start bor ((1 bsl (32 - Pfx)) - 1);
@@ -224,7 +268,8 @@ overlap_check_next(V, Key, End) ->
 lookup_int(V, Int) ->
     Probe = {V, Int + 1},
     case ets:prev(?TABLE, Probe) of
-        '$end_of_table' -> not_found;
+        '$end_of_table' ->
+            not_found;
         {V, _} = Key ->
             case ets:lookup(?TABLE, Key) of
                 [{Key, End, _Pfx, Pid, Ctx, _MRef}] when End >= Int ->
@@ -241,19 +286,20 @@ release_key({V, Start} = Key, Pfx, #state{monitors = Mons} = S) ->
         [{Key, _End, Pfx, _Pid, _Ctx, MRef}] ->
             true = ets:delete(?TABLE, Key),
             masque_metrics:ip_release_inc(),
-            Mons1 = case maps:find(MRef, Mons) of
-                error ->
-                    Mons;
-                {ok, Ranges} ->
-                    Ranges1 = [R || R <- Ranges, R =/= {V, Start, Pfx}],
-                    case Ranges1 of
-                        [] ->
-                            erlang:demonitor(MRef, [flush]),
-                            maps:remove(MRef, Mons);
-                        _ ->
-                            Mons#{MRef => Ranges1}
-                    end
-            end,
+            Mons1 =
+                case maps:find(MRef, Mons) of
+                    error ->
+                        Mons;
+                    {ok, Ranges} ->
+                        Ranges1 = [R || R <- Ranges, R =/= {V, Start, Pfx}],
+                        case Ranges1 of
+                            [] ->
+                                erlang:demonitor(MRef, [flush]),
+                                maps:remove(MRef, Mons);
+                            _ ->
+                                Mons#{MRef => Ranges1}
+                        end
+                end,
             S#state{monitors = Mons1};
         _ ->
             S
@@ -271,17 +317,26 @@ release_by_pid(Pid, #state{monitors = Mons} = S) ->
                 _Some ->
                     {Acc#{MRef => Ranges}, Drop}
             end
-        end, {#{}, []}, Mons),
-    lists:foreach(fun({V, Start, _Pfx}) ->
-                          _ = ets:delete(?TABLE, {V, Start}),
-                          masque_metrics:ip_release_inc()
-                  end, Released),
+        end,
+        {#{}, []},
+        Mons
+    ),
+    lists:foreach(
+        fun({V, Start, _Pfx}) ->
+            _ = ets:delete(?TABLE, {V, Start}),
+            masque_metrics:ip_release_inc()
+        end,
+        Released
+    ),
     S#state{monitors = Mons1}.
 
 ranges_for_pid(Pid, Ranges) ->
-    [R || R <- Ranges,
-          {V, Start, _Pfx0} <- [R],
-          case ets:lookup(?TABLE, {V, Start}) of
-              [{_, _End, _Pfx1, P, _Ctx, _MRef}] when P =:= Pid -> true;
-              _ -> false
-          end].
+    [
+        R
+     || R <- Ranges,
+        {V, Start, _Pfx0} <- [R],
+        case ets:lookup(?TABLE, {V, Start}) of
+            [{_, _End, _Pfx1, P, _Ctx, _MRef}] when P =:= Pid -> true;
+            _ -> false
+        end
+    ].

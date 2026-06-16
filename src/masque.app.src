@@ -1,21 +1,21 @@
-{application, masque,
- [{description, "MASQUE: Proxying UDP in HTTP (RFC 9298) for Erlang"},
-  {vsn, "0.7.0"},
-  {registered, [masque_sup]},
-  {mod, {masque_app, []}},
-  {applications,
-   [kernel,
-    stdlib,
-    ssl,
-    crypto,
-    public_key,
-    quic,
-    h2,
-    h1,
-    instrument
-   ]},
-  {env, []},
-  {modules, []},
-  {licenses, ["Apache-2.0"]},
-  {links, [{"GitHub", "https://github.com/benoitc/erlang_masque"}]}
- ]}.
+{application, masque, [
+    {description, "MASQUE: Proxying UDP in HTTP (RFC 9298) for Erlang"},
+    {vsn, "0.7.0"},
+    {registered, [masque_sup]},
+    {mod, {masque_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        ssl,
+        crypto,
+        public_key,
+        quic,
+        h2,
+        h1,
+        instrument
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [{"GitHub", "https://github.com/benoitc/erlang_masque"}]}
+]}.
