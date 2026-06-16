@@ -6,6 +6,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Bumped `h2` 0.9.0 -> 0.10.2.
+- The h2 server now reads `:authority` and `:scheme` from the request
+  headers and no longer falls back to the `host` header or a hard-coded
+  `https` scheme. Both pseudo-headers are required, matching the h3 server.
+
 ## [0.7.0] - 2026-06-13
 
 ### Added

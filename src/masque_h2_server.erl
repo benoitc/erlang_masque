@@ -22,6 +22,12 @@
 -include("masque.hrl").
 -include("masque_ip.hrl").
 
+-ifdef(TEST).
+%% Test-only: exercise the Extended CONNECT validator (pseudo-header
+%% reading, template matching) without standing up a listener.
+-export([validate/7]).
+-endif.
+
 -type listener_name() :: atom().
 -type listener_opts() :: map().
 
@@ -271,25 +277,25 @@ match_udp_or_bind(Path, Headers, Template) ->
             case masque_uri_udp_bind:match(Template, Path) of
                 {ok, #{target_host := Host, target_port := Port,
                        bind        := Scope}} ->
-                    Authority = case header(<<":authority">>, Headers) of
-                        undefined -> <<"">>;
-                        A -> A
-                    end,
-                    Scheme = case header(<<":scheme">>, Headers) of
-                        undefined -> <<"https">>;
-                        S -> S
-                    end,
-                    {ok, #{
-                        method => <<"CONNECT">>,
-                        protocol => udp_bind,
-                        bind => Scope,
-                        path => Path,
-                        authority => Authority,
-                        scheme => Scheme,
-                        target_host => Host,
-                        target_port => Port,
-                        headers => Headers
-                    }};
+                    case {header(<<":scheme">>, Headers),
+                          header(<<":authority">>, Headers)} of
+                        {Scheme, Authority}
+                          when Scheme =/= undefined,
+                               Authority =/= undefined ->
+                            {ok, #{
+                                method => <<"CONNECT">>,
+                                protocol => udp_bind,
+                                bind => Scope,
+                                path => Path,
+                                authority => Authority,
+                                scheme => Scheme,
+                                target_host => Host,
+                                target_port => Port,
+                                headers => Headers
+                            }};
+                        _ ->
+                            {error, bad_path}
+                    end;
                 {error, bad_port} -> {error, bad_port};
                 {error, bad_host} -> {error, bad_host};
                 {error, _}        -> {error, bad_path}
@@ -298,27 +304,29 @@ match_udp_or_bind(Path, Headers, Template) ->
             match_path(Path, Headers, Template, udp)
     end.
 
-%% h2_connection strips `:scheme' and `:authority' from the handler
-%% headers (they stay in the stream record but are not exposed). We
-%% still populate the Req map with best-effort values so the handler
-%% callback sees a consistent shape on both transports.
+%% `:scheme' and `:authority' presence is enforced by `h2' for
+%% Extended CONNECT; we surface whatever it delivers without silently
+%% substituting defaults.
 match_path(Path, Headers, Template, Protocol) ->
     case masque_uri:match(Template, Path) of
         {ok, #{target_host := Host, target_port := Port}} ->
-            Authority = case header(<<":authority">>, Headers) of
-                            undefined -> header(<<"host">>, Headers, <<>>);
-                            A         -> A
-                        end,
-            {ok, #{
-                method => <<"CONNECT">>,
-                protocol => Protocol,
-                path => Path,
-                authority => Authority,
-                scheme => <<"https">>,
-                target_host => Host,
-                target_port => Port,
-                headers => Headers
-            }};
+            case {header(<<":scheme">>, Headers),
+                  header(<<":authority">>, Headers)} of
+                {Scheme, Authority} when Scheme =/= undefined,
+                                         Authority =/= undefined ->
+                    {ok, #{
+                        method => <<"CONNECT">>,
+                        protocol => Protocol,
+                        path => Path,
+                        authority => Authority,
+                        scheme => Scheme,
+                        target_host => Host,
+                        target_port => Port,
+                        headers => Headers
+                    }};
+                _ ->
+                    {error, bad_path}
+            end;
         {error, bad_port} -> {error, bad_port};
         {error, bad_host} -> {error, bad_host};
         {error, _}        -> {error, bad_path}
@@ -329,32 +337,30 @@ match_ip_path(Path, Headers, Template) ->
         {ok, T} ->
             case masque_uri_ip:match(T, Path) of
                 {ok, #{target := Target, ipproto := IPProto}} ->
-                    Authority = case header(<<":authority">>, Headers) of
-                                    undefined -> header(<<"host">>, Headers, <<>>);
-                                    A         -> A
-                                end,
-                    {ok, #{
-                        method => <<"CONNECT">>,
-                        protocol => ip,
-                        path => Path,
-                        authority => Authority,
-                        scheme => <<"https">>,
-                        ip_target => Target,
-                        ip_ipproto => IPProto,
-                        headers => Headers
-                    }};
+                    case {header(<<":scheme">>, Headers),
+                          header(<<":authority">>, Headers)} of
+                        {Scheme, Authority}
+                          when Scheme =/= undefined,
+                               Authority =/= undefined ->
+                            {ok, #{
+                                method => <<"CONNECT">>,
+                                protocol => ip,
+                                path => Path,
+                                authority => Authority,
+                                scheme => Scheme,
+                                ip_target => Target,
+                                ip_ipproto => IPProto,
+                                headers => Headers
+                            }};
+                        _ ->
+                            {error, bad_path}
+                    end;
                 {error, bad_target}   -> {error, bad_host};
                 {error, bad_ipproto}  -> {error, bad_port};
                 {error, _}            -> {error, bad_path}
             end;
         {error, _} ->
             {error, bad_path}
-    end.
-
-header(Name, Headers, Default) ->
-    case lists:keyfind(Name, 1, Headers) of
-        {_, V} -> V;
-        false  -> Default
     end.
 
 accept_request(HandlerMod, Req) ->
