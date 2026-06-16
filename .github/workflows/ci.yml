@@ -50,6 +50,9 @@ jobs:
       - name: EUnit
         run: rebar3 eunit
 
+      - name: PropEr
+        run: rebar3 as test proper
+
       - name: Common Test
         run: rebar3 ct
 
