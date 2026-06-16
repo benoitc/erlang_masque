@@ -1,5 +1,7 @@
 # masque
 
+[![CI](https://github.com/benoitc/erlang_masque/actions/workflows/ci.yml/badge.svg)](https://github.com/benoitc/erlang_masque/actions/workflows/ci.yml)
+
 An Erlang implementation of the MASQUE family - [RFC 9298 - Proxying
 UDP in HTTP][rfc9298], [RFC 9484 - Proxying IP in HTTP][rfc9484], and
 the draft-ietf-httpbis-connect-tcp variant - over **HTTP/3** and
