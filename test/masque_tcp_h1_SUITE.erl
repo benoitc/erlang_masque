@@ -237,10 +237,12 @@ proxy_authorization_header_roundtrip(Config) ->
 
 non_2xx_surfaces_on_client(Config) ->
     Port = ?config(port, Config),
-    %% Point at an impossible target; the proxy handler returns 502
-    %% from accept/init resolution. The client should surface the
-    %% status code rather than hang.
-    case do_connect(Port, {<<"203.0.113.1">>, 7}, #{}) of
+    %% Loopback port 1 refuses instantly, so the proxy handler returns
+    %% 502 from the upstream connect. Using a refused target (rather
+    %% than a black-hole IP that hangs until connect_timeout) keeps the
+    %% assertion deterministic across networks. The client should
+    %% surface the status code rather than hang.
+    case do_connect(Port, {<<"127.0.0.1">>, 1}, #{}) of
         {error, {handshake_rejected, Code, _}} when Code >= 400 ->
             ok;
         Other ->
