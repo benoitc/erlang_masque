@@ -63,65 +63,67 @@
 
 suite() -> [{timetrap, {seconds, 30}}].
 
-all() -> [
-    handshake_accepts_valid_request,
-    handshake_rejects_non_connect,
-    handshake_rejects_wrong_protocol,
-    handshake_rejects_unmatched_path,
-    handshake_rejects_bad_port,
-    client_connects_to_server,
-    client_handshake_rejected_maps_error,
-    datagram_echo_message_mode,
-    datagram_echo_queue_mode,
-    udp_proxy_round_trip,
-    udp_proxy_policy_denies,
-    capsule_roundtrip,
-    oversize_packet_rejected,
-    graceful_close_signals_owner,
-    many_packets_in_order,
-    concurrent_tunnels,
-    large_payload_near_mtu,
-    integration_custom_h3_listener,
-    fallback_receives_non_masque_requests,
-    udp_source_spoofing_rejected,
-    handshake_rejected_when_init_fails,
-    udp_payload_65527_boundary,
-    reject_response_carries_proxy_status,
-    h2_echo_round_trip,
-    h2_udp_proxy_round_trip,
-    chain_round_trip,
-    chain_upstream_failure_returns_502,
-    chain_multiple_packets,
-    chain_concurrent_tunnels,
-    chain_capsule_forwarding,
-    tcp_echo_round_trip,
-    tcp_large_transfer,
-    tcp_target_closes,
-    tcp_and_udp_same_listener,
-    tcp_chain_round_trip
-].
+all() ->
+    [
+        handshake_accepts_valid_request,
+        handshake_rejects_non_connect,
+        handshake_rejects_wrong_protocol,
+        handshake_rejects_unmatched_path,
+        handshake_rejects_bad_port,
+        client_connects_to_server,
+        client_handshake_rejected_maps_error,
+        datagram_echo_message_mode,
+        datagram_echo_queue_mode,
+        udp_proxy_round_trip,
+        udp_proxy_policy_denies,
+        capsule_roundtrip,
+        oversize_packet_rejected,
+        graceful_close_signals_owner,
+        many_packets_in_order,
+        concurrent_tunnels,
+        large_payload_near_mtu,
+        integration_custom_h3_listener,
+        fallback_receives_non_masque_requests,
+        udp_source_spoofing_rejected,
+        handshake_rejected_when_init_fails,
+        udp_payload_65527_boundary,
+        reject_response_carries_proxy_status,
+        h2_echo_round_trip,
+        h2_udp_proxy_round_trip,
+        chain_round_trip,
+        chain_upstream_failure_returns_502,
+        chain_multiple_packets,
+        chain_concurrent_tunnels,
+        chain_capsule_forwarding,
+        tcp_echo_round_trip,
+        tcp_large_transfer,
+        tcp_target_closes,
+        tcp_and_udp_same_listener,
+        tcp_chain_round_trip
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(quic),
     {ok, _} = application:ensure_all_started(masque),
     case masque_test_helpers:generate_certs() of
         {ok, Certs} -> [{certs, Certs} | Config];
-        {error, R}  -> {skip, {cert_generation_failed, R}}
+        {error, R} -> {skip, {cert_generation_failed, R}}
     end.
 
 end_per_suite(Config) ->
     masque_test_helpers:cleanup_certs(?config(certs, Config)).
 
-init_per_testcase(Case, Config)
-  when Case =:= datagram_echo_message_mode;
-       Case =:= datagram_echo_queue_mode;
-       Case =:= capsule_roundtrip;
-       Case =:= oversize_packet_rejected;
-       Case =:= graceful_close_signals_owner;
-       Case =:= many_packets_in_order;
-       Case =:= concurrent_tunnels;
-       Case =:= large_payload_near_mtu;
-       Case =:= udp_payload_65527_boundary ->
+init_per_testcase(Case, Config) when
+    Case =:= datagram_echo_message_mode;
+    Case =:= datagram_echo_queue_mode;
+    Case =:= capsule_roundtrip;
+    Case =:= oversize_packet_rejected;
+    Case =:= graceful_close_signals_owner;
+    Case =:= many_packets_in_order;
+    Case =:= concurrent_tunnels;
+    Case =:= large_payload_near_mtu;
+    Case =:= udp_payload_65527_boundary
+->
     Certs = ?config(certs, Config),
     ServerCtx = maps:merge(Certs, #{handler => masque_echo_handler}),
     {ok, Server} = masque_test_helpers:start_masque_server(ServerCtx),
@@ -131,40 +133,56 @@ init_per_testcase(udp_source_spoofing_rejected, Config) ->
     {UdpPid, UdpPort} = start_udp_echo(),
     ProxyBindPort = ephemeral_port(),
     ServerCtx = maps:merge(Certs, #{
-        handler      => masque_udp_proxy_handler,
-        handler_opts => #{port => ProxyBindPort,
-                          allow_private => true}
+        handler => masque_udp_proxy_handler,
+        handler_opts => #{
+            port => ProxyBindPort,
+            allow_private => true
+        }
     }),
     {ok, Server} = masque_test_helpers:start_masque_server(ServerCtx),
-    [{server, Server},
-     {udp_pid, UdpPid},
-     {udp_port, UdpPort},
-     {proxy_bind_port, ProxyBindPort} | Config];
+    [
+        {server, Server},
+        {udp_pid, UdpPid},
+        {udp_port, UdpPort},
+        {proxy_bind_port, ProxyBindPort}
+        | Config
+    ];
 init_per_testcase(handshake_rejected_when_init_fails, Config) ->
     Certs = ?config(certs, Config),
     %% Resolver always fails - `init/2' returns `{stop, _}' and the
     %% handshake must come back with 502.
     ServerCtx = maps:merge(Certs, #{
-        handler      => masque_udp_proxy_handler,
-        handler_opts => #{resolver =>
-                              fun(_) -> {error, nxdomain} end}
+        handler => masque_udp_proxy_handler,
+        handler_opts => #{
+            resolver =>
+                fun(_) -> {error, nxdomain} end
+        }
     }),
     {ok, Server} = masque_test_helpers:start_masque_server(ServerCtx),
     [{server, Server} | Config];
-init_per_testcase(Case, Config)
-  when Case =:= udp_proxy_round_trip;
-       Case =:= udp_proxy_policy_denies ->
+init_per_testcase(Case, Config) when
+    Case =:= udp_proxy_round_trip;
+    Case =:= udp_proxy_policy_denies
+->
     Certs = ?config(certs, Config),
     {UdpPid, UdpPort} = start_udp_echo(),
-    ServerCtx0 = maps:merge(Certs, #{handler => masque_udp_proxy_handler,
-                                      handler_opts => #{allow_private => true}}),
-    ServerCtx = case Case of
-        udp_proxy_policy_denies ->
-            ServerCtx0#{handler_opts =>
-                          #{allow => fun(_) -> false end,
-                            allow_private => true}};
-        _ -> ServerCtx0
-    end,
+    ServerCtx0 = maps:merge(Certs, #{
+        handler => masque_udp_proxy_handler,
+        handler_opts => #{allow_private => true}
+    }),
+    ServerCtx =
+        case Case of
+            udp_proxy_policy_denies ->
+                ServerCtx0#{
+                    handler_opts =>
+                        #{
+                            allow => fun(_) -> false end,
+                            allow_private => true
+                        }
+                };
+            _ ->
+                ServerCtx0
+        end,
     {ok, Server} = masque_test_helpers:start_masque_server(ServerCtx),
     [{server, Server}, {udp_pid, UdpPid}, {udp_port, UdpPort} | Config];
 init_per_testcase(chain_round_trip, Config) ->
@@ -172,8 +190,11 @@ init_per_testcase(chain_round_trip, Config) ->
     {UdpPid, UdpPort} = start_udp_echo(),
     %% Egress: a normal UDP proxy
     {ok, Egress} = masque_test_helpers:start_masque_server(
-        maps:merge(Certs, #{handler => masque_udp_proxy_handler,
-                            handler_opts => #{allow_private => true}})),
+        maps:merge(Certs, #{
+            handler => masque_udp_proxy_handler,
+            handler_opts => #{allow_private => true}
+        })
+    ),
     EgressPort = maps:get(port, Egress),
     %% Ingress: chains to Egress
     {ok, Ingress} = masque_test_helpers:start_masque_server(
@@ -181,44 +202,62 @@ init_per_testcase(chain_round_trip, Config) ->
             handler => masque_chain_handler,
             handler_opts => #{
                 upstream_proxy =>
-                    iolist_to_binary(["https://localhost:",
-                                     integer_to_list(EgressPort)]),
-                upstream_opts => #{verify => verify_none,
-                                   transports => [h3],
-                                   alpn => [<<"h3">>]}
+                    iolist_to_binary([
+                        "https://localhost:",
+                        integer_to_list(EgressPort)
+                    ]),
+                upstream_opts => #{
+                    verify => verify_none,
+                    transports => [h3],
+                    alpn => [<<"h3">>]
+                }
             }
-        })),
-    [{server, Ingress}, {egress, Egress},
-     {udp_pid, UdpPid}, {udp_port, UdpPort} | Config];
-init_per_testcase(Case, Config)
-  when Case =:= chain_multiple_packets;
-       Case =:= chain_concurrent_tunnels ->
+        })
+    ),
+    [
+        {server, Ingress},
+        {egress, Egress},
+        {udp_pid, UdpPid},
+        {udp_port, UdpPort}
+        | Config
+    ];
+init_per_testcase(Case, Config) when
+    Case =:= chain_multiple_packets;
+    Case =:= chain_concurrent_tunnels
+->
     %% Same infra as chain_round_trip: UDP echo + Egress + Ingress
     init_per_testcase(chain_round_trip, Config);
 init_per_testcase(chain_capsule_forwarding, Config) ->
     Certs = ?config(certs, Config),
     %% Egress runs the echo handler (echoes packets AND capsules)
     {ok, Egress} = masque_test_helpers:start_masque_server(
-        maps:merge(Certs, #{handler => masque_echo_handler})),
+        maps:merge(Certs, #{handler => masque_echo_handler})
+    ),
     EgressPort = maps:get(port, Egress),
     {ok, Ingress} = masque_test_helpers:start_masque_server(
         maps:merge(Certs, #{
             handler => masque_chain_handler,
             handler_opts => #{
                 upstream_proxy =>
-                    iolist_to_binary(["https://localhost:",
-                                     integer_to_list(EgressPort)]),
-                upstream_opts => #{verify => verify_none,
-                                   transports => [h3],
-                                   alpn => [<<"h3">>]}
+                    iolist_to_binary([
+                        "https://localhost:",
+                        integer_to_list(EgressPort)
+                    ]),
+                upstream_opts => #{
+                    verify => verify_none,
+                    transports => [h3],
+                    alpn => [<<"h3">>]
+                }
             }
-        })),
+        })
+    ),
     [{server, Ingress}, {egress, Egress} | Config];
 init_per_testcase(tcp_chain_round_trip, Config) ->
     Certs = ?config(certs, Config),
     {TcpPid, TcpPort} = start_tcp_echo(),
     {ok, Egress} = masque_test_helpers:start_masque_server(
-        Certs#{handler_opts => #{allow_private => true}}),
+        Certs#{handler_opts => #{allow_private => true}}
+    ),
     EgressPort = maps:get(port, Egress),
     {ok, Ingress} = masque_test_helpers:start_masque_server(
         maps:merge(Certs, #{
@@ -226,15 +265,25 @@ init_per_testcase(tcp_chain_round_trip, Config) ->
             tcp_handler => masque_chain_handler,
             handler_opts => #{
                 upstream_proxy =>
-                    iolist_to_binary(["https://localhost:",
-                                     integer_to_list(EgressPort)]),
-                upstream_opts => #{verify => verify_none,
-                                   transports => [h3],
-                                   alpn => [<<"h3">>]}
+                    iolist_to_binary([
+                        "https://localhost:",
+                        integer_to_list(EgressPort)
+                    ]),
+                upstream_opts => #{
+                    verify => verify_none,
+                    transports => [h3],
+                    alpn => [<<"h3">>]
+                }
             }
-        })),
-    [{server, Ingress}, {egress, Egress},
-     {tcp_pid, TcpPid}, {tcp_port, TcpPort} | Config];
+        })
+    ),
+    [
+        {server, Ingress},
+        {egress, Egress},
+        {tcp_pid, TcpPid},
+        {tcp_port, TcpPort}
+        | Config
+    ];
 init_per_testcase(chain_upstream_failure_returns_502, Config) ->
     Certs = ?config(certs, Config),
     {ok, Ingress} = masque_test_helpers:start_masque_server(
@@ -242,12 +291,15 @@ init_per_testcase(chain_upstream_failure_returns_502, Config) ->
             handler => masque_chain_handler,
             handler_opts => #{
                 upstream_proxy => <<"https://127.0.0.1:1">>,
-                upstream_opts => #{verify => verify_none,
-                                   transports => [h3],
-                                   alpn => [<<"h3">>],
-                                   timeout => 1000}
+                upstream_opts => #{
+                    verify => verify_none,
+                    transports => [h3],
+                    alpn => [<<"h3">>],
+                    timeout => 1000
+                }
             }
-        })),
+        })
+    ),
     [{server, Ingress} | Config];
 init_per_testcase(h2_echo_round_trip, Config) ->
     Certs = ?config(certs, Config),
@@ -258,57 +310,91 @@ init_per_testcase(h2_udp_proxy_round_trip, Config) ->
     {UdpPid, UdpPort} = start_udp_echo(),
     {ok, Server} = start_h2_proxy_server(Certs),
     [{server, Server}, {udp_pid, UdpPid}, {udp_port, UdpPort} | Config];
-init_per_testcase(Case, Config)
-  when Case =:= integration_custom_h3_listener;
-       Case =:= fallback_receives_non_masque_requests ->
+init_per_testcase(Case, Config) when
+    Case =:= integration_custom_h3_listener;
+    Case =:= fallback_receives_non_masque_requests
+->
     Certs = ?config(certs, Config),
-    WithFallback = Case =:= integration_custom_h3_listener
-                   orelse Case =:= fallback_receives_non_masque_requests,
+    WithFallback =
+        Case =:= integration_custom_h3_listener orelse
+            Case =:= fallback_receives_non_masque_requests,
     {ok, Server} = start_integration_server(Certs, WithFallback),
     [{server, Server} | Config];
-init_per_testcase(Case, Config)
-  when Case =:= tcp_echo_round_trip;
-       Case =:= tcp_large_transfer;
-       Case =:= tcp_target_closes ->
+init_per_testcase(Case, Config) when
+    Case =:= tcp_echo_round_trip;
+    Case =:= tcp_large_transfer;
+    Case =:= tcp_target_closes
+->
     Certs = ?config(certs, Config),
     {TcpPid, TcpPort} = start_tcp_echo(),
     {ok, Server} = masque_test_helpers:start_masque_server(
-        Certs#{handler_opts => #{allow_private => true}}),
+        Certs#{handler_opts => #{allow_private => true}}
+    ),
     [{server, Server}, {tcp_pid, TcpPid}, {tcp_port, TcpPort} | Config];
 init_per_testcase(tcp_and_udp_same_listener, Config) ->
     Certs = ?config(certs, Config),
     {TcpPid, TcpPort} = start_tcp_echo(),
     {UdpPid, UdpPort} = start_udp_echo(),
     {ok, Server} = masque_test_helpers:start_masque_server(
-        Certs#{handler_opts => #{allow_private => true}}),
-    [{server, Server},
-     {tcp_pid, TcpPid}, {tcp_port, TcpPort},
-     {udp_pid, UdpPid}, {udp_port, UdpPort} | Config];
+        Certs#{handler_opts => #{allow_private => true}}
+    ),
+    [
+        {server, Server},
+        {tcp_pid, TcpPid},
+        {tcp_port, TcpPort},
+        {udp_pid, UdpPid},
+        {udp_port, UdpPort}
+        | Config
+    ];
 init_per_testcase(_Case, Config) ->
     Certs = ?config(certs, Config),
     {ok, Server} = masque_test_helpers:start_masque_server(
-        Certs#{handler_opts => #{allow_private => true}}),
+        Certs#{handler_opts => #{allow_private => true}}
+    ),
     [{server, Server} | Config].
 
 end_per_testcase(_Case, Config) ->
     Server = ?config(server, Config),
-    _ = (try masque_test_helpers:stop_masque_server(Server) catch _:_ -> ok end),
-    _ = (try quic_h3:stop_server(maps:get(name, Server)) catch _:_ -> ok end),
+    _ =
+        (try
+            masque_test_helpers:stop_masque_server(Server)
+        catch
+            _:_ -> ok
+        end),
+    _ =
+        (try
+            quic_h3:stop_server(maps:get(name, Server))
+        catch
+            _:_ -> ok
+        end),
     case maps:find(h2_ref, Server) of
-        {ok, Ref} -> _ = (try h2:stop_server(Ref) catch _:_ -> ok end);
-        error     -> ok
+        {ok, Ref} ->
+            _ =
+                (try
+                    h2:stop_server(Ref)
+                catch
+                    _:_ -> ok
+                end);
+        error ->
+            ok
     end,
     case ?config(egress, Config) of
-        undefined -> ok;
-        Egress    -> try masque_test_helpers:stop_masque_server(Egress) catch _:_ -> ok end
+        undefined ->
+            ok;
+        Egress ->
+            try
+                masque_test_helpers:stop_masque_server(Egress)
+            catch
+                _:_ -> ok
+            end
     end,
     case ?config(udp_pid, Config) of
         undefined -> ok;
-        Pid       -> exit(Pid, shutdown)
+        Pid -> exit(Pid, shutdown)
     end,
     case ?config(tcp_pid, Config) of
         undefined -> ok;
-        TPid      -> exit(TPid, shutdown)
+        TPid -> exit(TPid, shutdown)
     end,
     timer:sleep(50),
     ok.
@@ -381,29 +467,43 @@ client_connects_to_server(Config) ->
     Server = ?config(server, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]),
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {<<"192.0.2.6">>, 443},
-                                #{verify => verify_none,
-                                  alpn => [<<"h3">>],
-                                  transports => [h3]}),
-    ?assertMatch(#{state := open,
-                   target := {<<"192.0.2.6">>, 443}},
-                 masque:info(Sess)),
+        ["https://localhost:", integer_to_list(Port)]
+    ),
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {<<"192.0.2.6">>, 443},
+        #{
+            verify => verify_none,
+            alpn => [<<"h3">>],
+            transports => [h3]
+        }
+    ),
+    ?assertMatch(
+        #{
+            state := open,
+            target := {<<"192.0.2.6">>, 443}
+        },
+        masque:info(Sess)
+    ),
     ok = masque:close(Sess).
 
 client_handshake_rejected_maps_error(Config) ->
     Server = ?config(server, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]),
+        ["https://localhost:", integer_to_list(Port)]
+    ),
     {error, {handshake_rejected, 404}} =
-        masque:connect(ProxyURI,
-                       {<<"192.0.2.6">>, 443},
-                       #{verify => verify_none,
-                         alpn => [<<"h3">>],
-                         transports => [h3],
-                         uri_template => <<"/wrong/{target_host}/{target_port}/">>}).
+        masque:connect(
+            ProxyURI,
+            {<<"192.0.2.6">>, 443},
+            #{
+                verify => verify_none,
+                alpn => [<<"h3">>],
+                transports => [h3],
+                uri_template => <<"/wrong/{target_host}/{target_port}/">>
+            }
+        ).
 
 datagram_echo_message_mode(Config) ->
     Sess = connect_to(Config),
@@ -420,7 +520,7 @@ datagram_echo_message_mode(Config) ->
 datagram_echo_queue_mode(Config) ->
     Sess = connect_to(Config),
     ok = masque:set_mode(Sess, queue),
-    Msgs = [<<"a">>, <<"bb">>, <<"cccc">>, <<1,2,3,4,5>>],
+    Msgs = [<<"a">>, <<"bb">>, <<"cccc">>, <<1, 2, 3, 4, 5>>],
     [ok = masque:send(Sess, M) || M <- Msgs],
     Received = [element(2, masque:recv(Sess, 5000)) || _ <- Msgs],
     ?assertEqual(lists:sort(Msgs), lists:sort(Received)),
@@ -443,29 +543,36 @@ concurrent_tunnels(Config) ->
     process_flag(trap_exit, true),
     N = 4,
     Parent = self(),
-    _Pids = [spawn(fun() ->
-                Tag = list_to_binary("t" ++ integer_to_list(I)),
-                try
-                    Sess = connect_to(Config),
-                    ok = masque:send(Sess, Tag),
-                    receive
-                        {masque_data, Sess, Echo} ->
-                            Parent ! {done, I, Tag, Echo}
-                    after 8000 ->
-                        Parent ! {timeout, I}
-                    end,
-                    masque:close(Sess)
-                catch Class:Reason ->
+    _Pids = [
+        spawn(fun() ->
+            Tag = list_to_binary("t" ++ integer_to_list(I)),
+            try
+                Sess = connect_to(Config),
+                ok = masque:send(Sess, Tag),
+                receive
+                    {masque_data, Sess, Echo} ->
+                        Parent ! {done, I, Tag, Echo}
+                after 8000 ->
+                    Parent ! {timeout, I}
+                end,
+                masque:close(Sess)
+            catch
+                Class:Reason ->
                     Parent ! {crash, I, Class, Reason}
-                end
-            end) || I <- lists:seq(1, N)],
-    Results = [ receive
-                    {done, I, T, T}         -> {ok, I};
-                    {timeout, I}            -> {timeout, I};
-                    {crash, I, C, R}        -> {crash, I, C, R}
-                after 20000 ->
-                    {missing, I}
-                end || I <- lists:seq(1, N)],
+            end
+        end)
+     || I <- lists:seq(1, N)
+    ],
+    Results = [
+        receive
+            {done, I, T, T} -> {ok, I};
+            {timeout, I} -> {timeout, I};
+            {crash, I, C, R} -> {crash, I, C, R}
+        after 20000 ->
+            {missing, I}
+        end
+     || I <- lists:seq(1, N)
+    ],
     ?assertEqual([{ok, I} || I <- lists:seq(1, N)], Results).
 
 large_payload_near_mtu(Config) ->
@@ -479,10 +586,11 @@ large_payload_near_mtu(Config) ->
     end,
     ok = masque:close(Sess).
 
-collect_packets(_Sess, 0, _Timeout) -> [];
+collect_packets(_Sess, 0, _Timeout) ->
+    [];
 collect_packets(Sess, N, Timeout) ->
     case masque:recv(Sess, Timeout) of
-        {ok, Bytes}    -> [Bytes | collect_packets(Sess, N - 1, Timeout)];
+        {ok, Bytes} -> [Bytes | collect_packets(Sess, N - 1, Timeout)];
         {error, timeout} -> []
     end.
 
@@ -493,7 +601,7 @@ oversize_packet_rejected(Config) ->
     %% `datagram_too_large' is a valid refusal.
     Huge = binary:copy(<<"X">>, 70000),
     case masque:send(Sess, Huge) of
-        {error, {payload_too_large, 70000, _}}  -> ok;
+        {error, {payload_too_large, 70000, _}} -> ok;
         {error, {datagram_too_large, 70000, _}} -> ok;
         Other -> ct:fail({unexpected, Other})
     end,
@@ -526,12 +634,17 @@ udp_proxy_round_trip(Config) ->
     Server = ?config(server, Config),
     UdpPort = ?config(udp_port, Config),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(maps:get(port, Server))]),
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {<<"127.0.0.1">>, UdpPort},
-                                #{verify => verify_none,
-                                  alpn => [<<"h3">>],
-                                  transports => [h3]}),
+        ["https://localhost:", integer_to_list(maps:get(port, Server))]
+    ),
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {<<"127.0.0.1">>, UdpPort},
+        #{
+            verify => verify_none,
+            alpn => [<<"h3">>],
+            transports => [h3]
+        }
+    ),
     Payload = <<"ping through proxy">>,
     ok = masque:send(Sess, Payload),
     receive
@@ -546,26 +659,38 @@ udp_proxy_policy_denies(Config) ->
     Server = ?config(server, Config),
     UdpPort = ?config(udp_port, Config),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(maps:get(port, Server))]),
+        ["https://localhost:", integer_to_list(maps:get(port, Server))]
+    ),
     %% Policy says deny-all → handshake should come back 403.
-    ?assertMatch({error, {handshake_rejected, 403}},
-                 masque:connect(ProxyURI,
-                                {<<"127.0.0.1">>, UdpPort},
-                                #{verify => verify_none,
-                                  alpn => [<<"h3">>],
-                                  transports => [h3]})).
+    ?assertMatch(
+        {error, {handshake_rejected, 403}},
+        masque:connect(
+            ProxyURI,
+            {<<"127.0.0.1">>, UdpPort},
+            #{
+                verify => verify_none,
+                alpn => [<<"h3">>],
+                transports => [h3]
+            }
+        )
+    ).
 
 integration_custom_h3_listener(Config) ->
     Server = ?config(server, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]),
+        ["https://localhost:", integer_to_list(Port)]
+    ),
     %% (a) MASQUE tunnel still works through the integration wiring.
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {<<"127.0.0.1">>, 9},
-                                #{verify => verify_none,
-                                  alpn => [<<"h3">>],
-                                  transports => [h3]}),
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {<<"127.0.0.1">>, 9},
+        #{
+            verify => verify_none,
+            alpn => [<<"h3">>],
+            transports => [h3]
+        }
+    ),
     ?assertMatch(#{state := open}, masque:info(Sess)),
     ok = masque:close(Sess),
     %% (b) A non-MASQUE request goes to our fallback - we only check
@@ -602,28 +727,33 @@ fallback_receives_non_masque_requests(Config) ->
 start_integration_server(#{cert := Cert, key := Key}, WithFallback) ->
     Name = list_to_atom(
         "masque_integration_" ++
-        integer_to_list(erlang:unique_integer([positive]))),
-    Fallback = case WithFallback of
-        true ->
-            fun(Conn, StreamId, _Method, _Path, _Headers) ->
-                Body = <<"integration fallback\n">>,
-                Headers = [{<<"content-type">>,
-                            <<"text/plain; charset=utf-8">>},
-                           {<<"content-length">>,
-                            integer_to_binary(byte_size(Body))}],
-                ok = quic_h3:send_response(Conn, StreamId, 200, Headers),
-                ok = quic_h3:send_data(Conn, StreamId, Body, true)
-            end;
-        false ->
-            undefined
-    end,
+            integer_to_list(erlang:unique_integer([positive]))
+    ),
+    Fallback =
+        case WithFallback of
+            true ->
+                fun(Conn, StreamId, _Method, _Path, _Headers) ->
+                    Body = <<"integration fallback\n">>,
+                    Headers = [
+                        {<<"content-type">>, <<"text/plain; charset=utf-8">>},
+                        {<<"content-length">>, integer_to_binary(byte_size(Body))}
+                    ],
+                    ok = quic_h3:send_response(Conn, StreamId, 200, Headers),
+                    ok = quic_h3:send_data(Conn, StreamId, Body, true)
+                end;
+            false ->
+                undefined
+        end,
     MasqueOpts0 = #{handler => masque_echo_handler},
-    MasqueOpts = case Fallback of
-        undefined -> MasqueOpts0;
-        Fun       -> MasqueOpts0#{fallback => Fun}
-    end,
-    #{handler := Handler,
-      connection_handler := ConnectionHandler} =
+    MasqueOpts =
+        case Fallback of
+            undefined -> MasqueOpts0;
+            Fun -> MasqueOpts0#{fallback => Fun}
+        end,
+    #{
+        handler := Handler,
+        connection_handler := ConnectionHandler
+    } =
         masque:h3_handlers(MasqueOpts),
     ServerOpts = #{
         cert => Cert,
@@ -648,8 +778,10 @@ udp_payload_65527_boundary(Config) ->
     Sess = connect_to(Config),
     %% 65528 bytes is one over the RFC 9298 §5 ceiling - refused.
     Over = binary:copy(<<"X">>, 65528),
-    ?assertMatch({error, {payload_too_large, 65528, 65527}},
-                 masque:send(Sess, Over)),
+    ?assertMatch(
+        {error, {payload_too_large, 65528, 65527}},
+        masque:send(Sess, Over)
+    ),
     ok = masque:close(Sess).
 
 reject_response_carries_proxy_status(Config) ->
@@ -676,12 +808,17 @@ udp_source_spoofing_rejected(Config) ->
     UdpPort = ?config(udp_port, Config),
     ProxyBindPort = ?config(proxy_bind_port, Config),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(maps:get(port, Server))]),
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {<<"127.0.0.1">>, UdpPort},
-                                #{verify => verify_none,
-                                  alpn => [<<"h3">>],
-                                  transports => [h3]}),
+        ["https://localhost:", integer_to_list(maps:get(port, Server))]
+    ),
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {<<"127.0.0.1">>, UdpPort},
+        #{
+            verify => verify_none,
+            alpn => [<<"h3">>],
+            transports => [h3]
+        }
+    ),
     %% Legitimate round-trip works: client -> proxy -> echo -> back.
     ok = masque:send(Sess, <<"legit">>),
     receive
@@ -692,10 +829,15 @@ udp_source_spoofing_rejected(Config) ->
     %% Spoof: a third-party UDP sender blasts the proxy's bound port.
     %% The proxy socket is connected to the target, so the kernel
     %% must drop these and the tunnel owner must not see them.
-    {ok, Attacker} = gen_udp:open(0, [binary, {active, false},
-                                       {ip, {127,0,0,1}}]),
-    [ok = gen_udp:send(Attacker, {127,0,0,1}, ProxyBindPort, <<"attack", N>>)
-     || N <- lists:seq(1, 10)],
+    {ok, Attacker} = gen_udp:open(0, [
+        binary,
+        {active, false},
+        {ip, {127, 0, 0, 1}}
+    ]),
+    [
+        ok = gen_udp:send(Attacker, {127, 0, 0, 1}, ProxyBindPort, <<"attack", N>>)
+     || N <- lists:seq(1, 10)
+    ],
     ok = gen_udp:close(Attacker),
     %% Give the kernel a beat, then check we received nothing extra.
     ?assertEqual(timeout, drain_masque_datas(Sess, 300)),
@@ -705,17 +847,24 @@ handshake_rejected_when_init_fails(Config) ->
     Server = ?config(server, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]),
+        ["https://localhost:", integer_to_list(Port)]
+    ),
     %% DNS resolution fails inside `init/2'. Because the 200 response
     %% is only sent AFTER init succeeds, the client must see a 502
     %% rather than a successful tunnel that silently never carries
     %% data.
-    ?assertMatch({error, {handshake_rejected, 502}},
-                 masque:connect(ProxyURI,
-                                {<<"target.invalid">>, 443},
-                                #{verify => verify_none,
-                                  alpn => [<<"h3">>],
-                                  transports => [h3]})).
+    ?assertMatch(
+        {error, {handshake_rejected, 502}},
+        masque:connect(
+            ProxyURI,
+            {<<"target.invalid">>, 443},
+            #{
+                verify => verify_none,
+                alpn => [<<"h3">>],
+                transports => [h3]
+            }
+        )
+    ).
 
 %% Receive every pending `{masque_data, Sess, _}' until `Timeout' ms
 %% of silence. Returns `timeout' on success (nothing spurious left),
@@ -732,7 +881,7 @@ drain_masque_datas(Sess, Timeout) ->
 %% window before the MASQUE proxy binds, but it's good enough for a
 %% single-shot test.
 ephemeral_port() ->
-    {ok, S} = gen_udp:open(0, [{ip, {127,0,0,1}}]),
+    {ok, S} = gen_udp:open(0, [{ip, {127, 0, 0, 1}}]),
     {ok, P} = inet:port(S),
     gen_udp:close(S),
     P.
@@ -742,12 +891,17 @@ chain_round_trip(Config) ->
     UdpPort = ?config(udp_port, Config),
     IngressPort = maps:get(port, Ingress),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(IngressPort)]),
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {<<"127.0.0.1">>, UdpPort},
-                                #{verify => verify_none,
-                                  alpn => [<<"h3">>],
-                                  transports => [h3]}),
+        ["https://localhost:", integer_to_list(IngressPort)]
+    ),
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {<<"127.0.0.1">>, UdpPort},
+        #{
+            verify => verify_none,
+            alpn => [<<"h3">>],
+            transports => [h3]
+        }
+    ),
     Payload = <<"chain ping">>,
     ok = masque:send(Sess, Payload),
     receive
@@ -763,12 +917,17 @@ chain_multiple_packets(Config) ->
     UdpPort = ?config(udp_port, Config),
     IngressPort = maps:get(port, Ingress),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(IngressPort)]),
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {<<"127.0.0.1">>, UdpPort},
-                                #{verify => verify_none,
-                                  alpn => [<<"h3">>],
-                                  transports => [h3]}),
+        ["https://localhost:", integer_to_list(IngressPort)]
+    ),
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {<<"127.0.0.1">>, UdpPort},
+        #{
+            verify => verify_none,
+            alpn => [<<"h3">>],
+            transports => [h3]
+        }
+    ),
     ok = masque:set_mode(Sess, queue),
     N = 50,
     Msgs = [<<"chain-", (integer_to_binary(I))/binary>> || I <- lists:seq(1, N)],
@@ -783,48 +942,65 @@ chain_concurrent_tunnels(Config) ->
     UdpPort = ?config(udp_port, Config),
     IngressPort = maps:get(port, Ingress),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(IngressPort)]),
+        ["https://localhost:", integer_to_list(IngressPort)]
+    ),
     N = 3,
     Parent = self(),
-    _Pids = [spawn(fun() ->
-                Tag = <<"ct-", (integer_to_binary(I))/binary>>,
-                try
-                    {ok, Sess} = masque:connect(ProxyURI,
-                                                {<<"127.0.0.1">>, UdpPort},
-                                                #{verify => verify_none,
-                                                  alpn => [<<"h3">>],
-                                                  transports => [h3]}),
-                    ok = masque:send(Sess, Tag),
-                    receive
-                        {masque_data, Sess, Echo} ->
-                            Parent ! {done, I, Tag, Echo}
-                    after 8000 ->
-                        Parent ! {timeout, I}
-                    end,
-                    masque:close(Sess)
-                catch C:R ->
+    _Pids = [
+        spawn(fun() ->
+            Tag = <<"ct-", (integer_to_binary(I))/binary>>,
+            try
+                {ok, Sess} = masque:connect(
+                    ProxyURI,
+                    {<<"127.0.0.1">>, UdpPort},
+                    #{
+                        verify => verify_none,
+                        alpn => [<<"h3">>],
+                        transports => [h3]
+                    }
+                ),
+                ok = masque:send(Sess, Tag),
+                receive
+                    {masque_data, Sess, Echo} ->
+                        Parent ! {done, I, Tag, Echo}
+                after 8000 ->
+                    Parent ! {timeout, I}
+                end,
+                masque:close(Sess)
+            catch
+                C:R ->
                     Parent ! {crash, I, C, R}
-                end
-            end) || I <- lists:seq(1, N)],
-    Results = [receive
-                   {done, I, T, T}  -> {ok, I};
-                   {timeout, I}     -> {timeout, I};
-                   {crash, I, C, R} -> {crash, I, C, R}
-               after 20000 ->
-                   {missing, I}
-               end || I <- lists:seq(1, N)],
+            end
+        end)
+     || I <- lists:seq(1, N)
+    ],
+    Results = [
+        receive
+            {done, I, T, T} -> {ok, I};
+            {timeout, I} -> {timeout, I};
+            {crash, I, C, R} -> {crash, I, C, R}
+        after 20000 ->
+            {missing, I}
+        end
+     || I <- lists:seq(1, N)
+    ],
     ?assertEqual([{ok, I} || I <- lists:seq(1, N)], Results).
 
 chain_capsule_forwarding(Config) ->
     Ingress = ?config(server, Config),
     IngressPort = maps:get(port, Ingress),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(IngressPort)]),
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {<<"192.0.2.6">>, 443},
-                                #{verify => verify_none,
-                                  alpn => [<<"h3">>],
-                                  transports => [h3]}),
+        ["https://localhost:", integer_to_list(IngressPort)]
+    ),
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {<<"192.0.2.6">>, 443},
+        #{
+            verify => verify_none,
+            alpn => [<<"h3">>],
+            transports => [h3]
+        }
+    ),
     Type = 16#beef,
     Value = <<"capsule-through-chain">>,
     ok = masque:send_capsule(Sess, Type, Value),
@@ -840,19 +1016,26 @@ chain_upstream_failure_returns_502(Config) ->
     Server = ?config(server, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]),
+        ["https://localhost:", integer_to_list(Port)]
+    ),
     %% The upstream is unreachable (port 1). Depending on how fast
     %% QUIC rejects the connection, the ingress either maps the
     %% failure to 502 or the outer handshake times out first.
     %% Both are valid rejections.
-    case masque:connect(ProxyURI,
-                        {<<"192.0.2.6">>, 443},
-                        #{verify => verify_none,
-                          alpn => [<<"h3">>],
-                          transports => [h3],
-                          timeout => 5000}) of
+    case
+        masque:connect(
+            ProxyURI,
+            {<<"192.0.2.6">>, 443},
+            #{
+                verify => verify_none,
+                alpn => [<<"h3">>],
+                transports => [h3],
+                timeout => 5000
+            }
+        )
+    of
         {error, {handshake_rejected, 502}} -> ok;
-        {error, handshake_timeout}         -> ok;
+        {error, handshake_timeout} -> ok;
         Other -> ct:fail({unexpected, Other})
     end.
 
@@ -861,19 +1044,33 @@ h2_echo_round_trip(Config) ->
     Port = maps:get(port, Server),
     %% Raw h2 client to isolate: connect, send CONNECT-UDP, send a
     %% DATAGRAM capsule, expect the echo handler to send one back.
-    {ok, Conn} = h2:connect("localhost", Port,
-                            #{transport => ssl, verify => verify_none,
-                              sync => true}),
-    Path = masque_uri:expand(?TPL,
-                             #{target_host => <<"192.0.2.6">>,
-                               target_port => 443}),
-    {ok, Sid} = h2:request(Conn, [
-        {<<":method">>, <<"CONNECT">>},
-        {<<":scheme">>, <<"https">>},
-        {<<":authority">>, <<"localhost">>},
-        {<<":path">>, Path},
-        {<<"capsule-protocol">>, <<"?1">>}
-    ], #{protocol => <<"connect-udp">>}),
+    {ok, Conn} = h2:connect(
+        "localhost",
+        Port,
+        #{
+            transport => ssl,
+            verify => verify_none,
+            sync => true
+        }
+    ),
+    Path = masque_uri:expand(
+        ?TPL,
+        #{
+            target_host => <<"192.0.2.6">>,
+            target_port => 443
+        }
+    ),
+    {ok, Sid} = h2:request(
+        Conn,
+        [
+            {<<":method">>, <<"CONNECT">>},
+            {<<":scheme">>, <<"https">>},
+            {<<":authority">>, <<"localhost">>},
+            {<<":path">>, Path},
+            {<<"capsule-protocol">>, <<"?1">>}
+        ],
+        #{protocol => <<"connect-udp">>}
+    ),
     %% Wait for 200
     receive
         {h2, Conn, {response, Sid, 200, _}} -> ok
@@ -890,8 +1087,10 @@ h2_echo_round_trip(Config) ->
     Capsule = iolist_to_binary(h2_capsule:encode(datagram, Inner)),
     timer:sleep(200),
     SendR = h2:send_data(Conn, Sid, Capsule, false),
-    ct:pal("h2:send_data -> ~p, stream ~p alive=~p~n",
-           [SendR, Sid, is_process_alive(Conn)]),
+    ct:pal(
+        "h2:send_data -> ~p, stream ~p alive=~p~n",
+        [SendR, Sid, is_process_alive(Conn)]
+    ),
     %% Expect the echo back as a DATAGRAM capsule on the same stream.
     %% Also dump any other messages for debugging.
     receive
@@ -900,8 +1099,10 @@ h2_echo_round_trip(Config) ->
             {ok, {0, <<"h2 echo">>}} = masque_datagram:decode(EchoInner)
     after 5000 ->
         %% Dump remaining messages for debugging.
-        ct:pal("client mailbox: ~p~n",
-               [element(2, process_info(self(), messages))]),
+        ct:pal(
+            "client mailbox: ~p~n",
+            [element(2, process_info(self(), messages))]
+        ),
         ct:fail("no h2 echo data")
     end,
     h2:close(Conn).
@@ -911,11 +1112,16 @@ h2_udp_proxy_round_trip(Config) ->
     UdpPort = ?config(udp_port, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]),
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {<<"127.0.0.1">>, UdpPort},
-                                #{verify => verify_none,
-                                  transports => [h2]}),
+        ["https://localhost:", integer_to_list(Port)]
+    ),
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {<<"127.0.0.1">>, UdpPort},
+        #{
+            verify => verify_none,
+            transports => [h2]
+        }
+    ),
     Payload = <<"h2 proxy ping">>,
     ok = masque:send(Sess, Payload),
     receive
@@ -927,40 +1133,54 @@ h2_udp_proxy_round_trip(Config) ->
 
 start_h2_echo_server(#{cert_file := CertFile, key_file := KeyFile}) ->
     Name = list_to_atom(
-        "h2_echo_" ++ integer_to_list(erlang:unique_integer([positive]))),
-    Opts = #{port => 0,
-             cert => CertFile, key => KeyFile,
-             handler => masque_echo_handler},
+        "h2_echo_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
+    Opts = #{
+        port => 0,
+        cert => CertFile,
+        key => KeyFile,
+        handler => masque_echo_handler
+    },
     case masque_h2_server:start_listener(Name, Opts) of
         {ok, Ref} ->
             {_, _, BoundPort} = Ref,
             {ok, #{name => Name, port => BoundPort, h2_ref => Ref}};
-        Err -> Err
+        Err ->
+            Err
     end.
 
 start_h2_proxy_server(#{cert_file := CertFile, key_file := KeyFile}) ->
     Name = list_to_atom(
-        "h2_proxy_" ++ integer_to_list(erlang:unique_integer([positive]))),
-    Opts = #{port => 0,
-             cert => CertFile, key => KeyFile,
-             handler => masque_udp_proxy_handler,
-             handler_opts => #{allow_private => true}},
+        "h2_proxy_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
+    Opts = #{
+        port => 0,
+        cert => CertFile,
+        key => KeyFile,
+        handler => masque_udp_proxy_handler,
+        handler_opts => #{allow_private => true}
+    },
     case masque_h2_server:start_listener(Name, Opts) of
         {ok, Ref} ->
             {_, _, BoundPort} = Ref,
             {ok, #{name => Name, port => BoundPort, h2_ref => Ref}};
-        Err -> Err
+        Err ->
+            Err
     end.
 
 %% Start a trivial in-process UDP echo server bound to loopback.
 start_udp_echo() ->
     Pid = spawn(fun() ->
-        {ok, S} = gen_udp:open(0, [binary, {active, true},
-                                   {ip, {127,0,0,1}}]),
+        {ok, S} = gen_udp:open(0, [
+            binary,
+            {active, true},
+            {ip, {127, 0, 0, 1}}
+        ]),
         udp_echo_loop(S)
     end),
     Pid ! {get_port, self()},
-    receive {port, P} -> {Pid, P}
+    receive
+        {port, P} -> {Pid, P}
     after 1000 -> ct:fail("udp echo start timeout")
     end.
 
@@ -984,15 +1204,24 @@ connect_to(Config, Transport) ->
     Server = ?config(server, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]),
-    Opts = case Transport of
-        h3 -> #{verify => verify_none, alpn => [<<"h3">>],
-                transports => [h3]};
-        h2 -> #{verify => verify_none, transports => [h2]}
-    end,
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {<<"192.0.2.6">>, 443},
-                                Opts),
+        ["https://localhost:", integer_to_list(Port)]
+    ),
+    Opts =
+        case Transport of
+            h3 ->
+                #{
+                    verify => verify_none,
+                    alpn => [<<"h3">>],
+                    transports => [h3]
+                };
+            h2 ->
+                #{verify => verify_none, transports => [h2]}
+        end,
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {<<"192.0.2.6">>, 443},
+        Opts
+    ),
     Sess.
 
 %%====================================================================
@@ -1002,7 +1231,8 @@ connect_to(Config, Transport) ->
 connect_and_send(Config, Headers) ->
     Server = ?config(server, Config),
     {ok, Conn} = masque_test_helpers:h3_client_connect(
-        maps:get(port, Server), #{}),
+        maps:get(port, Server), #{}
+    ),
     {ok, StreamId} = quic_h3:request(Conn, Headers),
     {Conn, StreamId}.
 
@@ -1028,13 +1258,18 @@ tcp_echo_round_trip(Config) ->
     TcpPort = ?config(tcp_port, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]),
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {<<"127.0.0.1">>, TcpPort},
-                                #{verify => verify_none,
-                                  transports => [h3],
-                                  alpn => [<<"h3">>],
-                                  protocol => tcp}),
+        ["https://localhost:", integer_to_list(Port)]
+    ),
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {<<"127.0.0.1">>, TcpPort},
+        #{
+            verify => verify_none,
+            transports => [h3],
+            alpn => [<<"h3">>],
+            protocol => tcp
+        }
+    ),
     ?assertMatch(#{protocol := tcp, state := open}, masque:info(Sess)),
     ok = masque:send(Sess, <<"hello tcp">>),
     receive
@@ -1049,13 +1284,18 @@ tcp_large_transfer(Config) ->
     TcpPort = ?config(tcp_port, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]),
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {<<"127.0.0.1">>, TcpPort},
-                                #{verify => verify_none,
-                                  transports => [h3],
-                                  alpn => [<<"h3">>],
-                                  protocol => tcp}),
+        ["https://localhost:", integer_to_list(Port)]
+    ),
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {<<"127.0.0.1">>, TcpPort},
+        #{
+            verify => verify_none,
+            transports => [h3],
+            alpn => [<<"h3">>],
+            protocol => tcp
+        }
+    ),
     ok = masque:set_mode(Sess, queue),
     Payload = binary:copy(<<"A">>, 100000),
     ok = masque:send(Sess, Payload),
@@ -1069,13 +1309,18 @@ tcp_target_closes(Config) ->
     TcpPort = ?config(tcp_port, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]),
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {<<"127.0.0.1">>, TcpPort},
-                                #{verify => verify_none,
-                                  transports => [h3],
-                                  alpn => [<<"h3">>],
-                                  protocol => tcp}),
+        ["https://localhost:", integer_to_list(Port)]
+    ),
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {<<"127.0.0.1">>, TcpPort},
+        #{
+            verify => verify_none,
+            transports => [h3],
+            alpn => [<<"h3">>],
+            protocol => tcp
+        }
+    ),
     %% Send the magic "close" command to our TCP echo server.
     ok = masque:send(Sess, <<"CLOSE">>),
     MRef = erlang:monitor(process, Sess),
@@ -1092,27 +1337,40 @@ tcp_and_udp_same_listener(Config) ->
     UdpPort = ?config(udp_port, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]),
+        ["https://localhost:", integer_to_list(Port)]
+    ),
     %% TCP tunnel
-    {ok, TcpSess} = masque:connect(ProxyURI,
-                                   {<<"127.0.0.1">>, TcpPort},
-                                   #{verify => verify_none,
-                                     transports => [h3],
-                                     alpn => [<<"h3">>],
-                                     protocol => tcp}),
+    {ok, TcpSess} = masque:connect(
+        ProxyURI,
+        {<<"127.0.0.1">>, TcpPort},
+        #{
+            verify => verify_none,
+            transports => [h3],
+            alpn => [<<"h3">>],
+            protocol => tcp
+        }
+    ),
     ok = masque:send(TcpSess, <<"tcp data">>),
-    receive {masque_data, TcpSess, <<"tcp data">>} -> ok
-    after 5000 -> ct:fail("tcp echo failed") end,
+    receive
+        {masque_data, TcpSess, <<"tcp data">>} -> ok
+    after 5000 -> ct:fail("tcp echo failed")
+    end,
     %% UDP tunnel on the same listener
-    {ok, UdpSess} = masque:connect(ProxyURI,
-                                   {<<"127.0.0.1">>, UdpPort},
-                                   #{verify => verify_none,
-                                     transports => [h3],
-                                     alpn => [<<"h3">>],
-                                     protocol => udp}),
+    {ok, UdpSess} = masque:connect(
+        ProxyURI,
+        {<<"127.0.0.1">>, UdpPort},
+        #{
+            verify => verify_none,
+            transports => [h3],
+            alpn => [<<"h3">>],
+            protocol => udp
+        }
+    ),
     ok = masque:send(UdpSess, <<"udp data">>),
-    receive {masque_data, UdpSess, <<"udp data">>} -> ok
-    after 5000 -> ct:fail("udp echo failed") end,
+    receive
+        {masque_data, UdpSess, <<"udp data">>} -> ok
+    after 5000 -> ct:fail("udp echo failed")
+    end,
     ok = masque:close(TcpSess),
     ok = masque:close(UdpSess).
 
@@ -1121,13 +1379,18 @@ tcp_chain_round_trip(Config) ->
     TcpPort = ?config(tcp_port, Config),
     IngressPort = maps:get(port, Ingress),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(IngressPort)]),
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {<<"127.0.0.1">>, TcpPort},
-                                #{verify => verify_none,
-                                  transports => [h3],
-                                  alpn => [<<"h3">>],
-                                  protocol => tcp}),
+        ["https://localhost:", integer_to_list(IngressPort)]
+    ),
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {<<"127.0.0.1">>, TcpPort},
+        #{
+            verify => verify_none,
+            transports => [h3],
+            alpn => [<<"h3">>],
+            protocol => tcp
+        }
+    ),
     Payload = <<"tcp chain ping">>,
     ok = masque:send(Sess, Payload),
     receive
@@ -1141,14 +1404,19 @@ tcp_chain_round_trip(Config) ->
 collect_tcp_bytes(Sess, Expected, Timeout) ->
     collect_tcp_bytes(Sess, Expected, Timeout, <<>>).
 
-collect_tcp_bytes(_Sess, Expected, _Timeout, Acc)
-  when byte_size(Acc) >= Expected ->
+collect_tcp_bytes(_Sess, Expected, _Timeout, Acc) when
+    byte_size(Acc) >= Expected
+->
     Acc;
 collect_tcp_bytes(Sess, Expected, Timeout, Acc) ->
     case masque:recv(Sess, Timeout) of
         {ok, Chunk} ->
-            collect_tcp_bytes(Sess, Expected, Timeout,
-                              <<Acc/binary, Chunk/binary>>);
+            collect_tcp_bytes(
+                Sess,
+                Expected,
+                Timeout,
+                <<Acc/binary, Chunk/binary>>
+            );
         {error, timeout} ->
             Acc
     end.
@@ -1158,9 +1426,12 @@ collect_tcp_bytes(Sess, Expected, Timeout, Acc) ->
 %%====================================================================
 
 start_tcp_echo() ->
-    {ok, LSock} = gen_tcp:listen(0, [binary, {active, true},
-                                     {ip, {127,0,0,1}},
-                                     {reuseaddr, true}]),
+    {ok, LSock} = gen_tcp:listen(0, [
+        binary,
+        {active, true},
+        {ip, {127, 0, 0, 1}},
+        {reuseaddr, true}
+    ]),
     {ok, LPort} = inet:port(LSock),
     Pid = spawn(fun() -> tcp_echo_accept_loop(LSock) end),
     ok = gen_tcp:controlling_process(LSock, Pid),

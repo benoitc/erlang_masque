@@ -43,8 +43,16 @@
 -module(masque_chain_handler).
 -behaviour(masque_handler).
 
--export([accept/1, init/2, handle_packet/2, handle_data/2,
-         handle_capsule/3, handle_eof/1, handle_info/2, terminate/2]).
+-export([
+    accept/1,
+    init/2,
+    handle_packet/2,
+    handle_data/2,
+    handle_capsule/3,
+    handle_eof/1,
+    handle_info/2,
+    terminate/2
+]).
 -export([handle_ip_packet/2]).
 
 -ifdef(TEST).
@@ -59,9 +67,10 @@
 }).
 
 -ifdef(TEST).
-test_state(Upstream, Protocol)
-  when is_pid(Upstream),
-       Protocol =:= udp orelse Protocol =:= tcp orelse Protocol =:= ip ->
+test_state(Upstream, Protocol) when
+    is_pid(Upstream),
+    Protocol =:= udp orelse Protocol =:= tcp orelse Protocol =:= ip
+->
     #state{upstream = Upstream, protocol = Protocol}.
 -endif.
 
@@ -74,38 +83,56 @@ accept(#{protocol := ip, ip_target := Target, ip_ipproto := IPProto} = Req) ->
     Opts = maps:get(handler_opts, Req, #{}),
     AllowFun = maps:get(allow, Opts, fun(_) -> true end),
     case AllowFun({Target, IPProto}) of
-        true  -> accept;
+        true -> accept;
         false -> {reject, forbidden}
     end;
 accept(#{target_host := Host, target_port := Port} = Req) ->
     Opts = maps:get(handler_opts, Req, #{}),
     AllowFun = maps:get(allow, Opts, fun(_) -> true end),
     case AllowFun({Host, Port}) of
-        true  -> accept;
+        true -> accept;
         false -> {reject, forbidden}
     end.
 
 -spec init(masque_handler:req(), map()) -> {ok, #state{}} | {stop, term()}.
-init(#{protocol := ip, ip_target := Target,
-       ip_ipproto := IPProto} = _Req, Opts) ->
+init(
+    #{
+        protocol := ip,
+        ip_target := Target,
+        ip_ipproto := IPProto
+    } = _Req,
+    Opts
+) ->
     UpstreamURI = maps:get(upstream_proxy, Opts),
     UpstreamOpts = maps:get(upstream_opts, Opts, #{verify => verify_none}),
     Timeout = maps:get(upstream_timeout, Opts, 5000),
-    ConnOpts = UpstreamOpts#{timeout => Timeout, owner => self(),
-                              protocol => ip},
+    ConnOpts = UpstreamOpts#{
+        timeout => Timeout,
+        owner => self(),
+        protocol => ip
+    },
     case masque:connect(UpstreamURI, {Target, IPProto}, ConnOpts) of
         {ok, Sess} ->
             {ok, #state{upstream = Sess, protocol = ip}};
         {error, Reason} ->
             {stop, {resolution_failed, {upstream, Reason}}}
     end;
-init(#{target_host := Host, target_port := Port,
-       protocol := Proto} = _Req, Opts) ->
+init(
+    #{
+        target_host := Host,
+        target_port := Port,
+        protocol := Proto
+    } = _Req,
+    Opts
+) ->
     UpstreamURI = maps:get(upstream_proxy, Opts),
     UpstreamOpts = maps:get(upstream_opts, Opts, #{verify => verify_none}),
     Timeout = maps:get(upstream_timeout, Opts, 5000),
-    ConnOpts = UpstreamOpts#{timeout => Timeout, owner => self(),
-                              protocol => Proto},
+    ConnOpts = UpstreamOpts#{
+        timeout => Timeout,
+        owner => self(),
+        protocol => Proto
+    },
     case masque:connect(UpstreamURI, {Host, Port}, ConnOpts) of
         {ok, Sess} ->
             {ok, #state{upstream = Sess, protocol = Proto}};
@@ -135,22 +162,41 @@ handle_capsule(Type, Value, #state{upstream = Sess} = State) ->
 
 -spec handle_eof(#state{}) -> {ok, #state{}} | {stop, term(), #state{}}.
 handle_eof(#state{upstream = Sess} = State) ->
-    _ = (try masque:shutdown_write(Sess) catch _:_ -> ok end),
+    _ =
+        (try
+            masque:shutdown_write(Sess)
+        catch
+            _:_ -> ok
+        end),
     {ok, State}.
 
 -spec handle_info(term(), #state{}) ->
     {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
-handle_info({masque_data, Sess, Data}, #state{upstream = Sess,
-                                              protocol = udp} = State) ->
+handle_info(
+    {masque_data, Sess, Data},
+    #state{
+        upstream = Sess,
+        protocol = udp
+    } = State
+) ->
     {ok, State, [{send, Data}]};
-handle_info({masque_data, Sess, Data}, #state{upstream = Sess,
-                                              protocol = tcp} = State) ->
+handle_info(
+    {masque_data, Sess, Data},
+    #state{
+        upstream = Sess,
+        protocol = tcp
+    } = State
+) ->
     {ok, State, [{send_data, Data}]};
-handle_info({masque_ip_packet, Sess, Packet},
-            #state{upstream = Sess, protocol = ip} = State) ->
+handle_info(
+    {masque_ip_packet, Sess, Packet},
+    #state{upstream = Sess, protocol = ip} = State
+) ->
     {ok, State, [{send_ip_packet, Packet}]};
-handle_info({masque_address_assign, Sess, Entries},
-            #state{upstream = Sess, protocol = ip} = State) ->
+handle_info(
+    {masque_address_assign, Sess, Entries},
+    #state{upstream = Sess, protocol = ip} = State
+) ->
     %% Only unprompted ADDRESS_ASSIGN (request_id 0) is forwarded
     %% safely through the chain today; prompted entries carry the
     %% upstream's request_id which does not match the downstream
@@ -161,11 +207,13 @@ handle_info({masque_address_assign, Sess, Entries},
     %% follow-up mentioned in the module docstring.
     Unprompted = [E || E <- Entries, element(2, E) =:= 0],
     case Unprompted of
-        []     -> {ok, State};
+        [] -> {ok, State};
         _Other -> {ok, State, [{assign, Unprompted}]}
     end;
-handle_info({masque_route_advertisement, Sess, Routes},
-            #state{upstream = Sess, protocol = ip} = State) ->
+handle_info(
+    {masque_route_advertisement, Sess, Routes},
+    #state{upstream = Sess, protocol = ip} = State
+) ->
     {ok, State, [{advertise, Routes}]};
 handle_info({masque_capsule, Sess, Type, Value}, #state{upstream = Sess} = State) ->
     {ok, State, [{send_capsule, Type, Value}]};

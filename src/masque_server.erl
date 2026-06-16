@@ -35,14 +35,24 @@
 -type listener_opts() :: masque:listener_opts().
 
 -type h3_handler_fun() ::
-    fun((Conn :: pid(), StreamId :: non_neg_integer(),
-         Method :: binary(), Path :: binary(),
-         Headers :: [{binary(), binary()}]) -> any()).
+    fun(
+        (
+            Conn :: pid(),
+            StreamId :: non_neg_integer(),
+            Method :: binary(),
+            Path :: binary(),
+            Headers :: [{binary(), binary()}]
+        ) -> any()
+    ).
 
 -type connection_handler_fun() :: fun((pid()) -> map()).
 
--export_type([listener_name/0, listener_opts/0,
-              h3_handler_fun/0, connection_handler_fun/0]).
+-export_type([
+    listener_name/0,
+    listener_opts/0,
+    h3_handler_fun/0,
+    connection_handler_fun/0
+]).
 
 %%====================================================================
 %% API
@@ -61,8 +71,10 @@ start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
     persistent_term:erase({masque_drain, Name}),
     Opts = defaults(Opts0),
     Port = maps:get(port, Opts),
-    #{handler := Handler,
-      connection_handler := ConnectionHandler} =
+    #{
+        handler := Handler,
+        connection_handler := ConnectionHandler
+    } =
         h3_handlers(Opts#{drain_key => Name}),
     ServerOpts = #{
         cert => maps:get(cert, Opts),
@@ -85,7 +97,7 @@ build_quic_opts(Opts) ->
     %% SO_REUSEPORT lets the OS spread incoming packets across N
     %% listener processes for kernel-level scaling.
     case maps:get(reuseport, Opts, false) of
-        true  -> Base#{reuseport => true};
+        true -> Base#{reuseport => true};
         false -> Base
     end.
 
@@ -120,52 +132,80 @@ stop_listener(Name) ->
 %% (e.g. WebTransport) is not supported in v0.1; run those on separate
 %% listeners.
 -spec h3_handlers(map()) ->
-    #{handler := h3_handler_fun(),
-      connection_handler := connection_handler_fun()}.
+    #{
+        handler := h3_handler_fun(),
+        connection_handler := connection_handler_fun()
+    }.
 h3_handlers(Opts0) ->
     Opts = defaults(Opts0),
     UdpTemplate = maps:get(uri_template, Opts),
     TcpTemplate = maps:get(tcp_uri_template, Opts),
-    IpTemplate  = maps:get(ip_uri_template, Opts),
-    UdpHandler  = maps:get(handler, Opts),
-    TcpHandler  = maps:get(tcp_handler, Opts),
-    IpHandler   = maps:get(ip_handler, Opts),
+    IpTemplate = maps:get(ip_uri_template, Opts),
+    UdpHandler = maps:get(handler, Opts),
+    TcpHandler = maps:get(tcp_handler, Opts),
+    IpHandler = maps:get(ip_handler, Opts),
     BindHandler = maps:get(bind_handler, Opts),
-    AcceptBind  = maps:get(accept_bind, Opts),
-    Resolver    = maps:get(resolver, Opts, fun default_resolver/1),
+    AcceptBind = maps:get(accept_bind, Opts),
+    Resolver = maps:get(resolver, Opts, fun default_resolver/1),
     %% Lift IP-scoped listener options into handler_opts so the
     %% default IP handler (and user handlers that follow the same
     %% convention) see them without callers having to duplicate.
-    IpExtra = maps:with([address_pool, routes, mtu,
-                          resolver, allow, family, allow_private,
-                          connect_timeout, socket_opts], Opts),
+    IpExtra = maps:with(
+        [
+            address_pool,
+            routes,
+            mtu,
+            resolver,
+            allow,
+            family,
+            allow_private,
+            connect_timeout,
+            socket_opts
+        ],
+        Opts
+    ),
     %% Same for bind-scoped opts.
-    BindExtra = maps:with([bind_address, bind_port, bind_socket_opts,
-                            public_addresses, public_address_fun,
-                            peer_filter_fun, scrub_fun, allow_private,
-                            allow_loopback,
-                            max_compression_contexts,
-                            max_compression_contexts_in,
-                            max_compression_contexts_out,
-                            max_pending_compression_responses], Opts),
+    BindExtra = maps:with(
+        [
+            bind_address,
+            bind_port,
+            bind_socket_opts,
+            public_addresses,
+            public_address_fun,
+            peer_filter_fun,
+            scrub_fun,
+            allow_private,
+            allow_loopback,
+            max_compression_contexts,
+            max_compression_contexts_in,
+            max_compression_contexts_out,
+            max_pending_compression_responses
+        ],
+        Opts
+    ),
     UserHOpts = maps:get(handler_opts, Opts, #{}),
     HandlerOpts = maps:merge(maps:merge(IpExtra, BindExtra), UserHOpts),
-    Fallback    = maps:get(fallback, Opts, undefined),
+    Fallback = maps:get(fallback, Opts, undefined),
     DrainKey = maps:get(drain_key, Opts, undefined),
-    Dispatch = #{udp_template => UdpTemplate, tcp_template => TcpTemplate,
-                 ip_template  => IpTemplate,
-                 udp_handler => UdpHandler, tcp_handler => TcpHandler,
-                 ip_handler  => IpHandler,
-                 bind_handler => BindHandler,
-                 accept_bind => AcceptBind,
-                 resolver    => Resolver,
-                 handler_opts => HandlerOpts, fallback => Fallback,
-                 name => DrainKey},
+    Dispatch = #{
+        udp_template => UdpTemplate,
+        tcp_template => TcpTemplate,
+        ip_template => IpTemplate,
+        udp_handler => UdpHandler,
+        tcp_handler => TcpHandler,
+        ip_handler => IpHandler,
+        bind_handler => BindHandler,
+        accept_bind => AcceptBind,
+        resolver => Resolver,
+        handler_opts => HandlerOpts,
+        fallback => Fallback,
+        name => DrainKey
+    },
     MaxTunnels = maps:get(max_tunnels_per_connection, Opts, 0),
     ConnectionHandler = fun(_ConnPid) ->
         {ok, Router} = masque_server_connection:start_link(MaxTunnels),
         #{
-            owner   => Router,
+            owner => Router,
             handler => make_dispatch_fun(Dispatch, Router),
             h3_datagram_enabled => true
         }
@@ -181,14 +221,14 @@ h3_handlers(Opts0) ->
 
 defaults(Opts) ->
     D = #{
-        uri_template     => ?MASQUE_DEFAULT_URI_TEMPLATE,
+        uri_template => ?MASQUE_DEFAULT_URI_TEMPLATE,
         tcp_uri_template => ?MASQUE_DEFAULT_TCP_URI_TEMPLATE,
-        ip_uri_template  => ?MASQUE_DEFAULT_IP_URI_PATH_PATTERN,
-        handler          => masque_udp_proxy_handler,
-        tcp_handler      => masque_tcp_proxy_handler,
-        ip_handler       => masque_ip_proxy_handler,
-        bind_handler     => masque_udp_bind_proxy_handler,
-        accept_bind      => false
+        ip_uri_template => ?MASQUE_DEFAULT_IP_URI_PATH_PATTERN,
+        handler => masque_udp_proxy_handler,
+        tcp_handler => masque_tcp_proxy_handler,
+        ip_handler => masque_ip_proxy_handler,
+        bind_handler => masque_udp_bind_proxy_handler,
+        accept_bind => false
     },
     maps:merge(D, Opts).
 
@@ -196,14 +236,18 @@ defaults(Opts) ->
 default_resolver(Host) when is_binary(Host) ->
     default_resolver(binary_to_list(Host));
 default_resolver(Host) when is_list(Host) ->
-    V4 = case inet_res:lookup(Host, in, a) of
-             [] -> []; Xs -> Xs
-         end,
-    V6 = case inet_res:lookup(Host, in, aaaa) of
-             [] -> []; Ys -> Ys
-         end,
+    V4 =
+        case inet_res:lookup(Host, in, a) of
+            [] -> [];
+            Xs -> Xs
+        end,
+    V6 =
+        case inet_res:lookup(Host, in, aaaa) of
+            [] -> [];
+            Ys -> Ys
+        end,
     case V4 ++ V6 of
-        []    -> {error, nxdomain};
+        [] -> {error, nxdomain};
         Addrs -> {ok, Addrs}
     end.
 
@@ -219,8 +263,15 @@ merged_settings(Opts) ->
 
 make_dispatch_fun(Dispatch, Router) ->
     fun(Conn, StreamId, Method, Path, Headers) ->
-        dispatch_request(Conn, StreamId, Method, Path, Headers,
-                         Dispatch, Router)
+        dispatch_request(
+            Conn,
+            StreamId,
+            Method,
+            Path,
+            Headers,
+            Dispatch,
+            Router
+        )
     end.
 
 dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
@@ -228,37 +279,66 @@ dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
         true ->
             reject(Conn, StreamId, overload);
         false ->
-            dispatch_request_1(Conn, StreamId, Method, Path, Headers,
-                               Dispatch, Router)
+            dispatch_request_1(
+                Conn,
+                StreamId,
+                Method,
+                Path,
+                Headers,
+                Dispatch,
+                Router
+            )
     end.
 
 dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
-    #{udp_template := UdpTpl, tcp_template := TcpTpl,
-      ip_template  := IpTpl,
-      udp_handler := UdpHandler, tcp_handler := TcpHandler,
-      ip_handler  := IpHandler,
-      bind_handler := BindHandler,
-      accept_bind  := AcceptBind,
-      resolver    := Resolver,
-      handler_opts := HandlerOpts, fallback := Fallback} = Dispatch,
-    case validate(Method, Path, Headers, UdpTpl, TcpTpl, IpTpl,
-                  AcceptBind) of
+    #{
+        udp_template := UdpTpl,
+        tcp_template := TcpTpl,
+        ip_template := IpTpl,
+        udp_handler := UdpHandler,
+        tcp_handler := TcpHandler,
+        ip_handler := IpHandler,
+        bind_handler := BindHandler,
+        accept_bind := AcceptBind,
+        resolver := Resolver,
+        handler_opts := HandlerOpts,
+        fallback := Fallback
+    } = Dispatch,
+    case
+        validate(
+            Method,
+            Path,
+            Headers,
+            UdpTpl,
+            TcpTpl,
+            IpTpl,
+            AcceptBind
+        )
+    of
         {ok, Req0} ->
             Protocol = maps:get(protocol, Req0),
-            HandlerMod = case Protocol of
-                udp      -> UdpHandler;
-                tcp      -> TcpHandler;
-                ip       -> IpHandler;
-                udp_bind -> BindHandler
-            end,
+            HandlerMod =
+                case Protocol of
+                    udp -> UdpHandler;
+                    tcp -> TcpHandler;
+                    ip -> IpHandler;
+                    udp_bind -> BindHandler
+                end,
             Req1 = add_peer_info(Conn, Req0),
             Req2 = Req1#{handler_opts => HandlerOpts},
             case resolve_target(Protocol, Req2, Resolver) of
                 {ok, Req3} ->
                     case accept_request(HandlerMod, Req3) of
                         accept ->
-                            spawn_session(Conn, StreamId, Router, Protocol,
-                                          HandlerMod, HandlerOpts, Req3);
+                            spawn_session(
+                                Conn,
+                                StreamId,
+                                Router,
+                                Protocol,
+                                HandlerMod,
+                                HandlerOpts,
+                                Req3
+                            );
                         {reject, Reason} ->
                             reject(Conn, StreamId, Reason);
                         {reject, Reason, Extra} when is_list(Extra) ->
@@ -281,16 +361,17 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
 %% handler's `accept/1' can apply SSRF policy on the real addresses
 %% and the session's `init/2' gets them ready to emit in the first
 %% ROUTE_ADVERTISEMENT.
-resolve_target(ip, #{ip_target := Target} = Req, Resolver)
-  when is_binary(Target) ->
+resolve_target(ip, #{ip_target := Target} = Req, Resolver) when
+    is_binary(Target)
+->
     %% Binary ip_target is a hostname (IPs parse into tuples).
     case Resolver(Target) of
         {ok, Addrs} -> {ok, Req#{resolved_addresses => Addrs}};
-        {error, _}  -> {error, resolution_failed}
+        {error, _} -> {error, resolution_failed}
     end;
-resolve_target(ip, #{ip_target := {_,_,_,_} = A} = Req, _Resolver) ->
+resolve_target(ip, #{ip_target := {_, _, _, _} = A} = Req, _Resolver) ->
     {ok, Req#{resolved_addresses => [A]}};
-resolve_target(ip, #{ip_target := {_,_,_,_,_,_,_,_} = A} = Req, _Resolver) ->
+resolve_target(ip, #{ip_target := {_, _, _, _, _, _, _, _} = A} = Req, _Resolver) ->
     {ok, Req#{resolved_addresses => [A]}};
 resolve_target(ip, Req, _Resolver) ->
     {ok, Req#{resolved_addresses => []}};
@@ -300,9 +381,16 @@ resolve_target(_, Req, _Resolver) ->
 spawn_session(Conn, StreamId, undefined, _Proto, _Handler, _HOpts, _Req) ->
     reject(Conn, StreamId, resolution_failed);
 spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req) ->
-    Args = #{conn => Conn, stream_id => StreamId, router => Router,
-             protocol => Protocol, transport => h3,
-             handler => Handler, handler_opts => HOpts, req => Req},
+    Args = #{
+        conn => Conn,
+        stream_id => StreamId,
+        router => Router,
+        protocol => Protocol,
+        transport => h3,
+        handler => Handler,
+        handler_opts => HOpts,
+        req => Req
+    },
     try masque_server_connection:start_session(Router, Args) of
         {ok, _Pid} -> ok;
         {error, Reason} -> reject(Conn, StreamId, map_init_error(Reason))
@@ -319,19 +407,20 @@ spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req) ->
 
 add_peer_info(Conn, Req) ->
     QuicConn = quic_h3:get_quic_conn(Conn),
-    Req1 = case quic:peername(QuicConn) of
-        {ok, PeerAddr} -> Req#{peer => PeerAddr};
-        _              -> Req
-    end,
+    Req1 =
+        case quic:peername(QuicConn) of
+            {ok, PeerAddr} -> Req#{peer => PeerAddr};
+            _ -> Req
+        end,
     case quic:peercert(QuicConn) of
         {ok, Cert} -> Req1#{peer_cert => Cert};
-        _          -> Req1
+        _ -> Req1
     end.
 
-map_init_error(too_many_tunnels)        -> overload;
+map_init_error(too_many_tunnels) -> overload;
 map_init_error({resolution_failed, _}) -> resolution_failed;
-map_init_error({reject, Err})          -> Err;
-map_init_error(_)                      -> resolution_failed.
+map_init_error({reject, Err}) -> Err;
+map_init_error(_) -> resolution_failed.
 
 %% `AcceptBind' is the listener-level switch for Connect-UDP-Bind
 %% (draft-ietf-masque-connect-udp-listen-11). When true, the
@@ -339,8 +428,15 @@ map_init_error(_)                      -> resolution_failed.
 %% `Connect-UDP-Bind' request header and routes to the bind matcher
 %% on `?1'. When false (the default), the header is ignored and
 %% legacy CONNECT-UDP behaviour is unchanged.
-validate(Method, Path, Headers, UdpTemplate, TcpTemplate, IpTemplate,
-         AcceptBind) ->
+validate(
+    Method,
+    Path,
+    Headers,
+    UdpTemplate,
+    TcpTemplate,
+    IpTemplate,
+    AcceptBind
+) ->
     case Method of
         <<"CONNECT">> ->
             Protocol = header(<<":protocol">>, Headers),
@@ -368,13 +464,16 @@ match_udp_or_bind(Path, Headers, Template) ->
     case masque_uri_udp_bind:parse_bind_header(Headers) of
         bind ->
             case masque_uri_udp_bind:match(Template, Path) of
-                {ok, #{target_host := Host, target_port := Port,
-                       bind        := Scope}} ->
-                    case {header(<<":scheme">>, Headers),
-                          header(<<":authority">>, Headers)} of
-                        {Scheme, Authority}
-                          when Scheme =/= undefined,
-                               Authority =/= undefined ->
+                {ok, #{
+                    target_host := Host,
+                    target_port := Port,
+                    bind := Scope
+                }} ->
+                    case {header(<<":scheme">>, Headers), header(<<":authority">>, Headers)} of
+                        {Scheme, Authority} when
+                            Scheme =/= undefined,
+                            Authority =/= undefined
+                        ->
                             {ok, #{
                                 method => <<"CONNECT">>,
                                 protocol => udp_bind,
@@ -389,9 +488,12 @@ match_udp_or_bind(Path, Headers, Template) ->
                         _ ->
                             {error, bad_path}
                     end;
-                {error, bad_port} -> {error, bad_port};
-                {error, bad_host} -> {error, bad_host};
-                {error, _}        -> {error, bad_path}
+                {error, bad_port} ->
+                    {error, bad_port};
+                {error, bad_host} ->
+                    {error, bad_host};
+                {error, _} ->
+                    {error, bad_path}
             end;
         _ ->
             match_path(Path, Headers, Template, udp)
@@ -403,10 +505,11 @@ match_path(Path, Headers, Template, Protocol) ->
             %% `:scheme' and `:authority' presence is enforced by
             %% `quic_h3' for Extended CONNECT; we surface whatever it
             %% delivers without silently substituting defaults.
-            case {header(<<":scheme">>, Headers),
-                  header(<<":authority">>, Headers)} of
-                {Scheme, Authority} when Scheme =/= undefined,
-                                          Authority =/= undefined ->
+            case {header(<<":scheme">>, Headers), header(<<":authority">>, Headers)} of
+                {Scheme, Authority} when
+                    Scheme =/= undefined,
+                    Authority =/= undefined
+                ->
                     {ok, #{
                         method => <<"CONNECT">>,
                         protocol => Protocol,
@@ -433,11 +536,11 @@ match_ip_path(Path, Headers, Template) ->
         {ok, T} ->
             case masque_uri_ip:match(T, Path) of
                 {ok, #{target := Target, ipproto := IPProto}} ->
-                    case {header(<<":scheme">>, Headers),
-                          header(<<":authority">>, Headers)} of
-                        {Scheme, Authority}
-                          when Scheme =/= undefined,
-                               Authority =/= undefined ->
+                    case {header(<<":scheme">>, Headers), header(<<":authority">>, Headers)} of
+                        {Scheme, Authority} when
+                            Scheme =/= undefined,
+                            Authority =/= undefined
+                        ->
                             {ok, #{
                                 method => <<"CONNECT">>,
                                 protocol => ip,
@@ -451,9 +554,12 @@ match_ip_path(Path, Headers, Template) ->
                         _ ->
                             {error, bad_path}
                     end;
-                {error, bad_target}   -> {error, bad_host};
-                {error, bad_ipproto}  -> {error, bad_port};
-                {error, _}            -> {error, bad_path}
+                {error, bad_target} ->
+                    {error, bad_host};
+                {error, bad_ipproto} ->
+                    {error, bad_port};
+                {error, _} ->
+                    {error, bad_path}
             end;
         {error, _} ->
             {error, bad_path}
@@ -462,7 +568,7 @@ match_ip_path(Path, Headers, Template) ->
 accept_request(HandlerMod, Req) ->
     _ = code:ensure_loaded(HandlerMod),
     case erlang:function_exported(HandlerMod, accept, 1) of
-        true  -> HandlerMod:accept(Req);
+        true -> HandlerMod:accept(Req);
         false -> masque_handler:default_accept(Req)
     end.
 
@@ -503,17 +609,17 @@ proxy_status_field(Reason) ->
     Error = proxy_status_error(Reason),
     <<"masque; error=", Error/binary>>.
 
-proxy_status_error(bad_method)        -> <<"http_protocol_error">>;
-proxy_status_error(bad_protocol)      -> <<"http_protocol_error">>;
-proxy_status_error(bad_path)          -> <<"http_protocol_error">>;
-proxy_status_error(bad_port)          -> <<"http_protocol_error">>;
-proxy_status_error(bad_host)          -> <<"http_protocol_error">>;
+proxy_status_error(bad_method) -> <<"http_protocol_error">>;
+proxy_status_error(bad_protocol) -> <<"http_protocol_error">>;
+proxy_status_error(bad_path) -> <<"http_protocol_error">>;
+proxy_status_error(bad_port) -> <<"http_protocol_error">>;
+proxy_status_error(bad_host) -> <<"http_protocol_error">>;
 proxy_status_error(resolution_failed) -> <<"dns_error">>;
-proxy_status_error(upstream_timeout)  -> <<"connection_timeout">>;
-proxy_status_error(forbidden)         -> <<"destination_ip_prohibited">>;
-proxy_status_error(loop_detected)     -> <<"proxy_loop_detected">>;
-proxy_status_error(overload)          -> <<"proxy_internal_error">>;
-proxy_status_error(_)                 -> <<"proxy_internal_error">>.
+proxy_status_error(upstream_timeout) -> <<"connection_timeout">>;
+proxy_status_error(forbidden) -> <<"destination_ip_prohibited">>;
+proxy_status_error(loop_detected) -> <<"proxy_loop_detected">>;
+proxy_status_error(overload) -> <<"proxy_internal_error">>;
+proxy_status_error(_) -> <<"proxy_internal_error">>.
 
 header(Name, Headers) ->
     header(Name, Headers, undefined).
@@ -521,5 +627,5 @@ header(Name, Headers) ->
 header(Name, Headers, Default) ->
     case lists:keyfind(Name, 1, Headers) of
         {_, V} -> V;
-        false  -> Default
+        false -> Default
     end.

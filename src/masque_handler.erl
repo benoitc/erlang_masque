@@ -48,15 +48,14 @@
 
 -type accept_result() ::
     accept
-  | {reject, masque_errors:handshake_error()}
-  %% Rejection with extra HTTP response headers. Useful for schemes
-  %% that require a challenge header on 401 (Privacy Pass via
-  %% `WWW-Authenticate: PrivateToken ...', RFC 9112 `Basic' / `Bearer'
-  %% challenges, rate-limit `Retry-After' hints). Duplicate keys with
-  %% the library-set headers (`content-type', `content-length',
-  %% `proxy-status') take the caller's value.
-  | {reject, masque_errors:handshake_error(),
-     [{binary(), binary()}]}.
+    | {reject, masque_errors:handshake_error()}
+    %% Rejection with extra HTTP response headers. Useful for schemes
+    %% that require a challenge header on 401 (Privacy Pass via
+    %% `WWW-Authenticate: PrivateToken ...', RFC 9112 `Basic' / `Bearer'
+    %% challenges, rate-limit `Retry-After' hints). Duplicate keys with
+    %% the library-set headers (`content-type', `content-length',
+    %% `proxy-status') take the caller's value.
+    | {reject, masque_errors:handshake_error(), [{binary(), binary()}]}.
 
 %%====================================================================
 %% Behaviour
@@ -64,10 +63,14 @@
 
 -callback accept(req()) -> accept_result().
 -callback init(req(), term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term()}.
--callback handle_packet(binary(), term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
--callback handle_data(binary(), term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
--callback handle_capsule(non_neg_integer(), binary(), term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
--callback handle_info(term(), term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
+-callback handle_packet(binary(), term()) ->
+    {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
+-callback handle_data(binary(), term()) ->
+    {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
+-callback handle_capsule(non_neg_integer(), binary(), term()) ->
+    {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
+-callback handle_info(term(), term()) ->
+    {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
 -callback handle_eof(term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
 -callback terminate(term(), term()) -> term().
 
@@ -84,11 +87,20 @@
 -callback handle_route_advertisement([term()], term()) ->
     {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
 
--optional_callbacks([accept/1, init/2, handle_packet/2, handle_data/2,
-                     handle_capsule/3, handle_info/2, handle_eof/1,
-                     terminate/2,
-                     handle_ip_packet/2, handle_address_request/2,
-                     handle_address_assign/2, handle_route_advertisement/2]).
+-optional_callbacks([
+    accept/1,
+    init/2,
+    handle_packet/2,
+    handle_data/2,
+    handle_capsule/3,
+    handle_info/2,
+    handle_eof/1,
+    terminate/2,
+    handle_ip_packet/2,
+    handle_address_request/2,
+    handle_address_assign/2,
+    handle_route_advertisement/2
+]).
 
 %%====================================================================
 %% API

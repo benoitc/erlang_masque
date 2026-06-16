@@ -9,43 +9,58 @@
 -include_lib("stdlib/include/assert.hrl").
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
--export([h1_wins_when_h3_and_h2_unreachable/1,
-         h2_wins_before_h1_when_h3_unreachable/1]).
+-export([
+    h1_wins_when_h3_and_h2_unreachable/1,
+    h2_wins_before_h1_when_h3_unreachable/1
+]).
 
 all() ->
-    [h1_wins_when_h3_and_h2_unreachable,
-     h2_wins_before_h1_when_h3_unreachable].
+    [
+        h1_wins_when_h3_and_h2_unreachable,
+        h2_wins_before_h1_when_h3_unreachable
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(masque),
     {ok, Certs} = masque_test_helpers:generate_certs(),
     %% h1 listener - this is what we're racing to.
-    H1Name = list_to_atom("masque_h1_race_" ++
-                          integer_to_list(erlang:unique_integer([positive]))),
+    H1Name = list_to_atom(
+        "masque_h1_race_" ++
+            integer_to_list(erlang:unique_integer([positive]))
+    ),
     Parent = self(),
     H1Keeper = erlang:spawn(fun() -> h1_keeper(Parent, H1Name, Certs) end),
-    H1Port = receive
-        {H1Keeper, started, P} -> P
-    after 5000 ->
-        ct:fail(h1_keeper_start_timeout)
-    end,
+    H1Port =
+        receive
+            {H1Keeper, started, P} -> P
+        after 5000 ->
+            ct:fail(h1_keeper_start_timeout)
+        end,
     %% h2 listener - used only by the second case (h2 wins).
-    H2Name = list_to_atom("masque_h2_race_" ++
-                          integer_to_list(erlang:unique_integer([positive]))),
+    H2Name = list_to_atom(
+        "masque_h2_race_" ++
+            integer_to_list(erlang:unique_integer([positive]))
+    ),
     H2Keeper = erlang:spawn(fun() -> h2_keeper(Parent, H2Name, Certs) end),
-    H2Port = receive
-        {H2Keeper, started, P2} -> P2
-    after 5000 ->
-        ct:fail(h2_keeper_start_timeout)
-    end,
+    H2Port =
+        receive
+            {H2Keeper, started, P2} -> P2
+        after 5000 ->
+            ct:fail(h2_keeper_start_timeout)
+        end,
     %% Reserve two ports that have nothing listening: bind and close.
     DeadH3Port = reserve_unused_port(),
     DeadH2Port = reserve_unused_port(),
-    [{certs, Certs},
-     {h1_keeper, H1Keeper}, {h1_port, H1Port},
-     {h2_keeper, H2Keeper}, {h2_port, H2Port},
-     {dead_h3_port, DeadH3Port},
-     {dead_h2_port, DeadH2Port} | Config].
+    [
+        {certs, Certs},
+        {h1_keeper, H1Keeper},
+        {h1_port, H1Port},
+        {h2_keeper, H2Keeper},
+        {h2_port, H2Port},
+        {dead_h3_port, DeadH3Port},
+        {dead_h2_port, DeadH2Port}
+        | Config
+    ].
 
 end_per_suite(Config) ->
     ?config(h1_keeper, Config) ! stop,
@@ -61,7 +76,7 @@ h1_keeper(Parent, Name, Certs) ->
     Opts = #{
         port => 0,
         cert => maps:get(cert_file, Certs),
-        key  => maps:get(key_file, Certs),
+        key => maps:get(key_file, Certs),
         handler => masque_echo_handler
     },
     case masque:start_listener_h1(Name, Opts) of
@@ -76,7 +91,7 @@ h2_keeper(Parent, Name, Certs) ->
     Opts = #{
         port => 0,
         cert => maps:get(cert_file, Certs),
-        key  => maps:get(key_file, Certs),
+        key => maps:get(key_file, Certs),
         handler => masque_echo_handler
     },
     case masque:start_listener_h2(Name, Opts) of
@@ -90,13 +105,19 @@ h2_keeper(Parent, Name, Certs) ->
 
 wait_stop(Name, h1) ->
     receive
-        stop -> _ = masque:stop_listener_h1(Name), ok;
-        _    -> wait_stop(Name, h1)
+        stop ->
+            _ = masque:stop_listener_h1(Name),
+            ok;
+        _ ->
+            wait_stop(Name, h1)
     end;
 wait_stop(Name, h2) ->
     receive
-        stop -> _ = masque:stop_listener_h2(Name), ok;
-        _    -> wait_stop(Name, h2)
+        stop ->
+            _ = masque:stop_listener_h2(Name),
+            ok;
+        _ ->
+            wait_stop(Name, h2)
     end.
 
 reserve_unused_port() ->
@@ -121,12 +142,16 @@ h1_wins_when_h3_and_h2_unreachable(Config) ->
     %% override ports per attempt only via session opts. Our racer uses
     %% a single `proxy' opt for all attempts, so we run with h2 pointed
     %% at dead port and let h3 time out (limited by test `timeout').
-    ProxyURI = iolist_to_binary(["https://127.0.0.1:",
-                                  integer_to_list(H1Port)]),
-    _ = DeadH2Port, _ = DeadH3Port,
+    ProxyURI = iolist_to_binary([
+        "https://127.0.0.1:",
+        integer_to_list(H1Port)
+    ]),
+    _ = DeadH2Port,
+    _ = DeadH3Port,
     Target = {<<"127.0.0.1">>, 5353},
     Opts = #{
-        transports => [h2, h1],  %% drop h3 (QUIC isn't wired in tests)
+        %% drop h3 (QUIC isn't wired in tests)
+        transports => [h2, h1],
         protocol => udp,
         timeout => 3000,
         prefer_timeout_ms => 100,
@@ -153,8 +178,10 @@ h2_wins_before_h1_when_h3_unreachable(Config) ->
     %% observe this here, but the datagram must echo through h2 which
     %% is the only listener on that port).
     H2Port = ?config(h2_port, Config),
-    ProxyURI = iolist_to_binary(["https://127.0.0.1:",
-                                  integer_to_list(H2Port)]),
+    ProxyURI = iolist_to_binary([
+        "https://127.0.0.1:",
+        integer_to_list(H2Port)
+    ]),
     Target = {<<"127.0.0.1">>, 5353},
     Opts = #{
         transports => [h2, h1],

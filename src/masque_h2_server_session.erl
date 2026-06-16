@@ -13,20 +13,25 @@
 
 -export([start_link/1]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 -include("masque.hrl").
 
-
 -record(state, {
-    conn       :: pid(),
-    stream_id  :: non_neg_integer(),
-    handler    :: module(),
-    h_state    :: term(),
-    req        :: map(),
+    conn :: pid(),
+    stream_id :: non_neg_integer(),
+    handler :: module(),
+    h_state :: term(),
+    req :: map(),
     cap_buf = <<>> :: binary(),
-    max_cap    :: pos_integer()
+    max_cap :: pos_integer()
 }).
 
 %%====================================================================
@@ -41,18 +46,35 @@ start_link(Args) ->
 %% gen_server
 %%====================================================================
 
-init(#{conn := Conn, stream_id := StreamId,
-       handler := Handler, handler_opts := HOpts, req := Req}) ->
+init(#{
+    conn := Conn,
+    stream_id := StreamId,
+    handler := Handler,
+    handler_opts := HOpts,
+    req := Req
+}) ->
     process_flag(trap_exit, true),
-    MaxCap = maps:get(max_capsule_size, HOpts,
-                      ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE),
+    MaxCap = maps:get(
+        max_capsule_size,
+        HOpts,
+        ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE
+    ),
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, Actions} ->
-            State0 = #state{conn = Conn, stream_id = StreamId,
-                            handler = Handler, h_state = HState,
-                            req = Req, max_cap = MaxCap},
-            ok = h2:send_response(Conn, StreamId, 200,
-                                  response_headers()),
+            State0 = #state{
+                conn = Conn,
+                stream_id = StreamId,
+                handler = Handler,
+                h_state = HState,
+                req = Req,
+                max_cap = MaxCap
+            },
+            ok = h2:send_response(
+                Conn,
+                StreamId,
+                200,
+                response_headers()
+            ),
             State1 = claim_stream(State0),
             %% If `claim_stream' drained buffered data into `cap_buf',
             %% schedule an immediate drain so capsules don't wait
@@ -63,8 +85,13 @@ init(#{conn := Conn, stream_id := StreamId,
             {stop, Reason}
     end.
 
-claim_stream(#state{conn = Conn, stream_id = StreamId,
-                    cap_buf = Buf} = S) ->
+claim_stream(
+    #state{
+        conn = Conn,
+        stream_id = StreamId,
+        cap_buf = Buf
+    } = S
+) ->
     case h2:set_stream_handler(Conn, StreamId, self()) of
         ok ->
             S;
@@ -90,12 +117,17 @@ handle_call(_Req, _From, S) ->
 handle_cast(_Msg, S) ->
     {noreply, S}.
 
-handle_info({h2, _Conn, {data, StreamId, Bytes, Fin}},
-            #state{stream_id = StreamId, cap_buf = Buf,
-                   max_cap = Max} = S) ->
+handle_info(
+    {h2, _Conn, {data, StreamId, Bytes, Fin}},
+    #state{
+        stream_id = StreamId,
+        cap_buf = Buf,
+        max_cap = Max
+    } = S
+) ->
     New = <<Buf/binary, Bytes/binary>>,
     case byte_size(New) > Max of
-        true  -> reset_and_stop(capsule_buffer_overflow, S);
+        true -> reset_and_stop(capsule_buffer_overflow, S);
         false -> drain_capsules(New, Fin, S)
     end;
 handle_info(flush_cap_buf, #state{cap_buf = Buf} = S) when Buf =/= <<>> ->
@@ -104,31 +136,55 @@ handle_info(flush_cap_buf, S) ->
     {noreply, S};
 handle_info({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
-handle_info({h2, _Conn, {stream_reset, StreamId, _}},
-            #state{stream_id = StreamId} = S) ->
+handle_info(
+    {h2, _Conn, {stream_reset, StreamId, _}},
+    #state{stream_id = StreamId} = S
+) ->
     {stop, peer_reset, S};
 handle_info({h2, _Conn, closed}, S) ->
     {stop, peer_closed, S};
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
-terminate(normal, #state{conn = Conn, stream_id = StreamId,
-                          handler = Handler, h_state = HState}) ->
+terminate(normal, #state{
+    conn = Conn,
+    stream_id = StreamId,
+    handler = Handler,
+    h_state = HState
+}) ->
     masque_h2_server:release_tunnel(Conn),
-    _ = (try h2:send_data(Conn, StreamId, <<>>, true) catch _:_ -> ok end),
+    _ =
+        (try
+            h2:send_data(Conn, StreamId, <<>>, true)
+        catch
+            _:_ -> ok
+        end),
     try_callback(Handler, terminate, [normal, HState]),
     ok;
-terminate(Reason, #state{conn = Conn,
-                          handler = Handler, h_state = HState})
-  when Reason =:= peer_reset;
-       Reason =:= peer_closed ->
+terminate(Reason, #state{
+    conn = Conn,
+    handler = Handler,
+    h_state = HState
+}) when
+    Reason =:= peer_reset;
+    Reason =:= peer_closed
+->
     masque_h2_server:release_tunnel(Conn),
     try_callback(Handler, terminate, [Reason, HState]),
     ok;
-terminate(Reason, #state{conn = Conn, stream_id = StreamId,
-                          handler = Handler, h_state = HState}) ->
+terminate(Reason, #state{
+    conn = Conn,
+    stream_id = StreamId,
+    handler = Handler,
+    h_state = HState
+}) ->
     masque_h2_server:release_tunnel(Conn),
-    _ = (try h2:cancel(Conn, StreamId, protocol_error) catch _:_ -> ok end),
+    _ =
+        (try
+            h2:cancel(Conn, StreamId, protocol_error)
+        catch
+            _:_ -> ok
+        end),
     try_callback(Handler, terminate, [Reason, HState]),
     ok.
 
@@ -156,8 +212,9 @@ drain_capsules(Buf, Fin, S) ->
 
 dispatch_capsule(datagram, Inner, S) ->
     case masque_datagram:decode(Inner) of
-        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}}
-          when byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD ->
+        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} when
+            byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD
+        ->
             dispatch(handle_packet, [UdpBytes], S);
         _ ->
             %% Unknown context-id or oversize: RFC 9298 §5 says drop.
@@ -167,7 +224,12 @@ dispatch_capsule(Type, Inner, S) when is_integer(Type) ->
     dispatch(handle_capsule, [Type, Inner], S).
 
 reset_and_stop(Reason, #state{conn = Conn, stream_id = StreamId} = S) ->
-    _ = (try h2:cancel(Conn, StreamId, protocol_error) catch _:_ -> ok end),
+    _ =
+        (try
+            h2:cancel(Conn, StreamId, protocol_error)
+        catch
+            _:_ -> ok
+        end),
     {stop, Reason, S}.
 
 %%====================================================================
@@ -178,10 +240,10 @@ init_handler(Handler, Req, HOpts) ->
     case exported(Handler, init, 2) of
         true ->
             case safe_apply(Handler, init, [Req, HOpts]) of
-                {ok, HState}          -> {ok, HState, []};
+                {ok, HState} -> {ok, HState, []};
                 {ok, HState, Actions} -> {ok, HState, Actions};
-                {stop, Reason}        -> {stop, Reason};
-                Other                 -> {stop, {bad_init, Other}}
+                {stop, Reason} -> {stop, Reason};
+                Other -> {stop, {bad_init, Other}}
             end;
         false ->
             {ok, undefined, []}
@@ -191,12 +253,16 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
     case exported(Handler, CB, length(Extra) + 1) of
         true ->
             case safe_apply(Handler, CB, Extra ++ [HS]) of
-                {ok, HS2}           -> {noreply, S#state{h_state = HS2}};
-                {ok, HS2, Actions}  -> apply_actions_noreply(
-                                         Actions, S#state{h_state = HS2});
-                {stop, Reason, HS2} -> {stop, Reason,
-                                              S#state{h_state = HS2}};
-                _                   -> {noreply, S}
+                {ok, HS2} ->
+                    {noreply, S#state{h_state = HS2}};
+                {ok, HS2, Actions} ->
+                    apply_actions_noreply(
+                        Actions, S#state{h_state = HS2}
+                    );
+                {stop, Reason, HS2} ->
+                    {stop, Reason, S#state{h_state = HS2}};
+                _ ->
+                    {noreply, S}
             end;
         false ->
             {noreply, S}
@@ -208,30 +274,37 @@ exported(Mod, Fun, Arity) ->
 
 apply_actions(Actions, State) ->
     case do_actions(Actions, State) of
-        {ok, S2}           -> {ok, S2};
-        {stop, Reason, _}  -> {stop, Reason}
+        {ok, S2} -> {ok, S2};
+        {stop, Reason, _} -> {stop, Reason}
     end.
 
 apply_actions_noreply(Actions, State) ->
     case do_actions(Actions, State) of
-        {ok, S2}           -> {noreply, S2};
+        {ok, S2} -> {noreply, S2};
         {stop, Reason, S2} -> {stop, Reason, S2}
     end.
 
-do_actions([], S) -> {ok, S};
+do_actions([], S) ->
+    {ok, S};
 do_actions([{send, Data} | Rest], S) ->
     do_actions([{send, ?MASQUE_CONTEXT_ID_UDP, Data} | Rest], S);
 do_actions([{send, Ctx, Data} | Rest], S) ->
     PayloadSize = iolist_size(Data),
-    case Ctx =:= ?MASQUE_CONTEXT_ID_UDP
-         andalso PayloadSize > ?MASQUE_MAX_UDP_PAYLOAD of
+    case
+        Ctx =:= ?MASQUE_CONTEXT_ID_UDP andalso
+            PayloadSize > ?MASQUE_MAX_UDP_PAYLOAD
+    of
         true ->
             do_actions(Rest, S);
         false ->
             Inner = iolist_to_binary(masque_datagram:encode(Ctx, Data)),
             Capsule = iolist_to_binary(h2_capsule:encode(datagram, Inner)),
-            _ = h2:send_data(S#state.conn, S#state.stream_id,
-                             Capsule, false),
+            _ = h2:send_data(
+                S#state.conn,
+                S#state.stream_id,
+                Capsule,
+                false
+            ),
             do_actions(Rest, S)
     end;
 do_actions([{send_capsule, Type, Value} | Rest], S) ->
@@ -246,18 +319,26 @@ do_actions([_Unknown | Rest], S) ->
     do_actions(Rest, S).
 
 safe_apply(M, F, A) ->
-    try apply(M, F, A)
+    try
+        apply(M, F, A)
     catch
         Class:Reason:Stack ->
             error_logger:error_msg(
                 "masque h2 handler ~p:~p/~p failed: ~p:~p~n~p~n",
-                [M, F, length(A), Class, Reason, Stack]),
+                [M, F, length(A), Class, Reason, Stack]
+            ),
             {stop, {handler_crash, Reason}}
     end.
 
 try_callback(Mod, Fun, Args) ->
     Arity = length(Args),
     case erlang:function_exported(Mod, Fun, Arity) of
-        true  -> (try apply(Mod, Fun, Args) catch _:_ -> ok end);
-        false -> ok
+        true ->
+            (try
+                apply(Mod, Fun, Args)
+            catch
+                _:_ -> ok
+            end);
+        false ->
+            ok
     end.

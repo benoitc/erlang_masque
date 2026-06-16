@@ -15,7 +15,7 @@
 
 -export([resolve/2, resolve/3, resolve/4]).
 
--define(DEFAULT_RESOLVER_IP,   <<"1.1.1.1">>).
+-define(DEFAULT_RESOLVER_IP, <<"1.1.1.1">>).
 -define(DEFAULT_RESOLVER_PORT, 53).
 
 resolve(ProxyURI, Name) ->
@@ -26,9 +26,11 @@ resolve(ProxyURI, Name, ResolverIP) ->
 
 resolve(ProxyURI, Name, ResolverIP, ResolverPort) ->
     {ok, _} = application:ensure_all_started(masque),
-    {ok, Sess} = masque:connect(ProxyURI,
-                                {ResolverIP, ResolverPort},
-                                #{verify => verify_none}),
+    {ok, Sess} = masque:connect(
+        ProxyURI,
+        {ResolverIP, ResolverPort},
+        #{verify => verify_none}
+    ),
     Query = build_dns_query(Name),
     ok = masque:send(Sess, Query),
     Result =
@@ -45,11 +47,10 @@ resolve(ProxyURI, Name, ResolverIP, ResolverPort) ->
 build_dns_query(Name) when is_binary(Name) ->
     TxnId = rand:uniform(65535),
     Header =
-        <<TxnId:16, 1:1, 0:4, 0:1, 0:1, 1:1, 0:1, 0:3, 0:4,
-          1:16, 0:16, 0:16, 0:16>>,
+        <<TxnId:16, 1:1, 0:4, 0:1, 0:1, 1:1, 0:1, 0:3, 0:4, 1:16, 0:16, 0:16, 0:16>>,
     Labels = encode_labels(binary:split(Name, <<".">>, [global])),
     Question = <<Labels/binary, 0, 1:16, 1:16>>,
     <<Header/binary, Question/binary>>.
 
 encode_labels(Labels) ->
-    << <<(byte_size(L)):8, L/binary>> || L <- Labels >>.
+    <<<<(byte_size(L)):8, L/binary>> || L <- Labels>>.

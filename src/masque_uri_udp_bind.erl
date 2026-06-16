@@ -28,33 +28,42 @@
 %%% legacy CONNECT-UDP requests.
 -module(masque_uri_udp_bind).
 
--export([match/2,
-         expand/2,
-         classify/1]).
+-export([
+    match/2,
+    expand/2,
+    classify/1
+]).
 
--export([parse_bind_header/1,
-         format_bind_header/0,
-         parse_proxy_public_address/1,
-         format_proxy_public_address/1]).
+-export([
+    parse_bind_header/1,
+    format_bind_header/0,
+    parse_proxy_public_address/1,
+    format_proxy_public_address/1
+]).
 
 -include("masque_udp_bind.hrl").
 
 -type bind_target() ::
-      unscoped
+    unscoped
     | {Host :: binary(), Port :: 1..65535}.
 
 -type bind_match() ::
-    #{target_host := binary() | '*',
-      target_port := 1..65535 | '*',
-      bind        := unscoped | scoped}.
+    #{
+        target_host := binary() | '*',
+        target_port := 1..65535 | '*',
+        bind := unscoped | scoped
+    }.
 
 -type bind_header_value() :: bind | absent | invalid.
 
 -type proxy_public_address_error() :: absent | malformed | empty.
 
--export_type([bind_target/0, bind_match/0,
-              bind_header_value/0,
-              proxy_public_address_error/0]).
+-export_type([
+    bind_target/0,
+    bind_match/0,
+    bind_header_value/0,
+    proxy_public_address_error/0
+]).
 
 %% Used in tests and by the bind matcher when comparing the encoded
 %% wildcard literal that arrives on the wire.
@@ -85,39 +94,57 @@ match_with(T, Path) ->
     case masque_uri_template:match(T, Path) of
         {ok, #{target_host := Host, target_port := Port}} ->
             classify_match(Host, Port);
-        {error, no_match} -> {error, no_match};
-        {error, bad_pct}  -> {error, bad_host}
+        {error, no_match} ->
+            {error, no_match};
+        {error, bad_pct} ->
+            {error, bad_host}
     end.
 
 classify_match(Host, Port) ->
     case {decode_host(Host), decode_port(Port)} of
         {wildcard, wildcard} ->
-            {ok, #{target_host => '*', target_port => '*',
-                   bind        => unscoped}};
-        {wildcard, _} -> {error, bad_host};
-        {_, wildcard} -> {error, bad_host};
+            {ok, #{
+                target_host => '*',
+                target_port => '*',
+                bind => unscoped
+            }};
+        {wildcard, _} ->
+            {error, bad_host};
+        {_, wildcard} ->
+            {error, bad_host};
         {{ok, H}, {ok, P}} ->
-            {ok, #{target_host => H, target_port => P,
-                   bind        => scoped}};
-        {{error, _}, _} -> {error, bad_host};
-        {_, {error, _}} -> {error, bad_port}
+            {ok, #{
+                target_host => H,
+                target_port => P,
+                bind => scoped
+            }};
+        {{error, _}, _} ->
+            {error, bad_host};
+        {_, {error, _}} ->
+            {error, bad_port}
     end.
 
-decode_host(<<>>)          -> {error, empty};
-decode_host(?WILDCARD)     -> wildcard;
-decode_host(?WILDCARD_PCT) -> wildcard;
+decode_host(<<>>) ->
+    {error, empty};
+decode_host(?WILDCARD) ->
+    wildcard;
+decode_host(?WILDCARD_PCT) ->
+    wildcard;
 decode_host(Bin) when is_binary(Bin) ->
     case masque_uri:valid_host(Bin) of
-        true  -> {ok, Bin};
+        true -> {ok, Bin};
         false -> {error, bad_host}
     end.
 
-decode_port(<<>>)          -> {error, empty};
-decode_port(?WILDCARD)     -> wildcard;
-decode_port(?WILDCARD_PCT) -> wildcard;
+decode_port(<<>>) ->
+    {error, empty};
+decode_port(?WILDCARD) ->
+    wildcard;
+decode_port(?WILDCARD_PCT) ->
+    wildcard;
 decode_port(Bin) when is_binary(Bin) ->
     case parse_port_value(Bin) of
-        {ok, P}  -> {ok, P};
+        {ok, P} -> {ok, P};
         not_port -> {error, bad_port}
     end.
 
@@ -125,7 +152,8 @@ parse_port_value(Bin) ->
     try binary_to_integer(Bin) of
         N when is_integer(N), N >= 1, N =< 65535 -> {ok, N};
         _ -> not_port
-    catch _:_ -> not_port
+    catch
+        _:_ -> not_port
     end.
 
 %% @doc Expand a CONNECT-UDP URI template for a bind handshake.
@@ -140,22 +168,33 @@ parse_port_value(Bin) ->
 %% unscoped bind.
 -spec expand(binary(), bind_target() | masque_uri_template:vars()) -> binary().
 expand(Template, unscoped) ->
-    expand_with_template(Template,
-                         #{target_host => ?WILDCARD,
-                           target_port => ?WILDCARD});
-expand(Template, {Host, Port})
-  when is_binary(Host) orelse is_list(Host),
-       is_integer(Port), Port >= 1, Port =< 65535 ->
-    masque_uri:expand(Template,
-                      #{target_host => Host,
-                        target_port => Port});
+    expand_with_template(
+        Template,
+        #{
+            target_host => ?WILDCARD,
+            target_port => ?WILDCARD
+        }
+    );
+expand(Template, {Host, Port}) when
+    is_binary(Host) orelse is_list(Host),
+    is_integer(Port),
+    Port >= 1,
+    Port =< 65535
+->
+    masque_uri:expand(
+        Template,
+        #{
+            target_host => Host,
+            target_port => Port
+        }
+    );
 expand(Template, Vars) when is_map(Vars) ->
     masque_uri:expand(Template, Vars).
 
 expand_with_template(Template, Vars) ->
     PathTpl = to_path(Template),
     case masque_uri_template:parse_pattern(PathTpl) of
-        {ok, T}  -> masque_uri_template:expand(T, Vars);
+        {ok, T} -> masque_uri_template:expand(T, Vars);
         {error, _} = Err -> error({bad_template, Err})
     end.
 
@@ -163,8 +202,8 @@ expand_with_template(Template, Vars) ->
 %% callers that already hold the parsed values.
 -spec classify(bind_match() | bind_target()) -> unscoped | scoped.
 classify(#{bind := B}) -> B;
-classify(unscoped)     -> unscoped;
-classify({_,_})        -> scoped.
+classify(unscoped) -> unscoped;
+classify({_, _}) -> scoped.
 
 %%====================================================================
 %% Connect-UDP-Bind header (RFC 9651 Boolean)
@@ -178,12 +217,12 @@ classify({_,_})        -> scoped.
 parse_bind_header(Headers) when is_list(Headers) ->
     case header_value(?MASQUE_HF_CONNECT_UDP_BIND, Headers) of
         undefined -> absent;
-        Bin       -> classify_bind_value(strip(Bin))
+        Bin -> classify_bind_value(strip(Bin))
     end.
 
 classify_bind_value(<<"?1">>) -> bind;
 classify_bind_value(<<"?0">>) -> absent;
-classify_bind_value(_)        -> invalid.
+classify_bind_value(_) -> invalid.
 
 %% @doc The header pair to emit for `Connect-UDP-Bind: ?1' on a
 %% request or response.
@@ -202,16 +241,16 @@ format_bind_header() ->
 %% handshake on any of those.
 -spec parse_proxy_public_address([{binary(), binary()}]) ->
     {ok, [{inet:ip_address(), inet:port_number()}]}
-  | {error, proxy_public_address_error()}.
+    | {error, proxy_public_address_error()}.
 parse_proxy_public_address(Headers) when is_list(Headers) ->
     case header_value(?MASQUE_HF_PROXY_PUBLIC_ADDRESS, Headers) of
         undefined ->
             {error, absent};
         Raw ->
             case parse_string_list(strip(Raw)) of
-                {ok, []}      -> {error, empty};
+                {ok, []} -> {error, empty};
                 {ok, Strings} -> parse_addr_strings(Strings);
-                {error, _}    -> {error, malformed}
+                {error, _} -> {error, malformed}
             end
     end.
 
@@ -220,24 +259,32 @@ parse_proxy_public_address(Headers) when is_list(Headers) ->
 %% Field String. Crashes on an empty list - draft-11 requires at
 %% least one valid entry on a successful bind 2xx.
 -spec format_proxy_public_address(
-        [{inet:ip_address(), inet:port_number()}]) -> binary().
+    [{inet:ip_address(), inet:port_number()}]
+) -> binary().
 format_proxy_public_address([]) ->
     erlang:error(empty_proxy_public_address);
 format_proxy_public_address(Addrs) when is_list(Addrs) ->
     Items = [format_one(A) || A <- Addrs],
     iolist_to_binary(lists:join(<<", ">>, Items)).
 
-format_one({{_,_,_,_} = V4, Port}) ->
+format_one({{_, _, _, _} = V4, Port}) ->
     iolist_to_binary([$", inet:ntoa(V4), $:, integer_to_list(Port), $"]);
-format_one({{_,_,_,_,_,_,_,_} = V6, Port}) ->
-    iolist_to_binary([$", $[, inet:ntoa(V6), $], $:,
-                      integer_to_list(Port), $"]).
+format_one({{_, _, _, _, _, _, _, _} = V6, Port}) ->
+    iolist_to_binary([
+        $",
+        $[,
+        inet:ntoa(V6),
+        $],
+        $:,
+        integer_to_list(Port),
+        $"
+    ]).
 
 %%====================================================================
 %% Internal
 %%====================================================================
 
-to_path(<<"http://",  Rest/binary>>) -> drop_authority(Rest);
+to_path(<<"http://", Rest/binary>>) -> drop_authority(Rest);
 to_path(<<"https://", Rest/binary>>) -> drop_authority(Rest);
 to_path(Path) -> Path.
 
@@ -258,7 +305,7 @@ lookup_ci(_, []) ->
     undefined;
 lookup_ci(LName, [{K, V} | Rest]) ->
     case lowercase_bin(K) =:= LName of
-        true  -> V;
+        true -> V;
         false -> lookup_ci(LName, Rest)
     end.
 
@@ -280,8 +327,10 @@ parse_string_list(Bin) ->
         {error, _} = E -> E
     end.
 
-unquote(_, {error, _} = E) -> E;
-unquote(<<>>, {ok, Acc})   -> {ok, Acc};
+unquote(_, {error, _} = E) ->
+    E;
+unquote(<<>>, {ok, Acc}) ->
+    {ok, Acc};
 unquote(Item, {ok, Acc}) ->
     case Item of
         <<$", Body/binary>> ->
@@ -293,7 +342,8 @@ unquote(Item, {ok, Acc}) ->
                 false ->
                     {error, malformed}
             end;
-        _ -> {error, malformed}
+        _ ->
+            {error, malformed}
     end.
 
 parse_addr_strings(Strings) ->
@@ -301,12 +351,12 @@ parse_addr_strings(Strings) ->
 
 parse_addr_strings([], Acc) ->
     case lists:reverse(Acc) of
-        []   -> {error, empty};
+        [] -> {error, empty};
         List -> {ok, List}
     end;
 parse_addr_strings([Bin | Rest], Acc) ->
     case parse_ip_port(Bin) of
-        {ok, Pair}    -> parse_addr_strings(Rest, [Pair | Acc]);
+        {ok, Pair} -> parse_addr_strings(Rest, [Pair | Acc]);
         {error, _} = E -> E
     end.
 
@@ -314,21 +364,21 @@ parse_ip_port(<<$[, Rest/binary>>) ->
     %% IPv6 literal: "[address]:port".
     case binary:split(Rest, <<"]:">>) of
         [V6, PortBin] ->
-            case {inet:parse_ipv6_address(binary_to_list(V6)),
-                  parse_port_value(PortBin)} of
+            case {inet:parse_ipv6_address(binary_to_list(V6)), parse_port_value(PortBin)} of
                 {{ok, Addr}, {ok, Port}} -> {ok, {Addr, Port}};
                 _ -> {error, malformed}
             end;
-        _ -> {error, malformed}
+        _ ->
+            {error, malformed}
     end;
 parse_ip_port(Bin) ->
     %% IPv4: "address:port".
     case binary:split(Bin, <<":">>) of
         [V4, PortBin] ->
-            case {inet:parse_ipv4_address(binary_to_list(V4)),
-                  parse_port_value(PortBin)} of
+            case {inet:parse_ipv4_address(binary_to_list(V4)), parse_port_value(PortBin)} of
                 {{ok, Addr}, {ok, Port}} -> {ok, {Addr, Port}};
                 _ -> {error, malformed}
             end;
-        _ -> {error, malformed}
+        _ ->
+            {error, malformed}
     end.

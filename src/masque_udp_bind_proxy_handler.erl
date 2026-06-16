@@ -43,16 +43,21 @@
 -include("masque_udp_bind.hrl").
 
 -record(state, {
-    socket               :: gen_udp:socket(),
-    public_addresses     :: [{inet:ip_address(), inet:port_number()}],
-    advertised_families  :: [4 | 6],
-    peer_filter_fun      :: fun((inet:ip_address(),
-                                 inet:port_number()) ->
-                                ok | {drop, atom()}),
-    scrub_fun            :: fun((binary(), term()) ->
-                                {pass, binary(), term()}
-                              | {drop, atom(), term()}),
-    user_state           :: term()
+    socket :: gen_udp:socket(),
+    public_addresses :: [{inet:ip_address(), inet:port_number()}],
+    advertised_families :: [4 | 6],
+    peer_filter_fun :: fun(
+        (
+            inet:ip_address(),
+            inet:port_number()
+        ) -> ok | {drop, atom()}
+    ),
+    scrub_fun :: fun(
+        (binary(), term()) ->
+            {pass, binary(), term()}
+            | {drop, atom(), term()}
+    ),
+    user_state :: term()
 }).
 
 -type opts() :: map().
@@ -67,9 +72,12 @@
 init(_Req, Opts) ->
     BindAddr = maps:get(bind_address, Opts, any),
     BindPort = maps:get(bind_port, Opts, 0),
-    SocketOpts = [binary, {active, true},
-                  {ip, BindAddr}
-                  | maps:get(bind_socket_opts, Opts, [])],
+    SocketOpts = [
+        binary,
+        {active, true},
+        {ip, BindAddr}
+        | maps:get(bind_socket_opts, Opts, [])
+    ],
     case gen_udp:open(BindPort, SocketOpts) of
         {ok, Socket} ->
             case resolve_public_addresses(Socket, Opts) of
@@ -80,11 +88,17 @@ init(_Req, Opts) ->
                         public_addresses = Addresses,
                         advertised_families = Families,
                         peer_filter_fun =
-                            maps:get(peer_filter_fun, Opts,
-                                     fun default_peer_filter/2),
+                            maps:get(
+                                peer_filter_fun,
+                                Opts,
+                                fun default_peer_filter/2
+                            ),
                         scrub_fun =
-                            maps:get(scrub_fun, Opts,
-                                     fun default_scrub/2),
+                            maps:get(
+                                scrub_fun,
+                                Opts,
+                                fun default_scrub/2
+                            ),
                         user_state = maps:get(user_state, Opts, undefined)
                     },
                     Headers = response_headers(Addresses),
@@ -111,8 +125,9 @@ terminate(_Reason, #state{socket = S}) ->
 %% drop with a reason that the session can attribute via metrics.
 -spec handle_bind_packet(ip_port(), binary(), #state{}) ->
     {ok, #state{}} | {drop, atom(), #state{}}.
-handle_bind_packet({IP, Port}, Payload, #state{} = S0)
-  when is_binary(Payload) ->
+handle_bind_packet({IP, Port}, Payload, #state{} = S0) when
+    is_binary(Payload)
+->
     case (S0#state.peer_filter_fun)(IP, Port) of
         ok ->
             scrub_then_send(IP, Port, Payload, S0);
@@ -131,8 +146,8 @@ scrub_then_send(IP, Port, Payload, #state{} = S0) ->
 
 send_to_peer(IP, Port, Payload, #state{socket = Sock} = S) ->
     case gen_udp:send(Sock, IP, Port, Payload) of
-        ok                -> {ok, S};
-        {error, _Reason}  -> {drop, socket_error, S}
+        ok -> {ok, S};
+        {error, _Reason} -> {drop, socket_error, S}
     end.
 
 %%====================================================================
@@ -141,8 +156,10 @@ send_to_peer(IP, Port, Payload, #state{socket = Sock} = S) ->
 
 -spec handle_info(term(), #state{}) ->
     {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
-handle_info({udp, Socket, FromIP, FromPort, Bytes},
-            #state{socket = Socket} = S) ->
+handle_info(
+    {udp, Socket, FromIP, FromPort, Bytes},
+    #state{socket = Socket} = S
+) ->
     %% Drop frames whose source family is not advertised. This
     %% defends against weird kernel behaviour and against the proxy's
     %% own bind socket receiving packets from a family the client
@@ -151,8 +168,7 @@ handle_info({udp, Socket, FromIP, FromPort, Bytes},
         false ->
             {ok, S};
         true ->
-            {ok, S, [{send_bind_packet,
-                      {FromIP, FromPort}, Bytes}]}
+            {ok, S, [{send_bind_packet, {FromIP, FromPort}, Bytes}]}
     end;
 handle_info({udp_passive, Socket}, #state{socket = Socket} = S) ->
     _ = inet:setopts(Socket, [{active, true}]),
@@ -169,13 +185,12 @@ handle_info(_Other, S) ->
 %%====================================================================
 
 resolve_public_addresses(Socket, Opts) ->
-    case {maps:find(public_address_fun, Opts),
-          maps:find(public_addresses, Opts)} of
+    case {maps:find(public_address_fun, Opts), maps:find(public_addresses, Opts)} of
         {{ok, Fun}, _} when is_function(Fun, 1) ->
             case inet:sockname(Socket) of
                 {ok, Sn} ->
                     case Fun(Sn) of
-                        []      -> {error, no_public_addresses};
+                        [] -> {error, no_public_addresses};
                         Addrs when is_list(Addrs) -> {ok, Addrs}
                     end;
                 {error, Reason} ->
@@ -194,9 +209,9 @@ resolve_public_addresses(Socket, Opts) ->
 %% address is not usable as a public address.
 sockname_fallback(Socket) ->
     case inet:sockname(Socket) of
-        {ok, {{0,0,0,0}, _}} ->
+        {ok, {{0, 0, 0, 0}, _}} ->
             {error, no_public_addresses};
-        {ok, {{0,0,0,0,0,0,0,0}, _}} ->
+        {ok, {{0, 0, 0, 0, 0, 0, 0, 0}, _}} ->
             {error, no_public_addresses};
         {ok, {Addr, Port}} ->
             {ok, [{Addr, Port}]};
@@ -205,14 +220,16 @@ sockname_fallback(Socket) ->
     end.
 
 response_headers(Addresses) ->
-    [masque_uri_udp_bind:format_bind_header(),
-     {?MASQUE_HF_PROXY_PUBLIC_ADDRESS,
-      masque_uri_udp_bind:format_proxy_public_address(Addresses)}].
+    [
+        masque_uri_udp_bind:format_bind_header(),
+        {?MASQUE_HF_PROXY_PUBLIC_ADDRESS,
+            masque_uri_udp_bind:format_proxy_public_address(Addresses)}
+    ].
 
 families(Addresses) ->
     lists:usort([family_of(IP) || {IP, _} <- Addresses]).
 
-family_of({_, _, _, _})             -> 4;
+family_of({_, _, _, _}) -> 4;
 family_of({_, _, _, _, _, _, _, _}) -> 6.
 
 %%====================================================================
@@ -223,22 +240,39 @@ family_of({_, _, _, _, _, _, _, _}) -> 6.
 %% (CT scaffolding runs the upstream peer on 127.0.0.1).
 default_peer_filter(IP, _Port) ->
     case is_private(IP) of
-        true  -> {drop, peer_filter};
+        true -> {drop, peer_filter};
         false -> ok
     end.
 
-is_private({127, _, _, _})              -> false;     %% loopback ok
-is_private({10, _, _, _})               -> true;
+%% loopback ok
+is_private({127, _, _, _}) ->
+    false;
+is_private({10, _, _, _}) ->
+    true;
 is_private({172, B, _, _}) when B >= 16, B =< 31 -> true;
-is_private({192, 168, _, _})            -> true;
-is_private({169, 254, _, _})            -> true;       %% link-local
-is_private({A, _, _, _}) when A >= 224, A =< 239 -> true;  %% multicast
-is_private({0, 0, 0, 0, 0, 0, 0, 1})    -> false;      %% v6 loopback
-is_private({16#FE80, _, _, _, _, _, _, _}) -> true;    %% v6 link-local
-is_private({16#FF00, _, _, _, _, _, _, _}) -> true;    %% v6 multicast
-is_private({A, _, _, _, _, _, _, _})
-  when A >= 16#FC00, A =< 16#FDFF -> true;            %% v6 ULA
-is_private(_) -> false.
+is_private({192, 168, _, _}) ->
+    true;
+%% link-local
+is_private({169, 254, _, _}) ->
+    true;
+%% multicast
+is_private({A, _, _, _}) when A >= 224, A =< 239 -> true;
+%% v6 loopback
+is_private({0, 0, 0, 0, 0, 0, 0, 1}) ->
+    false;
+%% v6 link-local
+is_private({16#FE80, _, _, _, _, _, _, _}) ->
+    true;
+%% v6 multicast
+is_private({16#FF00, _, _, _, _, _, _, _}) ->
+    true;
+is_private({A, _, _, _, _, _, _, _}) when
+    %% v6 ULA
+    A >= 16#FC00, A =< 16#FDFF
+->
+    true;
+is_private(_) ->
+    false.
 
 default_scrub(Packet, State) ->
     {pass, Packet, State}.

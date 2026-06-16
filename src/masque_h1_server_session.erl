@@ -15,21 +15,27 @@
 
 -export([start_link/1]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 -include("masque.hrl").
 
 -record(state, {
-    transport  :: gen_tcp | ssl,
-    socket     :: ssl:sslsocket() | gen_tcp:socket(),
-    handler    :: module(),
-    h_state    :: term(),
-    req        :: map(),
+    transport :: gen_tcp | ssl,
+    socket :: ssl:sslsocket() | gen_tcp:socket(),
+    handler :: module(),
+    h_state :: term(),
+    req :: map(),
     cap_buf = <<>> :: binary(),
-    max_cap    :: pos_integer(),
-    idle_ms    :: non_neg_integer() | infinity,
-    idle_ref   :: reference() | undefined
+    max_cap :: pos_integer(),
+    idle_ms :: non_neg_integer() | infinity,
+    idle_ref :: reference() | undefined
 }).
 
 %%====================================================================
@@ -44,11 +50,19 @@ start_link(Args) ->
 %% gen_server
 %%====================================================================
 
-init(#{conn := Conn, stream_id := StreamId,
-       handler := Handler, handler_opts := HOpts, req := Req}) ->
+init(#{
+    conn := Conn,
+    stream_id := StreamId,
+    handler := Handler,
+    handler_opts := HOpts,
+    req := Req
+}) ->
     process_flag(trap_exit, true),
-    MaxCap = maps:get(max_capsule_size, HOpts,
-                      ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE),
+    MaxCap = maps:get(
+        max_capsule_size,
+        HOpts,
+        ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE
+    ),
     IdleMs = maps:get(idle_timeout_ms, HOpts, 300000),
     %% Run the handler's init/2 first so a rejection surfaces as a
     %% clean 502 on the as-yet-unupgraded h1 connection. Only then
@@ -56,19 +70,24 @@ init(#{conn := Conn, stream_id := StreamId,
     %% ownership to this process.
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, Actions} ->
-            case h1:accept_upgrade(Conn, StreamId,
-                                    [{<<"capsule-protocol">>, <<"?1">>}]) of
+            case
+                h1:accept_upgrade(
+                    Conn,
+                    StreamId,
+                    [{<<"capsule-protocol">>, <<"?1">>}]
+                )
+            of
                 {ok, Socket, Buffer} ->
                     Transport = socket_transport(Socket),
                     State0 = arm_idle(#state{
                         transport = Transport,
-                        socket    = Socket,
-                        handler   = Handler,
-                        h_state   = HState,
-                        req       = Req,
-                        cap_buf   = Buffer,
-                        max_cap   = MaxCap,
-                        idle_ms   = IdleMs
+                        socket = Socket,
+                        handler = Handler,
+                        h_state = HState,
+                        req = Req,
+                        cap_buf = Buffer,
+                        max_cap = MaxCap,
+                        idle_ms = IdleMs
                     }),
                     %% Drain anything already past the 101 CRLF before
                     %% arming the socket.
@@ -80,8 +99,11 @@ init(#{conn := Conn, stream_id := StreamId,
                             {stop, Reason}
                     end;
                 {error, Reason} ->
-                    try_callback(Handler, terminate,
-                                  [{accept_upgrade, Reason}, HState]),
+                    try_callback(
+                        Handler,
+                        terminate,
+                        [{accept_upgrade, Reason}, HState]
+                    ),
                     {stop, {accept_upgrade, Reason}}
             end;
         {stop, Reason} ->
@@ -94,24 +116,38 @@ handle_call(_Req, _From, S) ->
 handle_cast(_Msg, S) ->
     {noreply, S}.
 
-handle_info({ssl, Sock, Bytes}, #state{socket = Sock, cap_buf = Buf,
-                                        max_cap = Max} = S) ->
+handle_info(
+    {ssl, Sock, Bytes},
+    #state{
+        socket = Sock,
+        cap_buf = Buf,
+        max_cap = Max
+    } = S
+) ->
     S1 = arm_idle(S),
     New = <<Buf/binary, Bytes/binary>>,
     case byte_size(New) > Max of
-        true  -> {stop, capsule_buffer_overflow, S1};
+        true -> {stop, capsule_buffer_overflow, S1};
         false -> step(S1#state{cap_buf = New})
     end;
-handle_info({tcp, Sock, Bytes}, #state{socket = Sock, cap_buf = Buf,
-                                        max_cap = Max} = S) ->
+handle_info(
+    {tcp, Sock, Bytes},
+    #state{
+        socket = Sock,
+        cap_buf = Buf,
+        max_cap = Max
+    } = S
+) ->
     S1 = arm_idle(S),
     New = <<Buf/binary, Bytes/binary>>,
     case byte_size(New) > Max of
-        true  -> {stop, capsule_buffer_overflow, S1};
+        true -> {stop, capsule_buffer_overflow, S1};
         false -> step(S1#state{cap_buf = New})
     end;
-handle_info({timeout, Ref, idle},
-            #state{idle_ref = Ref} = S) ->
+handle_info(
+    {timeout, Ref, idle},
+    #state{idle_ref = Ref} = S
+) ->
     {stop, idle_timeout, S};
 handle_info({ssl_closed, Sock}, #state{socket = Sock} = S) ->
     {stop, peer_closed, S};
@@ -147,7 +183,7 @@ step(#state{cap_buf = Buf} = S) ->
         {ok, {Type, Inner}, Rest} ->
             case dispatch_capsule(Type, Inner, S#state{cap_buf = Rest}) of
                 {noreply, S2} -> step(S2);
-                Stop          -> Stop
+                Stop -> Stop
             end;
         {more, _} ->
             _ = arm_once(S),
@@ -156,14 +192,15 @@ step(#state{cap_buf = Buf} = S) ->
 
 drain_and_arm(S) ->
     case step(S) of
-        {noreply, S2}        -> {ok, S2};
-        {stop, Reason, S2}   -> {stop, Reason, S2}
+        {noreply, S2} -> {ok, S2};
+        {stop, Reason, S2} -> {stop, Reason, S2}
     end.
 
 dispatch_capsule(datagram, Inner, S) ->
     case masque_datagram:decode(Inner) of
-        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}}
-          when byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD ->
+        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} when
+            byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD
+        ->
             dispatch(handle_packet, [UdpBytes], S);
         _ ->
             %% RFC 9298 §5: unknown context-id or oversize -> drop.
@@ -184,10 +221,10 @@ init_handler(Handler, Req, HOpts) ->
     case exported(Handler, init, 2) of
         true ->
             case safe_apply(Handler, init, [Req, HOpts]) of
-                {ok, HState}          -> {ok, HState, []};
+                {ok, HState} -> {ok, HState, []};
                 {ok, HState, Actions} -> {ok, HState, Actions};
-                {stop, Reason}        -> {stop, Reason};
-                Other                 -> {stop, {bad_init, Other}}
+                {stop, Reason} -> {stop, Reason};
+                Other -> {stop, {bad_init, Other}}
             end;
         false ->
             {ok, undefined, []}
@@ -197,12 +234,16 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
     case exported(Handler, CB, length(Extra) + 1) of
         true ->
             case safe_apply(Handler, CB, Extra ++ [HS]) of
-                {ok, HS2}           -> {noreply, S#state{h_state = HS2}};
-                {ok, HS2, Actions}  -> apply_actions_noreply(
-                                         Actions, S#state{h_state = HS2});
-                {stop, Reason, HS2} -> {stop, Reason,
-                                              S#state{h_state = HS2}};
-                _                   -> {noreply, S}
+                {ok, HS2} ->
+                    {noreply, S#state{h_state = HS2}};
+                {ok, HS2, Actions} ->
+                    apply_actions_noreply(
+                        Actions, S#state{h_state = HS2}
+                    );
+                {stop, Reason, HS2} ->
+                    {stop, Reason, S#state{h_state = HS2}};
+                _ ->
+                    {noreply, S}
             end;
         false ->
             {noreply, S}
@@ -214,34 +255,45 @@ exported(Mod, Fun, Arity) ->
 
 apply_actions(Actions, State) ->
     case do_actions(Actions, State) of
-        {ok, S2}          -> {ok, S2};
+        {ok, S2} -> {ok, S2};
         {stop, Reason, _} -> {stop, Reason}
     end.
 
 apply_actions_noreply(Actions, State) ->
     case do_actions(Actions, State) of
-        {ok, S2}           -> {noreply, S2};
+        {ok, S2} -> {noreply, S2};
         {stop, Reason, S2} -> {stop, Reason, S2}
     end.
 
-do_actions([], S) -> {ok, S};
+do_actions([], S) ->
+    {ok, S};
 do_actions([{send, Data} | Rest], S) ->
     do_actions([{send, ?MASQUE_CONTEXT_ID_UDP, Data} | Rest], S);
 do_actions([{send, Ctx, Data} | Rest], S) ->
     PayloadSize = iolist_size(Data),
-    case Ctx =:= ?MASQUE_CONTEXT_ID_UDP
-         andalso PayloadSize > ?MASQUE_MAX_UDP_PAYLOAD of
+    case
+        Ctx =:= ?MASQUE_CONTEXT_ID_UDP andalso
+            PayloadSize > ?MASQUE_MAX_UDP_PAYLOAD
+    of
         true ->
             do_actions(Rest, S);
         false ->
             Inner = iolist_to_binary(masque_datagram:encode(Ctx, Data)),
-            _ = h1_upgrade:send_capsule(S#state.transport, S#state.socket,
-                                         datagram, Inner),
+            _ = h1_upgrade:send_capsule(
+                S#state.transport,
+                S#state.socket,
+                datagram,
+                Inner
+            ),
             do_actions(Rest, S)
     end;
 do_actions([{send_capsule, Type, Value} | Rest], S) ->
-    _ = h1_upgrade:send_capsule(S#state.transport, S#state.socket,
-                                 Type, Value),
+    _ = h1_upgrade:send_capsule(
+        S#state.transport,
+        S#state.socket,
+        Type,
+        Value
+    ),
     do_actions(Rest, S);
 do_actions([close_session | _Rest], S) ->
     {stop, normal, S};
@@ -251,20 +303,28 @@ do_actions([_Unknown | Rest], S) ->
     do_actions(Rest, S).
 
 safe_apply(M, F, A) ->
-    try apply(M, F, A)
+    try
+        apply(M, F, A)
     catch
         Class:Reason:Stack ->
             error_logger:error_msg(
                 "masque h1 handler ~p:~p/~p failed: ~p:~p~n~p~n",
-                [M, F, length(A), Class, Reason, Stack]),
+                [M, F, length(A), Class, Reason, Stack]
+            ),
             {stop, {handler_crash, Reason}}
     end.
 
 try_callback(Mod, Fun, Args) ->
     Arity = length(Args),
     case erlang:function_exported(Mod, Fun, Arity) of
-        true  -> (try apply(Mod, Fun, Args) catch _:_ -> ok end);
-        false -> ok
+        true ->
+            (try
+                apply(Mod, Fun, Args)
+            catch
+                _:_ -> ok
+            end);
+        false ->
+            ok
     end.
 
 %%====================================================================
@@ -279,14 +339,26 @@ arm_once(#state{transport = gen_tcp, socket = Sock}) ->
 close_socket(#state{transport = T, socket = S}) ->
     close_transport(T, S).
 
-close_transport(ssl, S)     -> try ssl:close(S) catch _:_ -> ok end;
-close_transport(gen_tcp, S) -> try gen_tcp:close(S) catch _:_ -> ok end.
+close_transport(ssl, S) ->
+    try
+        ssl:close(S)
+    catch
+        _:_ -> ok
+    end;
+close_transport(gen_tcp, S) ->
+    try
+        gen_tcp:close(S)
+    catch
+        _:_ -> ok
+    end.
 
 %% `h1:accept_upgrade/3' returns the raw socket without identifying the
 %% transport. Infer it from the shape: ssl sockets are `#sslsocket{}'
 %% records; gen_tcp sockets are ports (or nif socket records).
-socket_transport(Socket) when is_tuple(Socket),
-                               element(1, Socket) =:= sslsocket ->
+socket_transport(Socket) when
+    is_tuple(Socket),
+    element(1, Socket) =:= sslsocket
+->
     ssl;
 socket_transport(_) ->
     gen_tcp.
@@ -295,17 +367,23 @@ socket_transport(_) ->
 %% Idle timer
 %%====================================================================
 
-arm_idle(#state{idle_ms = infinity} = S) -> S;
-arm_idle(#state{idle_ms = 0}        = S) -> S;
+arm_idle(#state{idle_ms = infinity} = S) ->
+    S;
+arm_idle(#state{idle_ms = 0} = S) ->
+    S;
 arm_idle(#state{idle_ref = OldRef, idle_ms = Ms} = S) ->
     case OldRef of
-        undefined -> ok;
-        _         -> _ = erlang:cancel_timer(OldRef), ok
+        undefined ->
+            ok;
+        _ ->
+            _ = erlang:cancel_timer(OldRef),
+            ok
     end,
     Ref = erlang:start_timer(Ms, self(), idle),
     S#state{idle_ref = Ref}.
 
-cancel_idle(#state{idle_ref = undefined}) -> ok;
+cancel_idle(#state{idle_ref = undefined}) ->
+    ok;
 cancel_idle(#state{idle_ref = Ref}) ->
     _ = erlang:cancel_timer(Ref),
     ok.

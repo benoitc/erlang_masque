@@ -27,10 +27,10 @@
 -export([connecting/3, open/3]).
 
 -record(data, {
-    result          :: ok | {error, term()},
-    delay_ms        :: non_neg_integer(),
-    handshake_from  :: undefined | gen_statem:from(),
-    owner           :: pid()
+    result :: ok | {error, term()},
+    delay_ms :: non_neg_integer(),
+    handshake_from :: undefined | gen_statem:from(),
+    owner :: pid()
 }).
 
 start(_Target, Opts, Owner) ->
@@ -44,20 +44,22 @@ callback_mode() -> state_functions.
 init({Opts, Owner}) ->
     {Result, Delay} = resolve_tuning(Opts),
     Data = #data{
-        result   = Result,
+        result = Result,
         delay_ms = Delay,
-        owner    = Owner
+        owner = Owner
     },
-    {ok, connecting, Data,
-     [{state_timeout, Delay, resolve}]}.
+    {ok, connecting, Data, [{state_timeout, Delay, resolve}]}.
 
 resolve_tuning(Opts) ->
     ByT = maps:get(fake_by_transport, Opts, #{}),
     Transport = maps:get(transport, Opts, undefined),
-    Spec = maps:get(Transport, ByT,
-                    maps:with([fake_result, fake_delay_ms], Opts)),
+    Spec = maps:get(
+        Transport,
+        ByT,
+        maps:with([fake_result, fake_delay_ms], Opts)
+    ),
     Result = maps:get(fake_result, Spec, ok),
-    Delay  = maps:get(fake_delay_ms, Spec, 0),
+    Delay = maps:get(fake_delay_ms, Spec, 0),
     {Result, Delay}.
 
 connecting(state_timeout, resolve, #data{result = Result} = D) ->
@@ -88,5 +90,4 @@ terminate(_Reason, _State, _D) -> ok.
 code_change(_OldVsn, State, D, _Extra) -> {ok, State, D}.
 
 reply_handshake(#data{handshake_from = undefined}, _Reply) -> ok;
-reply_handshake(#data{handshake_from = From}, Reply) ->
-    gen_statem:reply(From, Reply).
+reply_handshake(#data{handshake_from = From}, Reply) -> gen_statem:reply(From, Reply).

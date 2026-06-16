@@ -30,5 +30,5 @@ decode(Bin) when is_binary(Bin) ->
         {ok, {ContextId, Rest}}
     catch
         error:{incomplete, _} -> {error, malformed_varint};
-        error:badarg          -> {error, malformed_varint}
+        error:badarg -> {error, malformed_varint}
     end.

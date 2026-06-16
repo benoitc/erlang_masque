@@ -29,16 +29,16 @@
 -include("masque.hrl").
 
 -record(data, {
-    owner          :: pid(),
-    owner_ref      :: reference(),
-    proxy_host     :: binary(),
-    proxy_port     :: inet:port_number(),
-    target_host    :: binary(),
-    target_port    :: 1..65535,
-    proxy_auth     :: binary() | undefined,
-    connect_opts   :: map(),
-    socket         :: ssl:sslsocket() | undefined,
-    mode           :: message | queue,
+    owner :: pid(),
+    owner_ref :: reference(),
+    proxy_host :: binary(),
+    proxy_port :: inet:port_number(),
+    target_host :: binary(),
+    target_port :: 1..65535,
+    proxy_auth :: binary() | undefined,
+    connect_opts :: map(),
+    socket :: ssl:sslsocket() | undefined,
+    mode :: message | queue,
     rx_buf = queue:new() :: queue:queue(binary()),
     rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
     write_closed = false :: boolean(),
@@ -91,17 +91,18 @@ init({Target, Opts, Owner}) ->
     ProxyAuth = maps:get(proxy_authorization, Opts, undefined),
     ok = validate_proxy_auth(ProxyAuth),
     Data = #data{
-        owner      = Owner,
-        owner_ref  = MRef,
+        owner = Owner,
+        owner_ref = MRef,
         proxy_host = to_bin(ProxyHost),
         proxy_port = ProxyPort,
         target_host = to_bin(TargetHost),
         target_port = TargetPort,
         proxy_auth = ProxyAuth,
         connect_opts = Opts,
-        mode       = Mode,
+        mode = Mode,
         extra_headers = sanitise_extra_headers(
-                          maps:get(request_headers, Opts, []))
+            maps:get(request_headers, Opts, [])
+        )
     },
     %% Defer `do_handshake' until `handshake_await' arrives so the
     %% reply can be delivered synchronously (classic CONNECT is a
@@ -113,8 +114,11 @@ init({Target, Opts, Owner}) ->
 %% States
 %%====================================================================
 
-connecting({call, From}, handshake_await,
-           #data{connect_opts = Opts} = Data) ->
+connecting(
+    {call, From},
+    handshake_await,
+    #data{connect_opts = Opts} = Data
+) ->
     case do_connect(Data, Opts) of
         {ok, Socket, InitialBuffer} ->
             case setopts_active_once(Socket) of
@@ -123,15 +127,16 @@ connecting({call, From}, handshake_await,
                     Data2 = deliver_bytes(InitialBuffer, Data1),
                     {next_state, open, Data2, [{reply, From, ok}]};
                 {error, Reason} ->
-                    _ = (try ssl:close(Socket) catch _:_ -> ok end),
-                    {stop_and_reply, normal,
-                     [{reply, From, {error, {setopts, Reason}}}],
-                     Data}
+                    _ =
+                        (try
+                            ssl:close(Socket)
+                        catch
+                            _:_ -> ok
+                        end),
+                    {stop_and_reply, normal, [{reply, From, {error, {setopts, Reason}}}], Data}
             end;
         {error, Reason} ->
-            {stop_and_reply, normal,
-             [{reply, From, {error, Reason}}],
-             Data}
+            {stop_and_reply, normal, [{reply, From, {error, Reason}}], Data}
     end;
 connecting({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
@@ -141,8 +146,11 @@ connecting({call, From}, stop, Data) ->
     {stop_and_reply, normal, [{reply, From, ok}], Data};
 connecting({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
-connecting(info, {'DOWN', Ref, process, _, _},
-           #data{owner_ref = Ref}) ->
+connecting(
+    info,
+    {'DOWN', Ref, process, _, _},
+    #data{owner_ref = Ref}
+) ->
     {stop, owner_gone};
 connecting(info, _Msg, Data) ->
     {keep_state, Data}.
@@ -166,8 +174,7 @@ open({call, From}, shutdown_write, #data{socket = Sock} = Data) ->
 open({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 open({call, From}, stop, Data) ->
-    {next_state, closing, Data,
-     [{reply, From, ok}, {next_event, internal, do_close}]};
+    {next_state, closing, Data, [{reply, From, ok}, {next_event, internal, do_close}]};
 open(info, {ssl, Sock, Bytes}, #data{socket = Sock} = Data) ->
     Data1 = deliver_bytes(Bytes, Data),
     _ = setopts_active_once(Sock),
@@ -180,17 +187,27 @@ open(info, {ssl_error, Sock, Reason}, #data{socket = Sock} = Data) ->
     {stop, {ssl_error, Reason}, Data};
 open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
-open(info, {'DOWN', Ref, process, _, _},
-     #data{owner_ref = Ref} = Data) ->
+open(
+    info,
+    {'DOWN', Ref, process, _, _},
+    #data{owner_ref = Ref} = Data
+) ->
     {next_state, closing, Data, [{next_event, internal, do_close}]};
 open(info, _Msg, Data) ->
     {keep_state, Data}.
 
 closing(internal, do_close, #data{socket = Socket} = Data) ->
-    _ = case Socket of
-        undefined -> ok;
-        _         -> try ssl:close(Socket) catch _:_ -> ok end
-    end,
+    _ =
+        case Socket of
+            undefined ->
+                ok;
+            _ ->
+                try
+                    ssl:close(Socket)
+                catch
+                    _:_ -> ok
+                end
+        end,
     {stop, normal, Data};
 closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
@@ -201,15 +218,24 @@ terminate(_Reason, _State, #data{socket = undefined} = D) ->
 terminate(_Reason, _State, #data{socket = Socket} = D) ->
     _ = erlang:demonitor(D#data.owner_ref, [flush]),
     cancel_all_waiters(D),
-    _ = (try ssl:close(Socket) catch _:_ -> ok end),
+    _ =
+        (try
+            ssl:close(Socket)
+        catch
+            _:_ -> ok
+        end),
     ok.
 
 cancel_all_waiters(#data{rx_waiters = Ws}) ->
-    _ = queue:fold(fun({From, TRef}, _) ->
-        _ = erlang:cancel_timer(TRef),
-        gen_statem:reply(From, {error, closed}),
-        ok
-    end, ok, Ws),
+    _ = queue:fold(
+        fun({From, TRef}, _) ->
+            _ = erlang:cancel_timer(TRef),
+            gen_statem:reply(From, {error, closed}),
+            ok
+        end,
+        ok,
+        Ws
+    ),
     ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
@@ -222,15 +248,22 @@ code_change(_OldVsn, State, Data, _Extra) ->
 do_connect(Data, Opts) ->
     Timeout = maps:get(timeout, Opts, 5000),
     SSLOpts = masque_tls:client_opts(Data#data.proxy_host, Opts),
-    case ssl:connect(binary_to_list(Data#data.proxy_host),
-                     Data#data.proxy_port, SSLOpts, Timeout) of
+    case
+        ssl:connect(
+            binary_to_list(Data#data.proxy_host),
+            Data#data.proxy_port,
+            SSLOpts,
+            Timeout
+        )
+    of
         {ok, Socket} ->
             Req = connect_request(Data),
             case ssl:send(Socket, Req) of
                 ok ->
                     case read_status_line(Socket, Timeout) of
-                        {ok, Code, _Phrase, Leftover}
-                          when Code >= 200, Code < 300 ->
+                        {ok, Code, _Phrase, Leftover} when
+                            Code >= 200, Code < 300
+                        ->
                             %% RFC 9110 §9.3.6: any 2xx establishes
                             %% the tunnel. Most proxies send 200
                             %% "Connection Established" but 201 / 202
@@ -251,22 +284,25 @@ do_connect(Data, Opts) ->
             {error, {connect, Reason}}
     end.
 
-connect_request(#data{target_host = Host, target_port = Port,
-                       proxy_auth = Auth,
-                       extra_headers = Extra}) ->
+connect_request(#data{
+    target_host = Host,
+    target_port = Port,
+    proxy_auth = Auth,
+    extra_headers = Extra
+}) ->
     Authority = masque_uri:build_authority(Host, Port),
-    AuthLine = case Auth of
-        undefined -> <<>>;
-        V when is_binary(V) ->
-            <<"Proxy-Authorization: ", V/binary, "\r\n">>
-    end,
+    AuthLine =
+        case Auth of
+            undefined ->
+                <<>>;
+            V when is_binary(V) ->
+                <<"Proxy-Authorization: ", V/binary, "\r\n">>
+        end,
     ExtraLines = iolist_to_binary(
-                   [[N, <<": ">>, Val, <<"\r\n">>] || {N, Val} <- Extra]),
-    <<"CONNECT ", Authority/binary, " HTTP/1.1\r\n",
-      "Host: ", Authority/binary, "\r\n",
-      AuthLine/binary,
-      ExtraLines/binary,
-      "\r\n">>.
+        [[N, <<": ">>, Val, <<"\r\n">>] || {N, Val} <- Extra]
+    ),
+    <<"CONNECT ", Authority/binary, " HTTP/1.1\r\n", "Host: ", Authority/binary, "\r\n",
+        AuthLine/binary, ExtraLines/binary, "\r\n">>.
 
 sanitise_extra_headers(List) when is_list(List) ->
     %% Strip CR/LF to prevent header injection on the raw CONNECT
@@ -274,11 +310,15 @@ sanitise_extra_headers(List) when is_list(List) ->
     %% request line itself) are dropped so the library stays in
     %% control of the wire format.
     Reserved = [<<"host">>, <<"proxy-authorization">>],
-    [{K, V} || {K, V} <- List,
-               is_binary(K), is_binary(V),
-               binary:match(K, [<<"\r">>, <<"\n">>]) =:= nomatch,
-               binary:match(V, [<<"\r">>, <<"\n">>]) =:= nomatch,
-               not lists:member(lowercase_bin(K), Reserved)].
+    [
+        {K, V}
+     || {K, V} <- List,
+        is_binary(K),
+        is_binary(V),
+        binary:match(K, [<<"\r">>, <<"\n">>]) =:= nomatch,
+        binary:match(V, [<<"\r">>, <<"\n">>]) =:= nomatch,
+        not lists:member(lowercase_bin(K), Reserved)
+    ].
 
 lowercase_bin(B) when is_binary(B) ->
     list_to_binary(string:to_lower(binary_to_list(B))).
@@ -330,12 +370,14 @@ parse_status(HdrBlock) ->
                         [CodeBin, Phrase] ->
                             try binary_to_integer(CodeBin) of
                                 C when is_integer(C) -> {ok, C, Phrase}
-                            catch _:_ -> {error, bad_status}
+                            catch
+                                _:_ -> {error, bad_status}
                             end;
                         [CodeBin] ->
                             try binary_to_integer(CodeBin) of
                                 C when is_integer(C) -> {ok, C, <<>>}
-                            catch _:_ -> {error, bad_status}
+                            catch
+                                _:_ -> {error, bad_status}
                             end
                     end;
                 _ ->
@@ -357,8 +399,14 @@ deliver_bytes(<<>>, Data) ->
 deliver_bytes(Bin, #data{mode = message, owner = Owner} = Data) ->
     Owner ! {masque_data, self(), Bin},
     Data;
-deliver_bytes(Bin, #data{mode = queue, rx_waiters = Ws,
-                          rx_buf = Buf} = Data) ->
+deliver_bytes(
+    Bin,
+    #data{
+        mode = queue,
+        rx_waiters = Ws,
+        rx_buf = Buf
+    } = Data
+) ->
     case queue:out(Ws) of
         {{value, {From, TRef}}, Ws2} ->
             _ = erlang:cancel_timer(TRef),
@@ -371,21 +419,26 @@ deliver_bytes(Bin, #data{mode = queue, rx_waiters = Ws,
 handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
     case queue:out(Buf) of
         {{value, Bytes}, Buf2} ->
-            {keep_state, Data#data{rx_buf = Buf2},
-             [{reply, From, {ok, Bytes}}]};
+            {keep_state, Data#data{rx_buf = Buf2}, [{reply, From, {ok, Bytes}}]};
         {empty, _} ->
             TRef = erlang:start_timer(Timeout, self(), {recv_timeout, From}),
-            {keep_state, Data#data{rx_waiters =
-                queue:in({From, TRef}, Data#data.rx_waiters)}}
+            {keep_state, Data#data{
+                rx_waiters =
+                    queue:in({From, TRef}, Data#data.rx_waiters)
+            }}
     end.
 
 drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->
     Ws2 = queue:filter(
-        fun({F, T}) when F =:= From, T =:= TRef ->
+        fun
+            ({F, T}) when F =:= From, T =:= TRef ->
                 gen_statem:reply(F, {error, timeout}),
                 false;
-           (_) -> true
-        end, Ws),
+            (_) ->
+                true
+        end,
+        Ws
+    ),
     Data#data{rx_waiters = Ws2}.
 
 %%====================================================================
@@ -394,21 +447,34 @@ drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->
 
 notify_owner_closed(Reason, #data{owner = Owner, mode = message}) ->
     Owner ! {masque_closed, self(), Reason};
-notify_owner_closed(_Reason, _Data) -> ok.
+notify_owner_closed(_Reason, _Data) ->
+    ok.
 
 swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
     _ = erlang:demonitor(OldRef, [flush]),
     NewRef = erlang:monitor(process, NewOwner),
     Data#data{owner = NewOwner, owner_ref = NewRef}.
 
-session_info(#data{target_host = H, target_port = P,
-                   proxy_host = PH, proxy_port = PP}, State) ->
-    #{state => State, protocol => tcp, transport => h1,
-      proxy => {PH, PP}, target => {H, P}}.
+session_info(
+    #data{
+        target_host = H,
+        target_port = P,
+        proxy_host = PH,
+        proxy_port = PP
+    },
+    State
+) ->
+    #{
+        state => State,
+        protocol => tcp,
+        transport => h1,
+        proxy => {PH, PP},
+        target => {H, P}
+    }.
 
 to_bin(X) when is_binary(X) -> X;
-to_bin(X) when is_list(X)   -> list_to_binary(X);
-to_bin(X) when is_atom(X)   -> atom_to_binary(X, utf8).
+to_bin(X) when is_list(X) -> list_to_binary(X);
+to_bin(X) when is_atom(X) -> atom_to_binary(X, utf8).
 
 %% Defence in depth: `masque:validate_connect_opts/2' already rejects
 %% CRLF here, but callers that bypass the facade should not be able to
@@ -418,7 +484,7 @@ validate_proxy_auth(undefined) ->
 validate_proxy_auth(V) when is_binary(V) ->
     case binary:match(V, [<<"\r">>, <<"\n">>]) of
         nomatch -> ok;
-        _       -> erlang:error({invalid_opts, proxy_authorization_contains_crlf})
+        _ -> erlang:error({invalid_opts, proxy_authorization_contains_crlf})
     end;
 validate_proxy_auth(_) ->
     erlang:error({invalid_opts, proxy_authorization_must_be_binary}).

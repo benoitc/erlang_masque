@@ -19,8 +19,10 @@ default_includes_cacerts_test() ->
 
 default_alpn_is_http1_1_test() ->
     Opts = masque_tls:client_opts(<<"proxy.example">>, #{}),
-    ?assertEqual([<<"http/1.1">>],
-                 proplists:get_value(alpn_advertised_protocols, Opts)).
+    ?assertEqual(
+        [<<"http/1.1">>],
+        proplists:get_value(alpn_advertised_protocols, Opts)
+    ).
 
 default_hostname_check_present_test() ->
     Opts = masque_tls:client_opts(<<"proxy.example">>, #{}),
@@ -28,33 +30,49 @@ default_hostname_check_present_test() ->
 
 sni_for_hostname_test() ->
     Opts = masque_tls:client_opts(<<"proxy.example">>, #{}),
-    ?assertEqual("proxy.example",
-                 proplists:get_value(server_name_indication, Opts)).
+    ?assertEqual(
+        "proxy.example",
+        proplists:get_value(server_name_indication, Opts)
+    ).
 
 sni_omitted_for_ipv4_literal_test() ->
     Opts = masque_tls:client_opts(<<"127.0.0.1">>, #{}),
-    ?assertEqual(undefined,
-                 proplists:get_value(server_name_indication, Opts)).
+    ?assertEqual(
+        undefined,
+        proplists:get_value(server_name_indication, Opts)
+    ).
 
 sni_omitted_for_ipv6_literal_test() ->
     Opts = masque_tls:client_opts(<<"::1">>, #{}),
-    ?assertEqual(undefined,
-                 proplists:get_value(server_name_indication, Opts)).
+    ?assertEqual(
+        undefined,
+        proplists:get_value(server_name_indication, Opts)
+    ).
 
 caller_verify_none_wins_test() ->
-    Opts = masque_tls:client_opts(<<"proxy.example">>,
-                                    #{verify => verify_none}),
+    Opts = masque_tls:client_opts(
+        <<"proxy.example">>,
+        #{verify => verify_none}
+    ),
     ?assertEqual(verify_none, proplists:get_value(verify, Opts)).
 
 caller_ssl_opts_override_test() ->
-    Opts = masque_tls:client_opts(<<"proxy.example">>,
-                                    #{ssl_opts => [{verify, verify_none},
-                                                    {cacerts, []}]}),
+    Opts = masque_tls:client_opts(
+        <<"proxy.example">>,
+        #{
+            ssl_opts => [
+                {verify, verify_none},
+                {cacerts, []}
+            ]
+        }
+    ),
     ?assertEqual(verify_none, proplists:get_value(verify, Opts)),
     ?assertEqual([], proplists:get_value(cacerts, Opts)).
 
 accepts_list_host_test() ->
     %% `h1_client:connect/3' accepts either a binary or a string.
     Opts = masque_tls:client_opts("proxy.example", #{}),
-    ?assertEqual("proxy.example",
-                 proplists:get_value(server_name_indication, Opts)).
+    ?assertEqual(
+        "proxy.example",
+        proplists:get_value(server_name_indication, Opts)
+    ).

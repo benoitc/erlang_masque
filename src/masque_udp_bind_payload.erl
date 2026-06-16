@@ -27,16 +27,18 @@
 %%% on encode using the advertised public-address families.
 -module(masque_udp_bind_payload).
 
--export([encode_compressed/1,
-         encode_uncompressed/3,
-         decode_compressed/1,
-         decode_uncompressed/1,
-         family_advertised/2]).
+-export([
+    encode_compressed/1,
+    encode_uncompressed/3,
+    decode_compressed/1,
+    decode_uncompressed/1,
+    family_advertised/2
+]).
 
 -type families() :: [4 | 6].
 -type encode_error() :: unadvertised_family.
 -type decode_error() ::
-      truncated
+    truncated
     | bad_ip_version
     | bad_udp_port.
 
@@ -58,24 +60,29 @@ encode_compressed(UdpPayload) when is_binary(UdpPayload) ->
 %% tuple is carried inline. Address family must be in the advertised
 %% list.
 -spec encode_uncompressed(
-        {4 | 6, inet:ip_address(), inet:port_number()},
-        binary(),
-        families()) ->
+    {4 | 6, inet:ip_address(), inet:port_number()},
+    binary(),
+    families()
+) ->
     {ok, binary()} | {error, encode_error()}.
-encode_uncompressed({V, _, _}, _Payload, Fams)
-  when V =/= 4, V =/= 6 ->
+encode_uncompressed({V, _, _}, _Payload, Fams) when
+    V =/= 4, V =/= 6
+->
     %% defensive; spec only allows 4 / 6 in the wire IP Version
     case lists:member(V, Fams) of
-        true  -> {error, bad_ip_version};
+        true -> {error, bad_ip_version};
         false -> {error, unadvertised_family}
     end;
-encode_uncompressed({V, IP, Port}, Payload, Fams)
-  when (V =:= 4 orelse V =:= 6),
-       is_integer(Port), Port >= 0, Port =< 65535,
-       is_binary(Payload) ->
+encode_uncompressed({V, IP, Port}, Payload, Fams) when
+    (V =:= 4 orelse V =:= 6),
+    is_integer(Port),
+    Port >= 0,
+    Port =< 65535,
+    is_binary(Payload)
+->
     case lists:member(V, Fams) of
         false -> {error, unadvertised_family};
-        true  -> {ok, build_uncompressed(V, IP, Port, Payload)}
+        true -> {ok, build_uncompressed(V, IP, Port, Payload)}
     end.
 
 %%====================================================================
@@ -92,11 +99,11 @@ decode_compressed(Payload) when is_binary(Payload) ->
 %% and the inner UDP bytes.
 -spec decode_uncompressed(binary()) ->
     {ok, {4 | 6, inet:ip_address(), inet:port_number()}, binary()}
-  | {error, decode_error()}.
+    | {error, decode_error()}.
 decode_uncompressed(<<4:8, A:8, B:8, C:8, D:8, Port:16, Payload/binary>>) ->
     case Port of
         P when P >= 0, P =< 65535 ->
-            {ok, {4, {A,B,C,D}, P}, Payload};
+            {ok, {4, {A, B, C, D}, P}, Payload};
         _ ->
             {error, bad_udp_port}
     end;
@@ -106,7 +113,7 @@ decode_uncompressed(<<6:8, V6:16/binary, Port:16, Payload/binary>>) ->
     <<A:16, B:16, C:16, D:16, E:16, F:16, G:16, H:16>> = V6,
     case Port of
         P when P >= 0, P =< 65535 ->
-            {ok, {6, {A,B,C,D,E,F,G,H}, P}, Payload};
+            {ok, {6, {A, B, C, D, E, F, G, H}, P}, Payload};
         _ ->
             {error, bad_udp_port}
     end;
@@ -134,8 +141,7 @@ family_advertised(V, Fams) when is_integer(V), is_list(Fams) ->
 %% Internal
 %%====================================================================
 
-build_uncompressed(4, {A,B,C,D}, Port, Payload) ->
+build_uncompressed(4, {A, B, C, D}, Port, Payload) ->
     <<4:8, A:8, B:8, C:8, D:8, Port:16, Payload/binary>>;
-build_uncompressed(6, {A,B,C,D,E,F,G,H}, Port, Payload) ->
-    <<6:8, A:16, B:16, C:16, D:16, E:16, F:16, G:16, H:16,
-      Port:16, Payload/binary>>.
+build_uncompressed(6, {A, B, C, D, E, F, G, H}, Port, Payload) ->
+    <<6:8, A:16, B:16, C:16, D:16, E:16, F:16, G:16, H:16, Port:16, Payload/binary>>.

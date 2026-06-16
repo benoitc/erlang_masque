@@ -20,9 +20,12 @@
 -include_lib("stdlib/include/assert.hrl").
 
 -export([
-    suite/0, all/0,
-    init_per_suite/1, end_per_suite/1,
-    init_per_testcase/2, end_per_testcase/2
+    suite/0,
+    all/0,
+    init_per_suite/1,
+    end_per_suite/1,
+    init_per_testcase/2,
+    end_per_testcase/2
 ]).
 
 -export([
@@ -59,7 +62,7 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     case ?config(certs, Config) of
         undefined -> ok;
-        Certs     -> masque_test_helpers:cleanup_certs(Certs)
+        Certs -> masque_test_helpers:cleanup_certs(Certs)
     end,
     ok.
 
@@ -79,11 +82,14 @@ our_client_talks_to_peer_server(Config) ->
             Bin = ?config(interop_bin, Config),
             {ok, PeerPort} = spawn_peer_server(Bin, ?config(certs, Config)),
             ProxyURI = iolist_to_binary(
-                ["https://localhost:", integer_to_list(PeerPort)]),
+                ["https://localhost:", integer_to_list(PeerPort)]
+            ),
             try
-                {ok, Sess} = masque:connect(ProxyURI,
-                                            {<<"127.0.0.1">>, 9},
-                                            #{verify => verify_none}),
+                {ok, Sess} = masque:connect(
+                    ProxyURI,
+                    {<<"127.0.0.1">>, 9},
+                    #{verify => verify_none}
+                ),
                 ok = masque:send(Sess, <<"interop ping">>),
                 masque:close(Sess)
             after
@@ -116,11 +122,13 @@ our_server_talks_to_peer_client(Config) ->
 
 external_bin() ->
     case os:getenv(?BIN_ENV) of
-        false -> false;
-        ""    -> false;
-        Path  ->
+        false ->
+            false;
+        "" ->
+            false;
+        Path ->
             case filelib:is_regular(Path) of
-                true  -> Path;
+                true -> Path;
                 false -> false
             end
     end.

@@ -43,12 +43,18 @@
 -export([acquire_stream/4, release_stream/2]).
 -export([info/1]).
 
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
+-export([
+    init/1,
+    handle_call/3,
+    handle_cast/2,
+    handle_info/2,
+    terminate/2,
+    code_change/3
+]).
 
 -type start_args() :: #{
-    transport   := h2 | quic_h3,
-    conn        := pid(),
+    transport := h2 | quic_h3,
+    conn := pid(),
     %% Optional override for the module used to drive the conn. In
     %% production `h2` / `quic_h3' are both module names and tag
     %% atoms, so they double up; tests supply a mock module that
@@ -71,15 +77,15 @@
 }).
 
 -record(state, {
-    transport   :: h2 | quic_h3,
-    mod         :: module(),
-    conn        :: pid(),
-    conn_mon    :: reference(),
+    transport :: h2 | quic_h3,
+    mod :: module(),
+    conn :: pid(),
+    conn_mon :: reference(),
     fingerprint :: term(),
-    refs        :: #{non_neg_integer() => #ref{}},
+    refs :: #{non_neg_integer() => #ref{}},
     max_streams :: pos_integer() | dynamic,
-    idle_ms     :: non_neg_integer() | infinity,
-    idle_ref    :: undefined | reference()
+    idle_ms :: non_neg_integer() | infinity,
+    idle_ref :: undefined | reference()
 }).
 
 %%====================================================================
@@ -123,8 +129,11 @@ stop(Owner) ->
 -spec acquire_stream(pid(), [{binary(), binary()}], pid(), map()) ->
     {ok, non_neg_integer(), pid()} | {error, term()}.
 acquire_stream(Owner, Headers, SessionPid, ReqOpts) ->
-    gen_server:call(Owner, {acquire, Headers, SessionPid, ReqOpts},
-                     30000).
+    gen_server:call(
+        Owner,
+        {acquire, Headers, SessionPid, ReqOpts},
+        30000
+    ).
 
 %% @doc Release the stream previously acquired by this session.
 %% Safe to call multiple times (second call is a no-op).
@@ -148,25 +157,32 @@ init(#{transport := Transport, conn := Conn} = Args) ->
     %% the registry's DOWN handler evicts the cache entry from there.
     MRef = erlang:monitor(process, Conn),
     IdleMs = maps:get(idle_timeout_ms, Args, 30000),
-    MaxStreams = resolve_max_streams(Transport, Mod, Conn,
-                                      maps:get(max_streams, Args, default)),
+    MaxStreams = resolve_max_streams(
+        Transport,
+        Mod,
+        Conn,
+        maps:get(max_streams, Args, default)
+    ),
     State0 = #state{
-        transport   = Transport,
-        mod         = Mod,
-        conn        = Conn,
-        conn_mon    = MRef,
+        transport = Transport,
+        mod = Mod,
+        conn = Conn,
+        conn_mon = MRef,
         fingerprint = maps:get(fingerprint, Args, undefined),
-        refs        = #{},
+        refs = #{},
         max_streams = MaxStreams,
-        idle_ms     = IdleMs,
-        idle_ref    = undefined
+        idle_ms = IdleMs,
+        idle_ref = undefined
     },
     %% No refs yet; start the idle timer so a conn nobody ever uses
     %% does not sit open forever.
     {ok, arm_idle(State0)}.
 
-handle_call({acquire, Headers, SessionPid, ReqOpts}, _From,
-            #state{refs = Refs, max_streams = MS} = S) ->
+handle_call(
+    {acquire, Headers, SessionPid, ReqOpts},
+    _From,
+    #state{refs = Refs, max_streams = MS} = S
+) ->
     case at_capacity(maps:size(Refs), MS) of
         true ->
             {reply, {error, stream_limit}, S};
@@ -175,8 +191,7 @@ handle_call({acquire, Headers, SessionPid, ReqOpts}, _From,
                 {ok, StreamId} ->
                     case register_stream(StreamId, SessionPid, S) of
                         {ok, S1} ->
-                            {reply, {ok, StreamId, S#state.conn},
-                             cancel_idle(S1)};
+                            {reply, {ok, StreamId, S#state.conn}, cancel_idle(S1)};
                         {error, _} = Err ->
                             _ = cancel_transport_stream(S, StreamId),
                             {reply, Err, S}
@@ -187,13 +202,15 @@ handle_call({acquire, Headers, SessionPid, ReqOpts}, _From,
     end;
 handle_call(info, _From, S) ->
     {reply,
-     #{transport => S#state.transport,
-       conn      => S#state.conn,
-       refs      => maps:size(S#state.refs),
-       max_streams => S#state.max_streams,
-       idle_ms     => S#state.idle_ms,
-       fingerprint => S#state.fingerprint},
-     S};
+        #{
+            transport => S#state.transport,
+            conn => S#state.conn,
+            refs => maps:size(S#state.refs),
+            max_streams => S#state.max_streams,
+            idle_ms => S#state.idle_ms,
+            fingerprint => S#state.fingerprint
+        },
+        S};
 handle_call(stop, _From, S) ->
     {stop, normal, ok, S};
 handle_call(_Req, _From, S) ->
@@ -206,54 +223,74 @@ handle_cast(_Msg, S) ->
 
 %% Response headers land on the connection owner with the stream
 %% id; route to the session that owns that stream.
-handle_info({quic_h3, _Conn, {response, StreamId, _, _} = Evt},
-            #state{transport = quic_h3} = S) ->
+handle_info(
+    {quic_h3, _Conn, {response, StreamId, _, _} = Evt},
+    #state{transport = quic_h3} = S
+) ->
     _ = route({quic_h3, S#state.conn, Evt}, StreamId, S),
     {noreply, S};
-handle_info({h2, _Conn, {response, StreamId, _, _} = Evt},
-            #state{transport = h2} = S) ->
+handle_info(
+    {h2, _Conn, {response, StreamId, _, _} = Evt},
+    #state{transport = h2} = S
+) ->
     _ = route({h2, S#state.conn, Evt}, StreamId, S),
     {noreply, S};
 %% Stream data (h2 or h3) that was buffered before the handler was
 %% set can arrive as a message when `drain_buffer => false'.
-handle_info({quic_h3, _Conn, {data, StreamId, _, _} = Evt},
-            #state{transport = quic_h3} = S) ->
+handle_info(
+    {quic_h3, _Conn, {data, StreamId, _, _} = Evt},
+    #state{transport = quic_h3} = S
+) ->
     _ = route({quic_h3, S#state.conn, Evt}, StreamId, S),
     {noreply, S};
-handle_info({h2, _Conn, {data, StreamId, _, _} = Evt},
-            #state{transport = h2} = S) ->
+handle_info(
+    {h2, _Conn, {data, StreamId, _, _} = Evt},
+    #state{transport = h2} = S
+) ->
     _ = route({h2, S#state.conn, Evt}, StreamId, S),
     {noreply, S};
 %% h3 datagrams arrive at the connection owner (this process) with
 %% the stream id in the tag; route them to the matching session.
-handle_info({quic_h3, _Conn, {datagram, StreamId, _Payload} = Evt},
-            #state{transport = quic_h3} = S) ->
+handle_info(
+    {quic_h3, _Conn, {datagram, StreamId, _Payload} = Evt},
+    #state{transport = quic_h3} = S
+) ->
     _ = route({quic_h3, S#state.conn, Evt}, StreamId, S),
     {noreply, S};
 %% Stream resets are delivered to the connection owner on both h2
 %% and quic_h3; forward to the affected session and drop the slot.
-handle_info({quic_h3, _Conn, {stream_reset, StreamId, _} = Evt} = _Msg,
-            #state{transport = quic_h3} = S) ->
+handle_info(
+    {quic_h3, _Conn, {stream_reset, StreamId, _} = Evt} = _Msg,
+    #state{transport = quic_h3} = S
+) ->
     _ = route({quic_h3, S#state.conn, Evt}, StreamId, S),
     {noreply, drop_stream(StreamId, S)};
-handle_info({h2, _Conn, {stream_reset, StreamId, _} = Evt},
-            #state{transport = h2} = S) ->
+handle_info(
+    {h2, _Conn, {stream_reset, StreamId, _} = Evt},
+    #state{transport = h2} = S
+) ->
     _ = route({h2, S#state.conn, Evt}, StreamId, S),
     {noreply, drop_stream(StreamId, S)};
 %% Connection-closed: fan out to every registered session so they
 %% can surface `peer_closed' cleanly, then stop so the registry
 %% evicts this owner.
-handle_info({h2, _Conn, closed} = Evt,
-            #state{transport = h2} = S) ->
+handle_info(
+    {h2, _Conn, closed} = Evt,
+    #state{transport = h2} = S
+) ->
     broadcast(Evt, S),
     {stop, normal, S};
-handle_info({quic_h3, _Conn, closed} = Evt,
-            #state{transport = quic_h3} = S) ->
+handle_info(
+    {quic_h3, _Conn, closed} = Evt,
+    #state{transport = quic_h3} = S
+) ->
     broadcast(Evt, S),
     {stop, normal, S};
 %% The monitored conn died without a graceful close - same outcome.
-handle_info({'DOWN', Ref, process, _Pid, _Reason},
-            #state{conn_mon = Ref} = S) ->
+handle_info(
+    {'DOWN', Ref, process, _Pid, _Reason},
+    #state{conn_mon = Ref} = S
+) ->
     broadcast({tagged_closed(S), S#state.conn, closed}, S),
     {stop, normal, S};
 %% A registered session died. Release its slot.
@@ -261,8 +298,10 @@ handle_info({'DOWN', Ref, process, Pid, _Reason}, S) ->
     {noreply, release_by_monitor(Ref, Pid, S)};
 %% Idle-timer expiry: no active streams for idle_ms; close the conn
 %% and stop.
-handle_info({timeout, Ref, idle},
-            #state{idle_ref = Ref} = S) ->
+handle_info(
+    {timeout, Ref, idle},
+    #state{idle_ref = Ref} = S
+) ->
     _ = close_transport(S),
     {stop, normal, S};
 %% Late / stale timer.
@@ -291,20 +330,22 @@ resolve_max_streams(h2, Mod, Conn, default) ->
             %% RFC 9113 §6.5.2: default is 100 when absent or 0.
             %% erlang_h2 may also surface `unlimited'; treat as dynamic.
             case maps:get(max_concurrent_streams, Map, 100) of
-                0               -> 100;
-                unlimited       -> dynamic;
+                0 -> 100;
+                unlimited -> dynamic;
                 N when is_integer(N), N > 0 -> N;
-                _               -> 100
+                _ -> 100
             end;
         _ ->
             100
-    catch _:_ ->
+    catch
+        _:_ ->
             100
     end;
 resolve_max_streams(quic_h3, _Mod, _Conn, default) ->
     dynamic;
-resolve_max_streams(_, _Mod, _Conn, Explicit)
-  when is_integer(Explicit), Explicit > 0 ->
+resolve_max_streams(_, _Mod, _Conn, Explicit) when
+    is_integer(Explicit), Explicit > 0
+->
     Explicit;
 resolve_max_streams(_, _Mod, _Conn, dynamic) ->
     dynamic.
@@ -313,26 +354,46 @@ issue_request(#state{mod = Mod, conn = Conn}, Headers, Opts) ->
     Mod:request(Conn, Headers, Opts).
 
 cancel_transport_stream(#state{mod = Mod, conn = Conn}, StreamId) ->
-    try Mod:cancel(Conn, StreamId) catch _:_ -> ok end.
+    try
+        Mod:cancel(Conn, StreamId)
+    catch
+        _:_ -> ok
+    end.
 
-register_stream(StreamId, SessionPid,
-                #state{mod = Mod, conn = Conn, refs = Refs} = S) ->
+register_stream(
+    StreamId,
+    SessionPid,
+    #state{mod = Mod, conn = Conn, refs = Refs} = S
+) ->
     %% `drain_buffer => false' tells the transport to re-emit any
     %% chunks that arrived before registration as `{data, _, _, _}'
     %% messages to the handler. Keeps the session's `handle_info'
     %% clauses the only decode path.
-    Result = case erlang:function_exported(Mod, set_stream_handler, 4) of
-                 true  -> Mod:set_stream_handler(Conn, StreamId, SessionPid,
-                                                  #{drain_buffer => false});
-                 false -> Mod:set_stream_handler(Conn, StreamId, SessionPid)
-             end,
+    Result =
+        case erlang:function_exported(Mod, set_stream_handler, 4) of
+            true ->
+                Mod:set_stream_handler(
+                    Conn,
+                    StreamId,
+                    SessionPid,
+                    #{drain_buffer => false}
+                );
+            false ->
+                Mod:set_stream_handler(Conn, StreamId, SessionPid)
+        end,
     case Result of
         R when R =:= ok; element(1, R) =:= ok ->
             MonRef = erlang:monitor(process, SessionPid),
-            {ok, S#state{refs = maps:put(
-                StreamId, #ref{session_pid = SessionPid,
-                                monitor_ref = MonRef},
-                Refs)}};
+            {ok, S#state{
+                refs = maps:put(
+                    StreamId,
+                    #ref{
+                        session_pid = SessionPid,
+                        monitor_ref = MonRef
+                    },
+                    Refs
+                )
+            }};
         {error, _} = Err ->
             Err
     end.
@@ -349,12 +410,21 @@ drop_stream(StreamId, #state{refs = Refs} = S) ->
     end.
 
 unset_stream_handler(#state{mod = Mod, conn = Conn}, StreamId) ->
-    try Mod:unset_stream_handler(Conn, StreamId) catch _:_ -> ok end.
+    try
+        Mod:unset_stream_handler(Conn, StreamId)
+    catch
+        _:_ -> ok
+    end.
 
 release_by_monitor(MRef, _Pid, #state{refs = Refs} = S) ->
     Entries = maps:to_list(Refs),
-    case lists:keyfind(MRef, 2,
-            [{Sid, R#ref.monitor_ref} || {Sid, R} <- Entries]) of
+    case
+        lists:keyfind(
+            MRef,
+            2,
+            [{Sid, R#ref.monitor_ref} || {Sid, R} <- Entries]
+        )
+    of
         {StreamId, MRef} ->
             drop_stream(StreamId, S);
         false ->
@@ -370,30 +440,41 @@ release_by_monitor(MRef, _Pid, #state{refs = Refs} = S) ->
 route(Msg, StreamId, #state{refs = Refs}) ->
     case maps:find(StreamId, Refs) of
         {ok, #ref{session_pid = Pid}} -> Pid ! Msg;
-        error                         -> ok
+        error -> ok
     end.
 
 broadcast(Msg, #state{refs = Refs}) ->
     maps:foreach(
-      fun(_Sid, #ref{session_pid = Pid}) -> Pid ! Msg end, Refs).
+        fun(_Sid, #ref{session_pid = Pid}) -> Pid ! Msg end, Refs
+    ).
 
-tagged_closed(#state{transport = h2})      -> h2;
+tagged_closed(#state{transport = h2}) -> h2;
 tagged_closed(#state{transport = quic_h3}) -> quic_h3.
 
 close_transport(#state{mod = Mod, conn = Conn}) ->
-    try Mod:close(Conn) catch _:_ -> ok end.
+    try
+        Mod:close(Conn)
+    catch
+        _:_ -> ok
+    end.
 
-arm_idle(#state{idle_ms = infinity} = S) -> S;
-arm_idle(#state{idle_ms = 0} = S) -> S;
+arm_idle(#state{idle_ms = infinity} = S) ->
+    S;
+arm_idle(#state{idle_ms = 0} = S) ->
+    S;
 arm_idle(#state{idle_ref = Old, idle_ms = Ms} = S) ->
     case Old of
-        undefined -> ok;
-        _         -> _ = erlang:cancel_timer(Old), ok
+        undefined ->
+            ok;
+        _ ->
+            _ = erlang:cancel_timer(Old),
+            ok
     end,
     Ref = erlang:start_timer(Ms, self(), idle),
     S#state{idle_ref = Ref}.
 
-cancel_idle(#state{idle_ref = undefined} = S) -> S;
+cancel_idle(#state{idle_ref = undefined} = S) ->
+    S;
 cancel_idle(#state{idle_ref = Ref} = S) ->
     _ = erlang:cancel_timer(Ref),
     S#state{idle_ref = undefined}.
@@ -413,10 +494,12 @@ init_for_pool(RegistryPid, Tag, Opts) ->
     Mod = maps:get(transport_mod, Opts, Transport),
     case do_dial(Transport, Mod, Opts) of
         {ok, Conn} ->
-            Args = Opts#{conn => Conn,
-                         transport => Transport,
-                         transport_mod => Mod,
-                         fingerprint => Tag},
+            Args = Opts#{
+                conn => Conn,
+                transport => Transport,
+                transport_mod => Mod,
+                fingerprint => Tag
+            },
             {ok, State} = init(Args),
             RegistryPid ! {dial_result, Tag, {ok, self()}},
             gen_server:enter_loop(?MODULE, [], State);
@@ -429,8 +512,8 @@ do_dial(h2, Mod, Opts) ->
     Port = maps:get(port, Opts),
     ConnOpts = maps:get(connect_opts, Opts, #{}),
     case Mod:connect(Host, Port, ConnOpts#{sync => true}) of
-        {ok, Conn}      -> {ok, Conn};
-        {error, _} = E  -> E
+        {ok, Conn} -> {ok, Conn};
+        {error, _} = E -> E
     end;
 do_dial(quic_h3, Mod, Opts) ->
     Host = maps:get(host, Opts),
@@ -438,14 +521,19 @@ do_dial(quic_h3, Mod, Opts) ->
     ConnOpts0 = maps:get(connect_opts, Opts, #{}),
     %% Pooled h3 conns are always opened datagram-capable so the
     %% same conn can carry CONNECT-UDP / -IP / -TCP tunnels.
-    ConnOpts = ConnOpts0#{sync => true,
-                           h3_datagram_enabled => true,
-                           settings =>
-                             maps:merge(
-                               #{enable_connect_protocol => 1,
-                                 h3_datagram => 1},
-                               maps:get(settings, ConnOpts0, #{}))},
+    ConnOpts = ConnOpts0#{
+        sync => true,
+        h3_datagram_enabled => true,
+        settings =>
+            maps:merge(
+                #{
+                    enable_connect_protocol => 1,
+                    h3_datagram => 1
+                },
+                maps:get(settings, ConnOpts0, #{})
+            )
+    },
     case Mod:connect(Host, Port, ConnOpts) of
-        {ok, Conn}      -> {ok, Conn};
-        {error, _} = E  -> E
+        {ok, Conn} -> {ok, Conn};
+        {error, _} = E -> E
     end.

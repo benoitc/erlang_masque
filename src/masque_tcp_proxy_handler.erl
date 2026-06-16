@@ -16,11 +16,17 @@
 -module(masque_tcp_proxy_handler).
 -behaviour(masque_handler).
 
--export([accept/1, init/2, handle_data/2, handle_eof/1,
-         handle_info/2, terminate/2]).
+-export([
+    accept/1,
+    init/2,
+    handle_data/2,
+    handle_eof/1,
+    handle_info/2,
+    terminate/2
+]).
 
 -record(state, {
-    socket    :: gen_tcp:socket(),
+    socket :: gen_tcp:socket(),
     eof_timer :: reference() | undefined
 }).
 
@@ -33,7 +39,7 @@ accept(#{target_host := Host, target_port := Port} = Req) ->
     Opts = maps:get(handler_opts, Req, #{}),
     AllowFun = maps:get(allow, Opts, fun(_) -> true end),
     case AllowFun({Host, Port}) of
-        true  -> accept;
+        true -> accept;
         false -> {reject, forbidden}
     end.
 
@@ -49,8 +55,12 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
                 false ->
                     {stop, {resolution_failed, private_address}};
                 true ->
-                    TcpOpts = [binary, {active, true}, Family
-                               | maps:get(socket_opts, Opts, [])],
+                    TcpOpts = [
+                        binary,
+                        {active, true},
+                        Family
+                        | maps:get(socket_opts, Opts, [])
+                    ],
                     case gen_tcp:connect(IP, Port, TcpOpts, ConnTimeout) of
                         {ok, Socket} ->
                             {ok, #state{socket = Socket}};
@@ -79,14 +89,21 @@ handle_eof(#state{socket = S} = State) ->
     TRef = erlang:send_after(30000, self(), eof_timeout),
     {ok, State#state{eof_timer = TRef}}.
 
--spec handle_info(term(), #state{}) -> {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
+-spec handle_info(term(), #state{}) ->
+    {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
 handle_info({tcp, Socket, Bytes}, #state{socket = Socket} = State) ->
     {ok, State, [{send_data, Bytes}]};
-handle_info({tcp_closed, Socket}, #state{socket = Socket,
-                                          eof_timer = TRef} = State) ->
-    _ = case TRef of
+handle_info(
+    {tcp_closed, Socket},
+    #state{
+        socket = Socket,
+        eof_timer = TRef
+    } = State
+) ->
+    _ =
+        case TRef of
             undefined -> ok;
-            _         -> erlang:cancel_timer(TRef)
+            _ -> erlang:cancel_timer(TRef)
         end,
     {stop, target_closed, State};
 handle_info(eof_timeout, State) ->
@@ -109,18 +126,25 @@ default_resolver(Host) when is_binary(Host) ->
     default_resolver(binary_to_list(Host));
 default_resolver(Host) when is_list(Host) ->
     case inet_parse:address(Host) of
-        {ok, IP} -> {ok, IP};
-        _        ->
+        {ok, IP} ->
+            {ok, IP};
+        _ ->
             case inet:getaddr(Host, inet) of
-                {ok, IP}   -> {ok, IP};
+                {ok, IP} -> {ok, IP};
                 {error, _} -> inet:getaddr(Host, inet6)
             end
     end.
 
-pick_family(inet, _Host)  -> inet;
-pick_family(inet6, _Host) -> inet6;
+pick_family(inet, _Host) ->
+    inet;
+pick_family(inet6, _Host) ->
+    inet6;
 pick_family(auto, Host) ->
-    HostStr = if is_binary(Host) -> binary_to_list(Host); true -> Host end,
+    HostStr =
+        if
+            is_binary(Host) -> binary_to_list(Host);
+            true -> Host
+        end,
     case inet:parse_address(HostStr) of
         {ok, {_, _, _, _, _, _, _, _}} -> inet6;
         _ -> inet

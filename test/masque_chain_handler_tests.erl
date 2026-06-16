@@ -49,8 +49,12 @@ info_ip_packet_from_upstream_emits_action_test() ->
 
 info_route_advertisement_from_upstream_emits_action_test() ->
     {S, Pid} = state(ip),
-    Route = #ip_route{version = 4, start_addr = {0,0,0,0},
-                      end_addr = {255,255,255,255}, ip_protocol = 0},
+    Route = #ip_route{
+        version = 4,
+        start_addr = {0, 0, 0, 0},
+        end_addr = {255, 255, 255, 255},
+        ip_protocol = 0
+    },
     Msg = {masque_route_advertisement, Pid, [Route]},
     {ok, _, Actions} = ?M:handle_info(Msg, S),
     ?assertEqual([{advertise, [Route]}], Actions),
@@ -60,8 +64,12 @@ info_unprompted_address_assign_is_forwarded_test() ->
     {S, Pid} = state(ip),
     %% request_id = 0 is the unprompted (server-initiated) shape per
     %% RFC 9484 §4.7.1 - safe to forward through the chain.
-    Assign = #ip_assignment{request_id = 0, version = 4,
-                            address = {10,0,0,5}, prefix_len = 32},
+    Assign = #ip_assignment{
+        request_id = 0,
+        version = 4,
+        address = {10, 0, 0, 5},
+        prefix_len = 32
+    },
     Msg = {masque_address_assign, Pid, [Assign]},
     {ok, _, Actions} = ?M:handle_info(Msg, S),
     ?assertEqual([{assign, [Assign]}], Actions),
@@ -73,18 +81,30 @@ info_prompted_address_assign_is_dropped_test() ->
     %% Dropping is the conservative choice until the full id-mapping
     %% flow lands (the deferred follow-up noted in the handler doc).
     {S, Pid} = state(ip),
-    Assign = #ip_assignment{request_id = 42, version = 4,
-                            address = {10,0,0,6}, prefix_len = 32},
+    Assign = #ip_assignment{
+        request_id = 42,
+        version = 4,
+        address = {10, 0, 0, 6},
+        prefix_len = 32
+    },
     Msg = {masque_address_assign, Pid, [Assign]},
     ?assertMatch({ok, _}, ?M:handle_info(Msg, S)),
     cleanup(Pid).
 
 info_mixed_address_assign_forwards_unprompted_only_test() ->
     {S, Pid} = state(ip),
-    Unprompted = #ip_assignment{request_id = 0, version = 4,
-                                address = {10,0,0,7}, prefix_len = 32},
-    Prompted = #ip_assignment{request_id = 9, version = 4,
-                              address = {10,0,0,8}, prefix_len = 32},
+    Unprompted = #ip_assignment{
+        request_id = 0,
+        version = 4,
+        address = {10, 0, 0, 7},
+        prefix_len = 32
+    },
+    Prompted = #ip_assignment{
+        request_id = 9,
+        version = 4,
+        address = {10, 0, 0, 8},
+        prefix_len = 32
+    },
     Msg = {masque_address_assign, Pid, [Unprompted, Prompted]},
     {ok, _, Actions} = ?M:handle_info(Msg, S),
     ?assertEqual([{assign, [Unprompted]}], Actions),
@@ -121,22 +141,29 @@ info_unknown_message_is_ignored_test() ->
 %%====================================================================
 
 accept_ip_request_test() ->
-    Req = #{protocol => ip,
-            ip_target => {10,0,0,1},
-            ip_ipproto => '*',
-            handler_opts => #{}},
+    Req = #{
+        protocol => ip,
+        ip_target => {10, 0, 0, 1},
+        ip_ipproto => '*',
+        handler_opts => #{}
+    },
     ?assertEqual(accept, ?M:accept(Req)).
 
 accept_ip_request_with_allow_deny_test() ->
-    Req = #{protocol => ip,
-            ip_target => {10,0,0,1},
-            ip_ipproto => '*',
-            handler_opts => #{allow => fun(_) -> false end}},
+    Req = #{
+        protocol => ip,
+        ip_target => {10, 0, 0, 1},
+        ip_ipproto => '*',
+        handler_opts => #{allow => fun(_) -> false end}
+    },
     ?assertEqual({reject, forbidden}, ?M:accept(Req)).
 
 accept_udp_request_test() ->
-    Req = #{target_host => <<"host">>, target_port => 80,
-            handler_opts => #{}},
+    Req = #{
+        target_host => <<"host">>,
+        target_port => 80,
+        handler_opts => #{}
+    },
     ?assertEqual(accept, ?M:accept(Req)).
 
 %%====================================================================
@@ -155,8 +182,10 @@ mock_loop(TestPid) ->
             TestPid ! {captured, Payload},
             gen_statem:reply(From, ok),
             mock_loop(TestPid);
-        stop -> ok;
-        _   -> mock_loop(TestPid)
+        stop ->
+            ok;
+        _ ->
+            mock_loop(TestPid)
     end.
 
 assert_captured(Expected) ->

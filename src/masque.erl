@@ -18,25 +18,31 @@
 -export([start_listener_h2/2, stop_listener_h2/1]).
 -export([start_listener_h1/2, stop_listener_h1/1]).
 -export([drain_listener/1, undrain_listener/1, is_draining/1]).
--export([start_chain_listener/2,
-         start_chain_listener_h2/2,
-         start_chain_listener_h1/2]).
+-export([
+    start_chain_listener/2,
+    start_chain_listener_h2/2,
+    start_chain_listener_h1/2
+]).
 -export([h3_handlers/1, h2_handlers/1]).
 
 %% CONNECT-IP (RFC 9484) client API.
--export([send_ip_packet/2,
-         request_addresses/2,
-         assign_addresses/2,
-         advertise_routes/2,
-         ip_info/1]).
+-export([
+    send_ip_packet/2,
+    request_addresses/2,
+    assign_addresses/2,
+    advertise_routes/2,
+    ip_info/1
+]).
 
 %% Connect-UDP-Bind (draft-ietf-masque-connect-udp-listen-11) client API.
--export([bind_connect/3,
-         send_to/3,
-         assign_compression/2,
-         open_uncompressed_context/1,
-         close_compression/2,
-         proxy_public_address/1]).
+-export([
+    bind_connect/3,
+    send_to/3,
+    assign_compression/2,
+    open_uncompressed_context/1,
+    close_compression/2,
+    proxy_public_address/1
+]).
 
 -include("masque.hrl").
 -include("masque_ip.hrl").
@@ -49,9 +55,15 @@
     connect_opts/0,
     listener_opts/0,
     %% CONNECT-IP types.
-    ip_version/0, ip_prefix/0, ip_prefix_request/0,
-    ip_assignment/0, ip_route/0, ip_ipproto/0, ip_target/0,
-    request_id/0, nz_request_id/0
+    ip_version/0,
+    ip_prefix/0,
+    ip_prefix_request/0,
+    ip_assignment/0,
+    ip_route/0,
+    ip_ipproto/0,
+    ip_target/0,
+    request_id/0,
+    nz_request_id/0
 ]).
 
 %%====================================================================
@@ -64,8 +76,7 @@
 
 %% A UDP/TCP target — a resolved IP or a host name to resolve, and a
 %% port. CONNECT-IP targets are `{ip_target(), ip_ipproto()}'.
--type udp_target() :: {binary() | inet:hostname() | inet:ip_address(),
-                       inet:port_number()}.
+-type udp_target() :: {binary() | inet:hostname() | inet:ip_address(), inet:port_number()}.
 -type target() :: udp_target() | {ip_target(), ip_ipproto()}.
 
 -type transport() :: h3 | h2 | h1.
@@ -76,8 +87,9 @@
 
 -type ip_version() :: 4 | 6.
 
--type ip_prefix() :: {4, inet:ip4_address(), 0..32}
-                   | {6, inet:ip6_address(), 0..128}.
+-type ip_prefix() ::
+    {4, inet:ip4_address(), 0..32}
+    | {6, inet:ip6_address(), 0..128}.
 
 %% RFC 9484 §4.7.2 — ADDRESS_REQUEST Request IDs MUST be nonzero.
 -type nz_request_id() :: pos_integer().
@@ -91,16 +103,18 @@
 %% Clients that want to build them without the include can use the
 %% `masque_ip' helper module.
 -type ip_prefix_request() :: #ip_prefix_request{}.
--type ip_assignment()     :: #ip_assignment{}.
--type ip_route()          :: #ip_route{}.
+-type ip_assignment() :: #ip_assignment{}.
+-type ip_route() :: #ip_route{}.
 
 -type ip_ipproto() :: '*' | 0..255.
 
 -type ip_target() ::
-      '*'
-    | inet:ip4_address() | inet:ip6_address()
+    '*'
+    | inet:ip4_address()
+    | inet:ip6_address()
     | ip_prefix()
-    | binary().                 %% hostname
+    %% hostname
+    | binary().
 
 -type connect_opts() ::
     #{
@@ -157,19 +171,24 @@
         %% DER binaries for H3, PEM paths for H2 — both listeners
         %% read these same keys.
         cert => term(),
-        key  => term(),
-        uri_template => binary(),             %% CONNECT-UDP
-        tcp_uri_template => binary(),         %% CONNECT-TCP
-        ip_uri_template => binary(),          %% CONNECT-IP (RFC 9484)
-        handler => module(),                  %% CONNECT-UDP handler
-        tcp_handler => module(),              %% CONNECT-TCP handler
-        ip_handler => module(),               %% CONNECT-IP handler
+        key => term(),
+        %% CONNECT-UDP
+        uri_template => binary(),
+        %% CONNECT-TCP
+        tcp_uri_template => binary(),
+        %% CONNECT-IP (RFC 9484)
+        ip_uri_template => binary(),
+        %% CONNECT-UDP handler
+        handler => module(),
+        %% CONNECT-TCP handler
+        tcp_handler => module(),
+        %% CONNECT-IP handler
+        ip_handler => module(),
         handler_opts => term(),
         address_pool => ip_prefix() | [ip_prefix()],
         routes => [ip_route()],
         mtu => 1280..65535,
-        resolver => fun((binary()) ->
-                            {ok, [inet:ip_address()]} | {error, term()}),
+        resolver => fun((binary()) -> {ok, [inet:ip_address()]} | {error, term()}),
         allow => fun((target()) -> boolean()),
         %% CONNECT-TCP policy - forwarded to the tcp_handler through
         %% handler_opts. `family' picks the outbound DNS-resolved
@@ -207,7 +226,8 @@ connect(ProxyURI, Target, Opts) when is_map(Opts) ->
                     Owner = maps:get(owner, Opts0, self()),
                     Opts1 = Opts0#{proxy => {Host, Port}},
                     Transports = normalize_transports(
-                                   maps:get(transports, Opts1, [h3, h2])),
+                        maps:get(transports, Opts1, [h3, h2])
+                    ),
                     connect_via(Transports, Target, Opts1, Owner);
                 {error, _} = Err ->
                     Err
@@ -226,9 +246,11 @@ validate_connect_opts(Target, Opts) ->
             case check_capsule_protocol(Protocol, Opts) of
                 {ok, Opts1} ->
                     check_proxy_authorization(Opts1);
-                {error, _} = Err -> Err
+                {error, _} = Err ->
+                    Err
             end;
-        {error, _} = Err -> Err
+        {error, _} = Err ->
+            Err
     end.
 
 %% `proxy_authorization' is embedded verbatim on the CONNECT-TCP h1
@@ -253,9 +275,11 @@ has_crlf(B) when is_binary(B) ->
     binary:match(B, [<<"\r">>, <<"\n">>]) =/= nomatch.
 
 check_target_shape(ip, {Target, IPProto}) ->
-    case masque_uri_ip:validate_target(Target) andalso
-         masque_uri_ip:validate_ipproto(IPProto) of
-        true  -> ok;
+    case
+        masque_uri_ip:validate_target(Target) andalso
+            masque_uri_ip:validate_ipproto(IPProto)
+    of
+        true -> ok;
         false -> {error, {bad_target_for_protocol, ip}}
     end;
 check_target_shape(ip, _) ->
@@ -281,16 +305,23 @@ connect_via([h2], Target, Opts, Owner) ->
     dial_single_or_pool(session_mod(Opts, h2), h2, Target, Opts, Owner);
 connect_via([h1], Target, Opts, Owner) ->
     dial_single(session_mod(Opts, h1), Target, Opts#{transport => h1}, Owner);
-connect_via(Transports, Target, Opts, Owner)
-  when length(Transports) >= 2 ->
+connect_via(Transports, Target, Opts, Owner) when
+    length(Transports) >= 2
+->
     masque_racer:race(Transports, Target, Opts, Owner).
 
 %% Single-transport dial that honours `upstream_pool => true' the
 %% same way the racer does; h1 is pool-bypassed so it keeps the
 %% plain dial_single path.
-dial_single_or_pool(Mod, Transport,  Target,
-                    #{upstream_pool := true} = Opts, Owner)
-  when Transport =:= h2; Transport =:= h3 ->
+dial_single_or_pool(
+    Mod,
+    Transport,
+    Target,
+    #{upstream_pool := true} = Opts,
+    Owner
+) when
+    Transport =:= h2; Transport =:= h3
+->
     case masque_racer:checkout_pool(Transport, Opts) of
         {ok, Opts1} ->
             dial_single(Mod, Target, Opts1#{transport => Transport}, Owner);
@@ -302,23 +333,23 @@ dial_single_or_pool(Mod, Transport, Target, Opts, Owner) ->
 
 session_mod(Opts, h3) ->
     case maps:get(protocol, Opts, udp) of
-        tcp      -> masque_tcp_client_session;
-        ip       -> masque_ip_client_session;
+        tcp -> masque_tcp_client_session;
+        ip -> masque_ip_client_session;
         udp_bind -> masque_udp_bind_client_session;
-        _        -> masque_client_session
+        _ -> masque_client_session
     end;
 session_mod(Opts, h2) ->
     case maps:get(protocol, Opts, udp) of
-        tcp      -> masque_tcp_client_session;
-        ip       -> masque_ip_client_session;
+        tcp -> masque_tcp_client_session;
+        ip -> masque_ip_client_session;
         udp_bind -> masque_udp_bind_client_session;
-        _        -> masque_h2_client_session
+        _ -> masque_h2_client_session
     end;
 session_mod(Opts, h1) ->
     case maps:get(protocol, Opts, udp) of
-        udp      -> masque_h1_client_session;
-        ip       -> masque_ip_h1_client_session;
-        tcp      -> masque_tcp_h1_client_session;
+        udp -> masque_h1_client_session;
+        ip -> masque_ip_h1_client_session;
+        tcp -> masque_tcp_h1_client_session;
         udp_bind -> masque_udp_bind_h1_client_session
     end.
 
@@ -330,26 +361,36 @@ dial_single(Mod, Target, Opts, Owner) ->
         {ok, Pid} ->
             MRef = erlang:monitor(process, Pid),
             Timeout = maps:get(timeout, Opts, 5000),
-            Result = try gen_statem:call(Pid, handshake_await,
-                                        Timeout + 1000)
-                     catch
-                         exit:{noproc, _}      -> {error, session_died};
-                         exit:{normal, _}      -> {error, session_died};
-                         exit:{{shutdown,_}, _} -> {error, session_died}
-                     end,
+            Result =
+                try
+                    gen_statem:call(
+                        Pid,
+                        handshake_await,
+                        Timeout + 1000
+                    )
+                catch
+                    exit:{noproc, _} -> {error, session_died};
+                    exit:{normal, _} -> {error, session_died};
+                    exit:{{shutdown, _}, _} -> {error, session_died}
+                end,
             erlang:demonitor(MRef, [flush]),
             case Result of
                 ok ->
                     {ok, Pid};
                 {error, Reason} ->
-                    try exit(Pid, kill) catch _:_ -> ok end,
+                    try
+                        exit(Pid, kill)
+                    catch
+                        _:_ -> ok
+                    end,
                     {error, Reason}
             end;
         {error, Reason} ->
             {error, Reason}
     end.
 
-normalize_transports([]) -> [h3, h2];
+normalize_transports([]) ->
+    [h3, h2];
 normalize_transports(L) when is_list(L) ->
     [T || T <- L, T =:= h3 orelse T =:= h2 orelse T =:= h1].
 
@@ -362,7 +403,12 @@ connect(ProxyURI, Target) ->
 -spec close(session()) -> ok.
 close(Sess) when is_pid(Sess) ->
     %% All session modules export stop/1.
-    _ = (try gen_statem:call(Sess, stop, 5000) catch _:_ -> ok end),
+    _ =
+        (try
+            gen_statem:call(Sess, stop, 5000)
+        catch
+            _:_ -> ok
+        end),
     ok.
 
 %% @doc Return a map describing the session's current state and peers.
@@ -429,8 +475,10 @@ send_ip_packet(Sess, Packet) when is_pid(Sess), is_binary(Packet) ->
 
 %% @doc Send an ADDRESS_REQUEST capsule asking the peer to assign
 %% one or more addresses. Returns the allocated Request IDs.
--spec request_addresses(session(),
-                        [{ip_version(), inet:ip_address(), non_neg_integer()}]) ->
+-spec request_addresses(
+    session(),
+    [{ip_version(), inet:ip_address(), non_neg_integer()}]
+) ->
     {ok, [nz_request_id()]} | {error, term()}.
 request_addresses(Sess, Prefixes) when is_pid(Sess) ->
     masque_ip_client_session:request_addresses(Sess, Prefixes).
@@ -449,12 +497,13 @@ advertise_routes(Sess, Routes) when is_pid(Sess) ->
     masque_ip_client_session:advertise_routes(Sess, Routes).
 
 %% @doc Inspect the CONNECT-IP session state.
--spec ip_info(session()) -> #{
-    assigned  := [ip_assignment()],
-    routes    := [ip_route()],
-    mtu       := 1280..65535,
-    transport := transport()
-}.
+-spec ip_info(session()) ->
+    #{
+        assigned := [ip_assignment()],
+        routes := [ip_route()],
+        mtu := 1280..65535,
+        transport := transport()
+    }.
 ip_info(Sess) when is_pid(Sess) ->
     masque_ip_client_session:ip_info(Sess).
 
@@ -468,9 +517,11 @@ ip_info(Sess) when is_pid(Sess) ->
 %% peer the proxy's policy allows) or `{Host, Port}' for a scoped
 %% bind. The session emits `{masque_bind_packet, _, Peer, Bytes}'
 %% messages to the owner; use `send_to/3' to send.
--spec bind_connect(proxy_uri(),
-                   unscoped | {binary() | inet:hostname(), 1..65535},
-                   connect_opts()) -> {ok, session()} | {error, term()}.
+-spec bind_connect(
+    proxy_uri(),
+    unscoped | {binary() | inet:hostname(), 1..65535},
+    connect_opts()
+) -> {ok, session()} | {error, term()}.
 bind_connect(ProxyURI, Target, Opts) when is_map(Opts) ->
     Opts1 = Opts#{protocol => udp_bind},
     case parse_proxy_uri(ProxyURI) of
@@ -478,7 +529,8 @@ bind_connect(ProxyURI, Target, Opts) when is_map(Opts) ->
             Owner = maps:get(owner, Opts1, self()),
             Opts2 = Opts1#{proxy => {Host, Port}},
             Transports = normalize_transports(
-                           maps:get(transports, Opts2, [h3, h2])),
+                maps:get(transports, Opts2, [h3, h2])
+            ),
             connect_via(Transports, Target, Opts2, Owner);
         {error, _} = Err ->
             Err
@@ -488,11 +540,14 @@ bind_connect(ProxyURI, Target, Opts) when is_map(Opts) ->
 %% picks a context-id from the compression table; if none exists it
 %% falls back to the uncompressed-context channel if open, otherwise
 %% returns `{error, no_compression_context}'.
--spec send_to(session(),
-              {inet:ip_address(), inet:port_number()},
-              binary()) -> ok | {error, term()}.
-send_to(Sess, Peer, Bytes)
-  when is_pid(Sess), is_binary(Bytes) ->
+-spec send_to(
+    session(),
+    {inet:ip_address(), inet:port_number()},
+    binary()
+) -> ok | {error, term()}.
+send_to(Sess, Peer, Bytes) when
+    is_pid(Sess), is_binary(Bytes)
+->
     Mod = bind_session_module(Sess),
     Mod:send_to(Sess, Peer, Bytes).
 
@@ -500,8 +555,10 @@ send_to(Sess, Peer, Bytes)
 %% allocated Context ID; the mapping is safe to use on send once the
 %% matching `{masque_compression_acked, _, ContextId}' message
 %% arrives.
--spec assign_compression(session(),
-                         {inet:ip_address(), inet:port_number()}) ->
+-spec assign_compression(
+    session(),
+    {inet:ip_address(), inet:port_number()}
+) ->
     {ok, pos_integer()} | {error, term()}.
 assign_compression(Sess, Peer) when is_pid(Sess) ->
     Mod = bind_session_module(Sess),
@@ -518,8 +575,9 @@ open_uncompressed_context(Sess) when is_pid(Sess) ->
 %% @doc Retire a compression context.
 -spec close_compression(session(), pos_integer()) ->
     ok | {error, term()}.
-close_compression(Sess, Id)
-  when is_pid(Sess), is_integer(Id), Id > 0 ->
+close_compression(Sess, Id) when
+    is_pid(Sess), is_integer(Id), Id > 0
+->
     Mod = bind_session_module(Sess),
     Mod:close_compression(Sess, Id).
 
@@ -539,8 +597,9 @@ proxy_public_address(Sess) when is_pid(Sess) ->
 bind_session_module(Sess) ->
     try gen_statem:call(Sess, info, 1000) of
         #{transport := h1} -> masque_udp_bind_h1_client_session;
-        _                  -> masque_udp_bind_client_session
-    catch _:_ -> masque_udp_bind_client_session
+        _ -> masque_udp_bind_client_session
+    catch
+        _:_ -> masque_udp_bind_client_session
     end.
 
 %%====================================================================
@@ -588,8 +647,7 @@ undrain_listener(Name) ->
 %% @doc Check if a listener is draining.
 -spec is_draining(atom() | undefined) -> boolean().
 is_draining(undefined) -> false;
-is_draining(Name) ->
-    persistent_term:get({masque_drain, Name}, false).
+is_draining(Name) -> persistent_term:get({masque_drain, Name}, false).
 
 %% @doc Start a chaining (two-hop) listener on HTTP/3.
 %%
@@ -631,13 +689,24 @@ start_chain_listener_h1(Name, Opts) ->
     start_listener_h1(Name, chain_all(Opts)).
 
 chain_all(Opts) ->
-    Opts#{handler     => masque_chain_handler,
-          tcp_handler => masque_chain_handler,
-          ip_handler  => masque_chain_handler}.
+    Opts#{
+        handler => masque_chain_handler,
+        tcp_handler => masque_chain_handler,
+        ip_handler => masque_chain_handler
+    }.
 
 -spec h2_handlers(map()) ->
-    #{handler := fun((pid(), non_neg_integer(), binary(), binary(),
-                      list()) -> any())}.
+    #{
+        handler := fun(
+            (
+                pid(),
+                non_neg_integer(),
+                binary(),
+                binary(),
+                list()
+            ) -> any()
+        )
+    }.
 h2_handlers(Opts) ->
     masque_h2_server:h2_handlers(Opts).
 
@@ -648,8 +717,10 @@ h2_handlers(Opts) ->
 %% keys (including the `fallback' hook that routes non-MASQUE requests
 %% to the caller's own handler).
 -spec h3_handlers(map()) ->
-    #{handler := masque_server:h3_handler_fun(),
-      connection_handler := masque_server:connection_handler_fun()}.
+    #{
+        handler := masque_server:h3_handler_fun(),
+        connection_handler := masque_server:connection_handler_fun()
+    }.
 h3_handlers(Opts) ->
     masque_server:h3_handlers(Opts).
 
@@ -661,8 +732,9 @@ parse_proxy_uri(URI) when is_binary(URI) ->
     parse_proxy_uri(binary_to_list(URI));
 parse_proxy_uri(URI) when is_list(URI) ->
     case uri_string:parse(URI) of
-        #{scheme := "https", host := Host, port := Port}
-          when is_integer(Port) ->
+        #{scheme := "https", host := Host, port := Port} when
+            is_integer(Port)
+        ->
             {ok, list_to_binary(Host), Port};
         #{scheme := "https", host := Host} ->
             {ok, list_to_binary(Host), 443};

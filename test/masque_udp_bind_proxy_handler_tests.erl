@@ -10,7 +10,7 @@
 %% A sockname-fallback init succeeds when the socket is bound to a
 %% specific interface (loopback here).
 init_with_loopback_yields_response_headers_test() ->
-    Opts = #{bind_address => {127,0,0,1}},
+    Opts = #{bind_address => {127, 0, 0, 1}},
     {ok, State, Actions} = masque_udp_bind_proxy_handler:init(req(), Opts),
     cleanup(State),
     [{response_headers, Hdrs}] = Actions,
@@ -22,8 +22,9 @@ init_with_loopback_yields_response_headers_test() ->
         lists:keyfind(<<"proxy-public-address">>, 1, Hdrs),
     {ok, [{Addr, _Port}]} =
         masque_uri_udp_bind:parse_proxy_public_address(
-          [{<<"proxy-public-address">>, PpaBin}]),
-    ?assertEqual({127,0,0,1}, Addr).
+            [{<<"proxy-public-address">>, PpaBin}]
+        ),
+    ?assertEqual({127, 0, 0, 1}, Addr).
 
 %% Wildcard sockname (any) without public_addresses must refuse.
 init_wildcard_without_public_addresses_rejected_test() ->
@@ -35,15 +36,19 @@ init_wildcard_without_public_addresses_rejected_test() ->
 
 %% Wildcard with explicit public_addresses passes.
 init_wildcard_with_public_addresses_test() ->
-    Opts = #{bind_address => any,
-             public_addresses => [{{198,51,100,1}, 4433}]},
+    Opts = #{
+        bind_address => any,
+        public_addresses => [{{198, 51, 100, 1}, 4433}]
+    },
     {ok, State, _} = masque_udp_bind_proxy_handler:init(req(), Opts),
     cleanup(State).
 
 %% Empty public_addresses list refused.
 init_empty_public_addresses_rejected_test() ->
-    Opts = #{bind_address => {127,0,0,1},
-             public_addresses => []},
+    Opts = #{
+        bind_address => {127, 0, 0, 1},
+        public_addresses => []
+    },
     case masque_udp_bind_proxy_handler:init(req(), Opts) of
         {stop, no_public_addresses} -> ok;
         Other -> ct:fail({unexpected_result, Other})
@@ -54,11 +59,13 @@ init_uses_public_address_fun_test() ->
     Self = self(),
     Fun = fun(Sn) ->
         Self ! {got_sockname, Sn},
-        [{{203,0,113,1}, 4433}]
+        [{{203, 0, 113, 1}, 4433}]
     end,
-    Opts = #{bind_address => {127,0,0,1},
-             public_addresses => [{{198,51,100,1}, 999}],
-             public_address_fun => Fun},
+    Opts = #{
+        bind_address => {127, 0, 0, 1},
+        public_addresses => [{{198, 51, 100, 1}, 999}],
+        public_address_fun => Fun
+    },
     {ok, State, [{response_headers, Hdrs}]} =
         masque_udp_bind_proxy_handler:init(req(), Opts),
     cleanup(State),
@@ -68,9 +75,10 @@ init_uses_public_address_fun_test() ->
     end,
     {<<"proxy-public-address">>, Bin} =
         lists:keyfind(<<"proxy-public-address">>, 1, Hdrs),
-    {ok, [{{203,0,113,1}, 4433}]} =
+    {ok, [{{203, 0, 113, 1}, 4433}]} =
         masque_uri_udp_bind:parse_proxy_public_address(
-          [{<<"proxy-public-address">>, Bin}]).
+            [{<<"proxy-public-address">>, Bin}]
+        ).
 
 %%====================================================================
 %% peer_filter_fun
@@ -78,11 +86,12 @@ init_uses_public_address_fun_test() ->
 
 handle_bind_packet_loopback_passes_test() ->
     {Listener, ListenerSock, ListenerPort} = open_listener(),
-    Opts = #{bind_address => {127,0,0,1}},
+    Opts = #{bind_address => {127, 0, 0, 1}},
     {ok, State, _} = masque_udp_bind_proxy_handler:init(req(), Opts),
     {ok, _NewState} =
         masque_udp_bind_proxy_handler:handle_bind_packet(
-          {{127,0,0,1}, ListenerPort}, <<"hello">>, State),
+            {{127, 0, 0, 1}, ListenerPort}, <<"hello">>, State
+        ),
     receive
         {udp, ListenerSock, _, _, <<"hello">>} -> ok
     after 1000 -> ct:fail("listener did not receive packet")
@@ -91,23 +100,31 @@ handle_bind_packet_loopback_passes_test() ->
     stop_listener(Listener, ListenerSock).
 
 handle_bind_packet_private_address_filtered_by_default_test() ->
-    Opts = #{bind_address => {127,0,0,1}},
+    Opts = #{bind_address => {127, 0, 0, 1}},
     {ok, State, _} = masque_udp_bind_proxy_handler:init(req(), Opts),
     %% 10.0.0.0/8 is RFC 1918 - default peer_filter rejects it.
-    ?assertMatch({drop, peer_filter, _},
-                 masque_udp_bind_proxy_handler:handle_bind_packet(
-                   {{10,0,0,1}, 1234}, <<"x">>, State)),
+    ?assertMatch(
+        {drop, peer_filter, _},
+        masque_udp_bind_proxy_handler:handle_bind_packet(
+            {{10, 0, 0, 1}, 1234}, <<"x">>, State
+        )
+    ),
     cleanup(State).
 
 %% Custom peer_filter_fun overrides the default.
 handle_bind_packet_custom_filter_test() ->
     DenyAll = fun(_IP, _Port) -> {drop, my_reason} end,
-    Opts = #{bind_address => {127,0,0,1},
-             peer_filter_fun => DenyAll},
+    Opts = #{
+        bind_address => {127, 0, 0, 1},
+        peer_filter_fun => DenyAll
+    },
     {ok, State, _} = masque_udp_bind_proxy_handler:init(req(), Opts),
-    ?assertMatch({drop, my_reason, _},
-                 masque_udp_bind_proxy_handler:handle_bind_packet(
-                   {{127,0,0,1}, 1234}, <<"x">>, State)),
+    ?assertMatch(
+        {drop, my_reason, _},
+        masque_udp_bind_proxy_handler:handle_bind_packet(
+            {{127, 0, 0, 1}, 1234}, <<"x">>, State
+        )
+    ),
     cleanup(State).
 
 %%====================================================================
@@ -116,21 +133,25 @@ handle_bind_packet_custom_filter_test() ->
 
 scrub_fun_can_drop_packets_test() ->
     Drop = fun(_Pkt, US) -> {drop, scrubbed, US} end,
-    Opts = #{bind_address => {127,0,0,1}, scrub_fun => Drop},
+    Opts = #{bind_address => {127, 0, 0, 1}, scrub_fun => Drop},
     {ok, State, _} = masque_udp_bind_proxy_handler:init(req(), Opts),
-    ?assertMatch({drop, scrubbed, _},
-                 masque_udp_bind_proxy_handler:handle_bind_packet(
-                   {{127,0,0,1}, 1234}, <<"x">>, State)),
+    ?assertMatch(
+        {drop, scrubbed, _},
+        masque_udp_bind_proxy_handler:handle_bind_packet(
+            {{127, 0, 0, 1}, 1234}, <<"x">>, State
+        )
+    ),
     cleanup(State).
 
 scrub_fun_can_rewrite_payload_test() ->
     {Listener, Sock, Port} = open_listener(),
     Rewrite = fun(_Pkt, US) -> {pass, <<"REWRITTEN">>, US} end,
-    Opts = #{bind_address => {127,0,0,1}, scrub_fun => Rewrite},
+    Opts = #{bind_address => {127, 0, 0, 1}, scrub_fun => Rewrite},
     {ok, State, _} = masque_udp_bind_proxy_handler:init(req(), Opts),
     {ok, _} =
         masque_udp_bind_proxy_handler:handle_bind_packet(
-          {{127,0,0,1}, Port}, <<"orig">>, State),
+            {{127, 0, 0, 1}, Port}, <<"orig">>, State
+        ),
     receive
         {udp, Sock, _, _, <<"REWRITTEN">>} -> ok
     after 1000 -> ct:fail("listener did not receive rewritten packet")
@@ -143,16 +164,17 @@ scrub_fun_can_rewrite_payload_test() ->
 %%====================================================================
 
 handle_info_udp_emits_send_bind_packet_test() ->
-    Opts = #{bind_address => {127,0,0,1}},
+    Opts = #{bind_address => {127, 0, 0, 1}},
     {ok, State, _} = masque_udp_bind_proxy_handler:init(req(), Opts),
-    Sock = element(2, State),    %% #state.socket
-    Msg = {udp, Sock, {198,51,100,1}, 4433, <<"reply">>},
-    {ok, _State2, [{send_bind_packet, {{198,51,100,1}, 4433}, <<"reply">>}]} =
+    %% #state.socket
+    Sock = element(2, State),
+    Msg = {udp, Sock, {198, 51, 100, 1}, 4433, <<"reply">>},
+    {ok, _State2, [{send_bind_packet, {{198, 51, 100, 1}, 4433}, <<"reply">>}]} =
         masque_udp_bind_proxy_handler:handle_info(Msg, State),
     cleanup(State).
 
 handle_info_unrelated_messages_ignored_test() ->
-    Opts = #{bind_address => {127,0,0,1}},
+    Opts = #{bind_address => {127, 0, 0, 1}},
     {ok, State, _} = masque_udp_bind_proxy_handler:init(req(), Opts),
     {ok, State2} =
         masque_udp_bind_proxy_handler:handle_info(stray_message, State),
@@ -166,16 +188,21 @@ handle_info_unrelated_messages_ignored_test() ->
 req() ->
     %% Bind sessions don't carry target_host / target_port for
     %% unscoped binds, but the handler does not require them.
-    #{method => <<"CONNECT">>,
-      protocol => udp_bind,
-      path => <<"/.well-known/masque/udp/%2A/%2A/">>,
-      authority => <<"proxy.example">>,
-      scheme => <<"https">>,
-      headers => []}.
+    #{
+        method => <<"CONNECT">>,
+        protocol => udp_bind,
+        path => <<"/.well-known/masque/udp/%2A/%2A/">>,
+        authority => <<"proxy.example">>,
+        scheme => <<"https">>,
+        headers => []
+    }.
 
 open_listener() ->
-    {ok, Sock} = gen_udp:open(0, [binary, {ip, {127,0,0,1}},
-                                  {active, true}]),
+    {ok, Sock} = gen_udp:open(0, [
+        binary,
+        {ip, {127, 0, 0, 1}},
+        {active, true}
+    ]),
     {ok, Port} = inet:port(Sock),
     {self(), Sock, Port}.
 

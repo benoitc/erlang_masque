@@ -7,9 +7,13 @@
 -module(masque_h1_session_sup).
 -behaviour(supervisor).
 
--export([start_link/0, start_link_ip/0, start_link_tcp/0,
-         start_link_udp_bind/0,
-         start_session/1]).
+-export([
+    start_link/0,
+    start_link_ip/0,
+    start_link_tcp/0,
+    start_link_udp_bind/0,
+    start_session/1
+]).
 -export([init/1]).
 
 start_link() ->
@@ -22,8 +26,11 @@ start_link_tcp() ->
     supervisor:start_link({local, masque_h1_tcp_session_sup}, ?MODULE, tcp).
 
 start_link_udp_bind() ->
-    supervisor:start_link({local, masque_h1_udp_bind_session_sup},
-                          ?MODULE, udp_bind).
+    supervisor:start_link(
+        {local, masque_h1_udp_bind_session_sup},
+        ?MODULE,
+        udp_bind
+    ).
 
 -spec start_session(map()) -> {ok, pid()} | {error, term()}.
 start_session(#{protocol := ip} = Args) ->
@@ -35,18 +42,24 @@ start_session(#{protocol := udp_bind} = Args) ->
 start_session(Args) ->
     supervisor:start_child(?MODULE, [Args]).
 
-init(udp)      -> {ok, spec(masque_h1_server_session)};
-init(ip)       -> {ok, spec(masque_ip_h1_server_session)};
-init(tcp)      -> {ok, spec(masque_tcp_h1_server_session)};
+init(udp) -> {ok, spec(masque_h1_server_session)};
+init(ip) -> {ok, spec(masque_ip_h1_server_session)};
+init(tcp) -> {ok, spec(masque_tcp_h1_server_session)};
 init(udp_bind) -> {ok, spec(masque_udp_bind_h1_server_session)}.
 
 spec(Mod) ->
     ChildSpec = #{
-        id       => Mod,
-        start    => {Mod, start_link, []},
-        restart  => temporary,
+        id => Mod,
+        start => {Mod, start_link, []},
+        restart => temporary,
         shutdown => 5000,
-        type     => worker
+        type => worker
     },
-    {#{strategy => simple_one_for_one,
-       intensity => 10, period => 10}, [ChildSpec]}.
+    {
+        #{
+            strategy => simple_one_for_one,
+            intensity => 10,
+            period => 10
+        },
+        [ChildSpec]
+    }.

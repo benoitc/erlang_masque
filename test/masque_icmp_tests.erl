@@ -73,8 +73,8 @@ v6_dest_unreachable_no_route_test() ->
 v6_packet_too_big_test() ->
     Invoking = sample_v6_packet(),
     Pkt = masque_icmp:packet_too_big(1400, Invoking),
-    <<16#60:8, _:24, _PayloadLen:16, 58:8, _:8, _:32/binary,
-      2:8, 0:8, _Csum:16, Mtu:32, _/binary>> = Pkt,
+    <<16#60:8, _:24, _PayloadLen:16, 58:8, _:8, _:32/binary, 2:8, 0:8, _Csum:16, Mtu:32, _/binary>> =
+        Pkt,
     ?assertEqual(1400, Mtu).
 
 %%====================================================================
@@ -94,12 +94,12 @@ v6_invoking_clamped_to_1232_test() ->
 %%====================================================================
 
 v4_src_dst_swap_test() ->
-    Invoking = sample_v4_packet(),  %% 192.0.2.1 -> 192.0.2.2
+    %% 192.0.2.1 -> 192.0.2.2
+    Invoking = sample_v4_packet(),
     Pkt = masque_icmp:dest_unreachable(v4, 1, Invoking),
-    <<_:12/binary, SA:8, SB:8, SC:8, SD:8, DA:8, DB:8, DC:8, DD:8,
-      _/binary>> = Pkt,
-    ?assertEqual({192,0,2,2}, {SA,SB,SC,SD}),
-    ?assertEqual({192,0,2,1}, {DA,DB,DC,DD}).
+    <<_:12/binary, SA:8, SB:8, SC:8, SD:8, DA:8, DB:8, DC:8, DD:8, _/binary>> = Pkt,
+    ?assertEqual({192, 0, 2, 2}, {SA, SB, SC, SD}),
+    ?assertEqual({192, 0, 2, 1}, {DA, DB, DC, DD}).
 
 %%====================================================================
 %% apply_action/3 dispatch
@@ -108,13 +108,13 @@ v4_src_dst_swap_test() ->
 apply_action_dest_unreachable_test() ->
     Invoking = sample_v4_packet(),
     Direct = masque_icmp:dest_unreachable(v4, 3, Invoking),
-    Via    = masque_icmp:apply_action(dest_unreachable, {v4, 3}, Invoking),
+    Via = masque_icmp:apply_action(dest_unreachable, {v4, 3}, Invoking),
     ?assertEqual(Direct, Via).
 
 apply_action_packet_too_big_test() ->
     Invoking = sample_v6_packet(),
     Direct = masque_icmp:packet_too_big(1500, Invoking),
-    Via    = masque_icmp:apply_action(packet_too_big, 1500, Invoking),
+    Via = masque_icmp:apply_action(packet_too_big, 1500, Invoking),
     ?assertEqual(Direct, Via).
 
 %%====================================================================
@@ -122,14 +122,12 @@ apply_action_packet_too_big_test() ->
 %%====================================================================
 
 sample_v4_packet() ->
-    <<16#45:8, 0:8, 20:16, 0:16, 0:16, 64:8, 17:8, 0:16,
-      192:8, 0:8, 2:8, 1:8,
-      192:8, 0:8, 2:8, 2:8>>.
+    <<16#45:8, 0:8, 20:16, 0:16, 0:16, 64:8, 17:8, 0:16, 192:8, 0:8, 2:8, 1:8, 192:8, 0:8, 2:8,
+        2:8>>.
 
 sample_v6_packet() ->
-    <<6:4, 0:8, 0:20, 0:16, 17:8, 64:8,
-      16#2001:16, 16#DB8:16, 0:16, 0:16, 0:16, 0:16, 0:16, 1:16,
-      16#2001:16, 16#DB8:16, 0:16, 0:16, 0:16, 0:16, 0:16, 2:16>>.
+    <<6:4, 0:8, 0:20, 0:16, 17:8, 64:8, 16#2001:16, 16#DB8:16, 0:16, 0:16, 0:16, 0:16, 0:16, 1:16,
+        16#2001:16, 16#DB8:16, 0:16, 0:16, 0:16, 0:16, 0:16, 2:16>>.
 
 %% Returns 0 when the checksum is valid (one's-complement sum of the
 %% whole buffer equals the all-ones word, whose complement is zero).
@@ -137,8 +135,8 @@ verify_checksum(Bin) ->
     finish(sum(Bin, 0)).
 
 sum(<<A:16, Rest/binary>>, Acc) -> sum(Rest, Acc + A);
-sum(<<A:8>>, Acc)                -> Acc + (A bsl 8);
-sum(<<>>, Acc)                   -> Acc.
+sum(<<A:8>>, Acc) -> Acc + (A bsl 8);
+sum(<<>>, Acc) -> Acc.
 
 finish(Sum) ->
     S = (Sum band 16#FFFF) + (Sum bsr 16),

@@ -18,9 +18,11 @@
 %%% </ul>
 -module(masque_icmp).
 
--export([dest_unreachable/3,
-         packet_too_big/2,
-         time_exceeded/2]).
+-export([
+    dest_unreachable/3,
+    packet_too_big/2,
+    time_exceeded/2
+]).
 
 -export([apply_action/3]).
 
@@ -29,8 +31,8 @@
 -define(V6_INVOKING_CAP, 1232).
 
 %% Default source address for proxy-synthesised ICMP errors.
--define(DEFAULT_V4_SRC, {0,0,0,0}).
--define(DEFAULT_V6_SRC, {0,0,0,0,0,0,0,0}).
+-define(DEFAULT_V4_SRC, {0, 0, 0, 0}).
+-define(DEFAULT_V6_SRC, {0, 0, 0, 0, 0, 0, 0, 0}).
 
 %%====================================================================
 %% API
@@ -95,29 +97,26 @@ build_v4(Type, Code, RestHeader4, Invoking) ->
     {Src, Dst} = v4_endpoints(Invoking),
     Msg0 = <<Type:8, Code:8, 0:16, RestHeader4/binary, Body/binary>>,
     Csum = inet_checksum(Msg0),
-    Msg  = <<Type:8, Code:8, Csum:16, RestHeader4/binary, Body/binary>>,
+    Msg = <<Type:8, Code:8, Csum:16, RestHeader4/binary, Body/binary>>,
     TotalLen = 20 + byte_size(Msg),
-    Header0 = <<16#45:8, 0:8, TotalLen:16,
-                0:16, 2#010:3, 0:13,
-                64:8, 1:8, 0:16,
-                (ip4_bin(Src))/binary,
-                (ip4_bin(Dst))/binary>>,
+    Header0 =
+        <<16#45:8, 0:8, TotalLen:16, 0:16, 2#010:3, 0:13, 64:8, 1:8, 0:16, (ip4_bin(Src))/binary,
+            (ip4_bin(Dst))/binary>>,
     HdrCsum = inet_checksum(Header0),
-    Header = <<16#45:8, 0:8, TotalLen:16,
-               0:16, 2#010:3, 0:13,
-               64:8, 1:8, HdrCsum:16,
-               (ip4_bin(Src))/binary,
-               (ip4_bin(Dst))/binary>>,
+    Header =
+        <<16#45:8, 0:8, TotalLen:16, 0:16, 2#010:3, 0:13, 64:8, 1:8, HdrCsum:16,
+            (ip4_bin(Src))/binary, (ip4_bin(Dst))/binary>>,
     <<Header/binary, Msg/binary>>.
 
-v4_endpoints(<<4:4, _IHL:4, _TOS:8, _:16, _:16, _:16, _:8, _:8, _:16,
-               SA:8, SB:8, SC:8, SD:8,
-               DA:8, DB:8, DC:8, DD:8, _/binary>>) ->
-    {{DA,DB,DC,DD}, {SA,SB,SC,SD}};
+v4_endpoints(
+    <<4:4, _IHL:4, _TOS:8, _:16, _:16, _:16, _:8, _:8, _:16, SA:8, SB:8, SC:8, SD:8, DA:8, DB:8,
+        DC:8, DD:8, _/binary>>
+) ->
+    {{DA, DB, DC, DD}, {SA, SB, SC, SD}};
 v4_endpoints(_) ->
     {?DEFAULT_V4_SRC, ?DEFAULT_V4_SRC}.
 
-ip4_bin({A,B,C,D}) -> <<A:8, B:8, C:8, D:8>>.
+ip4_bin({A, B, C, D}) -> <<A:8, B:8, C:8, D:8>>.
 
 %%====================================================================
 %% Internal — IPv6 builder (pseudo-header checksum, RFC 2460 §8.1)
@@ -129,26 +128,22 @@ build_v6(Type, Code, RestHeader4, Invoking) ->
     Msg0 = <<Type:8, Code:8, 0:16, RestHeader4/binary, Body/binary>>,
     PayloadLen = byte_size(Msg0),
     %% ICMPv6 checksum includes the IPv6 pseudo-header.
-    Pseudo = <<(ip6_bin(Src))/binary,
-               (ip6_bin(Dst))/binary,
-               PayloadLen:32, 0:24, 58:8>>,
+    Pseudo = <<(ip6_bin(Src))/binary, (ip6_bin(Dst))/binary, PayloadLen:32, 0:24, 58:8>>,
     Csum = inet_checksum(<<Pseudo/binary, Msg0/binary>>),
     Msg = <<Type:8, Code:8, Csum:16, RestHeader4/binary, Body/binary>>,
-    Header = <<6:4, 0:8, 0:20, PayloadLen:16, 58:8, 64:8,
-               (ip6_bin(Src))/binary,
-               (ip6_bin(Dst))/binary>>,
+    Header =
+        <<6:4, 0:8, 0:20, PayloadLen:16, 58:8, 64:8, (ip6_bin(Src))/binary, (ip6_bin(Dst))/binary>>,
     <<Header/binary, Msg/binary>>.
 
-v6_endpoints(<<6:4, _:28, _:16, _:8, _:8,
-               SA:16, SB:16, SC:16, SD:16,
-               SE:16, SF:16, SG:16, SH:16,
-               DA:16, DB:16, DC:16, DD:16,
-               DE:16, DF:16, DG:16, DH:16, _/binary>>) ->
-    {{DA,DB,DC,DD,DE,DF,DG,DH}, {SA,SB,SC,SD,SE,SF,SG,SH}};
+v6_endpoints(
+    <<6:4, _:28, _:16, _:8, _:8, SA:16, SB:16, SC:16, SD:16, SE:16, SF:16, SG:16, SH:16, DA:16,
+        DB:16, DC:16, DD:16, DE:16, DF:16, DG:16, DH:16, _/binary>>
+) ->
+    {{DA, DB, DC, DD, DE, DF, DG, DH}, {SA, SB, SC, SD, SE, SF, SG, SH}};
 v6_endpoints(_) ->
     {?DEFAULT_V6_SRC, ?DEFAULT_V6_SRC}.
 
-ip6_bin({A,B,C,D,E,F,G,H}) ->
+ip6_bin({A, B, C, D, E, F, G, H}) ->
     <<A:16, B:16, C:16, D:16, E:16, F:16, G:16, H:16>>.
 
 %%====================================================================
@@ -163,8 +158,8 @@ inet_checksum(Bin) ->
     finish_csum(sum_words(Bin, 0)).
 
 sum_words(<<A:16, Rest/binary>>, Acc) -> sum_words(Rest, Acc + A);
-sum_words(<<A:8>>, Acc)                -> Acc + (A bsl 8);
-sum_words(<<>>, Acc)                   -> Acc.
+sum_words(<<A:8>>, Acc) -> Acc + (A bsl 8);
+sum_words(<<>>, Acc) -> Acc.
 
 finish_csum(Sum) ->
     S = (Sum band 16#FFFF) + (Sum bsr 16),
