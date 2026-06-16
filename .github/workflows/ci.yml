@@ -61,6 +61,35 @@ jobs:
           path: _build/test/logs/
           if-no-files-found: ignore
 
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `rebar3 lint` compiles the project, which builds the instrument NIF.
+      - name: Install CMake
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '28'
+          rebar3-version: '3.25.0'
+
+      - name: Cache Hex packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rebar3
+          key: ${{ runner.os }}-rebar3-lint-${{ hashFiles('rebar.config') }}
+          restore-keys: |
+            ${{ runner.os }}-rebar3-lint-
+
+      - name: Check formatting (erlfmt)
+        run: rebar3 fmt --check
+
+      - name: Elvis
+        run: rebar3 lint
+
   dialyzer:
     name: Dialyzer
     runs-on: ubuntu-latest
