@@ -160,8 +160,12 @@ cert_der(Config) ->
     maps:get(cert, ?config(certs, Config)).
 
 direct_connect(EgressPort, UdpPort, Transport, Extra) ->
+    %% Dial the loopback IP literal, not "localhost". A dual-stack name
+    %% sends the connect down quic's Happy-Eyeballs race (::1 has no
+    %% listener), which under load can exceed the handshake timeout. The
+    %% test cert carries an IP:127.0.0.1 SAN so verify_peer still holds.
     ProxyURI = iolist_to_binary([
-        "https://localhost:",
+        "https://127.0.0.1:",
         integer_to_list(EgressPort)
     ]),
     Base = #{
