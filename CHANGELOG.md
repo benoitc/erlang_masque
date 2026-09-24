@@ -8,8 +8,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Bumped `quic` 1.3.0 -> 1.6.5 and `h1` (erlang_h1) 0.6.2 -> 0.7.0.
-- Bumped `h2` 0.9.0 -> 0.10.2.
+- Bumped `quic` 1.3.0 -> 2.0.0 and `h1` (erlang_h1) 0.6.2 -> 0.9.1.
+- Bumped `h2` 0.9.0 -> 0.12.3.
+- Bumped `instrument` 1.1.3 -> 1.1.5 and `hackney` 4.3.0 -> 4.7.4.
 - The h2 server now reads `:authority` and `:scheme` from the request
   headers and no longer falls back to the `host` header or a hard-coded
   `https` scheme. Both pseudo-headers are required, matching the h3 server.
