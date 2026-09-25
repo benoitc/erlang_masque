@@ -315,7 +315,7 @@ open(
     {keep_state, handle_inbound_datagram(Payload, Data)};
 open(
     info,
-    {Tag, _Conn, {data, StreamId, Bytes, _Fin}},
+    {Tag, _Conn, {data, StreamId, Bytes, Fin}},
     #data{
         stream_id = StreamId,
         cap_buf = Buf,
@@ -327,7 +327,7 @@ open(
     New = <<Buf/binary, Bytes/binary>>,
     case byte_size(New) > Max of
         true -> {stop, capsule_buffer_overflow};
-        false -> drain_capsules(New, Data)
+        false -> drain_capsules(New, Fin, Data)
     end;
 open(
     info,
@@ -683,15 +683,22 @@ deliver_bind_packet(
             Data#data{rx_buf = queue:in({Peer, Bytes}, Q)}
     end.
 
-drain_capsules(Buf, Data) ->
+drain_capsules(Buf, Fin, Data) ->
     case masque_capsule:decode(Buf) of
         {ok, {Type, Value, Rest}} ->
             case dispatch_capsule(Type, Value, Data) of
                 {ok, Data2} ->
-                    drain_capsules(Rest, Data2#data{cap_buf = <<>>});
+                    drain_capsules(Rest, Fin, Data2#data{cap_buf = <<>>});
                 {stop, R} ->
                     {stop, R, Data}
             end;
+        {more, _} when Fin, Buf =/= <<>> ->
+            {stop, truncated_capsule, Data};
+        {more, _} when Fin ->
+            %% Clean FIN: the proxy ended the tunnel. Send ours back.
+            {next_state, closing, Data#data{cap_buf = <<>>}, [
+                {next_event, internal, do_close}
+            ]};
         {more, _} ->
             {keep_state, Data#data{cap_buf = Buf}};
         {error, _} ->

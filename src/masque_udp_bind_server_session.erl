@@ -378,6 +378,9 @@ drain_capsules(Buf, Fin, S) ->
             end;
         {more, _} when Fin, Buf =/= <<>> ->
             reset_and_stop(truncated_capsule, S);
+        {more, _} when Fin ->
+            %% Clean FIN: terminate/2 sends our FIN back.
+            {stop, normal, S#state{cap_buf = <<>>}};
         {more, _} ->
             {noreply, S#state{cap_buf = Buf}};
         {error, _Reason} ->
@@ -668,22 +671,12 @@ send_response(#state{transport = h3, conn = C, stream_id = S}, Status, Hdrs) ->
 send_response(#state{transport = h2, conn = C, stream_id = S}, Status, Hdrs) ->
     h2:send_response(C, S, Status, Hdrs).
 
-claim_stream(
-    #state{
-        transport = h3,
-        conn = C,
-        stream_id = Sid,
-        cap_buf = Buf
-    } = S
-) ->
-    case quic_h3:set_stream_handler(C, Sid, self()) of
-        ok ->
-            {ok, S};
-        {ok, Chunks} ->
-            More = iolist_to_binary([D || {D, _Fin} <- Chunks]),
-            {ok, S#state{cap_buf = <<Buf/binary, More/binary>>}};
-        {error, _} = Err ->
-            Err
+%% `drain_buffer => false': bytes that arrived before the claim are
+%% replayed as `{data, _, _, Fin}' messages through the normal path.
+claim_stream(#state{transport = h3, conn = C, stream_id = Sid} = S) ->
+    case quic_h3:set_stream_handler(C, Sid, self(), #{drain_buffer => false}) of
+        {error, _} = Err -> Err;
+        _ -> {ok, S}
     end;
 claim_stream(#state{transport = h2} = S) ->
     {ok, S}.
@@ -727,6 +720,18 @@ terminate_transport(normal, #state{
     _ =
         (try
             quic_h3:send_data(C, Sid, <<>>, true)
+        catch
+            _:_ -> ok
+        end),
+    ok;
+terminate_transport(normal, #state{
+    transport = h2,
+    conn = C,
+    stream_id = Sid
+}) ->
+    _ =
+        (try
+            h2:send_data(C, Sid, <<>>, true)
         catch
             _:_ -> ok
         end),

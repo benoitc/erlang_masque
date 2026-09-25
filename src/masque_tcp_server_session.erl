@@ -104,8 +104,10 @@ send_response(#state{transport = h3, conn = C, stream_id = S}, Status, Hdrs) ->
 send_response(#state{transport = h2, conn = C, stream_id = S}, Status, Hdrs) ->
     h2:send_response(C, S, Status, Hdrs).
 
+%% `drain_buffer => false': bytes the client wrote before the claim are
+%% replayed as `{data, _, _, Fin}' messages instead of being dropped.
 claim_stream(#state{transport = h3, conn = C, stream_id = S}) ->
-    quic_h3:set_stream_handler(C, S, self());
+    quic_h3:set_stream_handler(C, S, self(), #{drain_buffer => false});
 claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
     h2:set_stream_handler(C, S, self()).
 

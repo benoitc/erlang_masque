@@ -500,6 +500,12 @@ drain_capsules(Buf, Fin, #data{} = Data) ->
             drain_capsules(Rest, Fin, Data2#data{cap_buf = <<>>});
         {more, _} when Fin, Buf =/= <<>> ->
             client_stream_abort(truncated_capsule, Data);
+        {more, _} when Fin ->
+            %% Clean END_STREAM: the proxy ended the tunnel.
+            _ = notify_owner_closed(peer_fin, Data),
+            {next_state, closing, Data#data{cap_buf = <<>>}, [
+                {next_event, internal, do_close}
+            ]};
         {more, _} ->
             {keep_state, Data#data{cap_buf = Buf}}
     end.

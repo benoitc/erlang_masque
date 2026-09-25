@@ -2,7 +2,8 @@
 %%%
 %%% `init/2' sends `{masque_session, self()}' to the pid under
 %%% `report_to' in the handler opts, so a suite can monitor the
-%%% server-side session process. Packets and capsules are echoed.
+%%% server-side session process. Packets, capsules and TCP bytes are
+%%% echoed, except capsule type `16#ff00', which closes the session.
 -module(masque_report_handler).
 -behaviour(masque_handler).
 
@@ -21,6 +22,8 @@ init(_Req, Opts) ->
 handle_packet(Data, State) ->
     {ok, State, [{send, Data}]}.
 
+handle_capsule(16#ff00, _Value, State) ->
+    {ok, State, [close_session]};
 handle_capsule(Type, Value, State) ->
     {ok, State, [{send_capsule, Type, Value}]}.
 

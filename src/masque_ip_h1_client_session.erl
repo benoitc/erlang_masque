@@ -173,11 +173,13 @@ connecting(internal, {do_handshake, Opts}, Data) ->
             case setopts_active_once(Socket) of
                 ok ->
                     reply_handshake(Data, ok),
-                    {next_state, open, Data#data{
-                        socket = Socket,
-                        cap_buf = Buffer,
-                        handshake_from = undefined
-                    }};
+                    {next_state, open,
+                        Data#data{
+                            socket = Socket,
+                            cap_buf = <<>>,
+                            handshake_from = undefined
+                        },
+                        drain_leftover(Socket, Buffer)};
                 {error, Reason} ->
                     _ =
                         (try
@@ -825,3 +827,11 @@ is_ipv6_literal(Host) ->
         {ok, {_, _, _, _, _, _, _, _}} -> true;
         _ -> false
     end.
+
+%% Capsules the proxy sent right behind the 101 arrive in the upgrade
+%% leftover; feed them through the `open' decode path immediately
+%% instead of waiting for the next socket read.
+drain_leftover(_Socket, <<>>) ->
+    [];
+drain_leftover(Socket, Buffer) ->
+    [{next_event, info, {ssl, Socket, Buffer}}].

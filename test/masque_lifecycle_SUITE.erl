@@ -8,6 +8,7 @@
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
+-include("masque_ip.hrl").
 
 -export([
     suite/0,
@@ -23,7 +24,14 @@
     h2_client_close_stops_server_session/1,
     h3_server_close_notifies_client/1,
     h2_server_close_notifies_client/1,
-    h3_goaway_keeps_processed_tunnel/1
+    h3_goaway_keeps_processed_tunnel/1,
+    h3_client_fin_ends_server_session/1,
+    h2_client_fin_ends_server_session/1,
+    h1_close_leaves_no_server_session/1,
+    h3_server_fin_notifies_client/1,
+    h2_server_fin_notifies_client/1,
+    h3_early_address_request_answered/1,
+    h3_tcp_bytes_before_claim_arrive/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -40,7 +48,14 @@ all() ->
         h2_client_close_stops_server_session,
         h3_server_close_notifies_client,
         h2_server_close_notifies_client,
-        h3_goaway_keeps_processed_tunnel
+        h3_goaway_keeps_processed_tunnel,
+        h3_client_fin_ends_server_session,
+        h2_client_fin_ends_server_session,
+        h1_close_leaves_no_server_session,
+        h3_server_fin_notifies_client,
+        h2_server_fin_notifies_client,
+        h3_early_address_request_answered,
+        h3_tcp_bytes_before_claim_arrive
     ].
 
 init_per_suite(Config) ->
@@ -58,16 +73,24 @@ init_per_testcase(Case, Config) ->
     Certs = ?config(certs, Config),
     Extra = extra_opts(Case),
     HOpts = maps:merge(
-        #{report_to => self()},
+        #{report_to => self(), allow_private => true},
         maps:get(handler_opts, Extra, #{})
     ),
     Opts = maps:merge(
-        #{handler => masque_report_handler},
+        #{
+            handler => masque_report_handler,
+            ip_handler => masque_ip_echo_handler
+        },
         Extra#{handler_opts => HOpts}
     ),
     {ok, H3} = masque_test_helpers:start_masque_server(maps:merge(Certs, Opts)),
     {ok, H2} = start_h2_server(Certs, Opts),
-    [{h3, H3}, {h2, H2} | Config].
+    H1 =
+        case Case of
+            h1_close_leaves_no_server_session -> start_h1_server(Certs, Opts);
+            _ -> undefined
+        end,
+    [{h3, H3}, {h2, H2}, {h1, H1} | Config].
 
 end_per_testcase(_Case, Config) ->
     _ =
@@ -79,6 +102,12 @@ end_per_testcase(_Case, Config) ->
     _ =
         (try
             h2:stop_server(maps:get(h2_ref, ?config(h2, Config)))
+        catch
+            _:_ -> ok
+        end),
+    _ =
+        (try
+            masque:stop_listener_h1(maps:get(name, ?config(h1, Config)))
         catch
             _:_ -> ok
         end),
@@ -142,8 +171,171 @@ h3_goaway_keeps_processed_tunnel(Config) ->
     end.
 
 %%====================================================================
+%% Clean FIN and early data
+%%====================================================================
+
+h3_client_fin_ends_server_session(Config) ->
+    {Conn, Sid} = h3_open_udp(Config),
+    Pid = await_session(),
+    MRef = erlang:monitor(process, Pid),
+    ok = quic_h3:send_data(Conn, Sid, <<>>, true),
+    receive
+        {'DOWN', MRef, process, Pid, normal} -> ok
+    after 5000 -> ct:fail(no_normal_stop)
+    end,
+    ok = await_fin(quic_h3, Conn, Sid),
+    quic_h3:close(Conn).
+
+h2_client_fin_ends_server_session(Config) ->
+    Baseline = session_count(masque_h2_session_sup),
+    {Conn, Sid} = h2_open_udp(Config),
+    Pid = await_session(),
+    MRef = erlang:monitor(process, Pid),
+    ok = h2:send_data(Conn, Sid, <<>>, true),
+    receive
+        {'DOWN', MRef, process, Pid, normal} -> ok
+    after 5000 -> ct:fail(no_normal_stop)
+    end,
+    ok = await_fin(h2, Conn, Sid),
+    ok = wait_count(masque_h2_session_sup, Baseline, 50),
+    h2:close(Conn).
+
+h1_close_leaves_no_server_session(Config) ->
+    Baseline = session_count(masque_h1_session_sup),
+    Sess = connect(Config, h1),
+    Pid = await_session(),
+    MRef = erlang:monitor(process, Pid),
+    ok = masque:close(Sess),
+    await_down(MRef, Pid),
+    ok = wait_count(masque_h1_session_sup, Baseline, 50).
+
+h3_server_fin_notifies_client(Config) ->
+    server_fin_notifies_client(Config, h3).
+
+h2_server_fin_notifies_client(Config) ->
+    server_fin_notifies_client(Config, h2).
+
+server_fin_notifies_client(Config, Transport) ->
+    Sess = connect(Config, Transport),
+    Pid = await_session(),
+    MRef = erlang:monitor(process, Pid),
+    ok = masque:send_capsule(Sess, 16#ff00, <<>>),
+    receive
+        {masque_closed, Sess, peer_fin} -> ok
+    after 5000 -> ct:fail(no_peer_fin)
+    end,
+    receive
+        {'DOWN', MRef, process, Pid, normal} -> ok
+    after 5000 -> ct:fail(server_session_alive)
+    end.
+
+%% An ADDRESS_REQUEST written right behind the request, before the 2xx
+%% and the stream claim, is answered.
+h3_early_address_request_answered(Config) ->
+    {ok, Conn} = masque_test_helpers:h3_client_connect(
+        maps:get(port, ?config(h3, Config)), #{}
+    ),
+    Path = <<"/.well-known/masque/ip/*/*/">>,
+    Headers = [
+        {<<":method">>, <<"CONNECT">>},
+        {<<":protocol">>, <<"connect-ip">>},
+        {<<":scheme">>, <<"https">>},
+        {<<":authority">>, <<"localhost">>},
+        {<<":path">>, Path},
+        {<<"capsule-protocol">>, <<"?1">>}
+    ],
+    {ok, Sid} = quic_h3:request(Conn, Headers, #{end_stream => false}),
+    Req = #ip_prefix_request{
+        request_id = 7, version = 4, address = {0, 0, 0, 0}, prefix_len = 32
+    },
+    Cap = iolist_to_binary(masque_ip_capsule:encode(address_request, [Req])),
+    ok = quic_h3:send_data(Conn, Sid, Cap, false),
+    {ok, 200, _} = masque_test_helpers:h3_await_response(Sid, 5000),
+    Bin = recv_stream(quic_h3, Conn, Sid, <<>>, 5000),
+    {ok, {?MASQUE_CAPSULE_ADDRESS_ASSIGN, Body, _}} = masque_capsule:decode(Bin),
+    {ok, [#ip_assignment{request_id = 7}]} =
+        masque_ip_capsule:decode_address_assign(Body),
+    quic_h3:close(Conn).
+
+%% CONNECT-TCP bytes written before the proxy claims the stream reach
+%% the target instead of being dropped.
+h3_tcp_bytes_before_claim_arrive(Config) ->
+    {EchoPid, EchoPort} = start_tcp_echo(),
+    {ok, Conn} = masque_test_helpers:h3_client_connect(
+        maps:get(port, ?config(h3, Config)), #{}
+    ),
+    Path = masque_uri:expand(
+        <<"/.well-known/masque/tcp/{target_host}/{target_port}/">>,
+        #{target_host => <<"127.0.0.1">>, target_port => EchoPort}
+    ),
+    Headers = [
+        {<<":method">>, <<"CONNECT">>},
+        {<<":protocol">>, <<"connect-tcp">>},
+        {<<":scheme">>, <<"https">>},
+        {<<":authority">>, <<"localhost">>},
+        {<<":path">>, Path}
+    ],
+    {ok, Sid} = quic_h3:request(Conn, Headers, #{end_stream => false}),
+    ok = quic_h3:send_data(Conn, Sid, <<"early bytes">>, false),
+    {ok, 200, _} = masque_test_helpers:h3_await_response(Sid, 5000),
+    <<"early bytes">> = recv_stream(quic_h3, Conn, Sid, <<>>, 5000),
+    quic_h3:close(Conn),
+    exit(EchoPid, kill).
+
+%%====================================================================
 %% Helpers
 %%====================================================================
+
+start_h1_server(#{cert_file := CertFile, key_file := KeyFile}, Opts) ->
+    Name = list_to_atom(
+        "h1_lifecycle_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
+    {ok, Ref} = masque:start_listener_h1(
+        Name,
+        Opts#{port => 0, cert => CertFile, key => KeyFile}
+    ),
+    #{name => Name, port => h1:server_port(Ref)}.
+
+start_tcp_echo() ->
+    {ok, LSock} = gen_tcp:listen(0, [
+        binary, {active, true}, {ip, {127, 0, 0, 1}}, {reuseaddr, true}
+    ]),
+    {ok, Port} = inet:port(LSock),
+    Pid = spawn(fun() ->
+        {ok, Sock} = gen_tcp:accept(LSock, 10000),
+        tcp_echo_loop(Sock)
+    end),
+    ok = gen_tcp:controlling_process(LSock, Pid),
+    {Pid, Port}.
+
+tcp_echo_loop(Sock) ->
+    receive
+        {tcp, Sock, Data} ->
+            _ = gen_tcp:send(Sock, Data),
+            tcp_echo_loop(Sock);
+        {tcp_closed, Sock} ->
+            ok
+    end.
+
+%% Collect stream bytes until at least one byte arrived and no more
+%% show up for 200 ms.
+recv_stream(Tag, Conn, Sid, Acc, Timeout) ->
+    receive
+        {Tag, Conn, {data, Sid, Bytes, _Fin}} ->
+            recv_stream(Tag, Conn, Sid, <<Acc/binary, Bytes/binary>>, 200)
+    after Timeout ->
+        case Acc of
+            <<>> -> ct:fail(no_stream_data);
+            _ -> Acc
+        end
+    end.
+
+await_fin(Tag, Conn, Sid) ->
+    receive
+        {Tag, Conn, {data, Sid, _, true}} -> ok;
+        {Tag, Conn, {data, Sid, _, false}} -> await_fin(Tag, Conn, Sid)
+    after 5000 -> ct:fail(no_fin_back)
+    end.
 
 start_h2_server(#{cert_file := CertFile, key_file := KeyFile}, Opts) ->
     Name = list_to_atom(
@@ -156,11 +348,7 @@ start_h2_server(#{cert_file := CertFile, key_file := KeyFile}, Opts) ->
     {ok, #{name => Name, port => Port, h2_ref => Ref}}.
 
 connect(Config, Transport) ->
-    Server =
-        case Transport of
-            h3 -> ?config(h3, Config);
-            h2 -> ?config(h2, Config)
-        end,
+    Server = ?config(Transport, Config),
     ProxyURI = iolist_to_binary(
         ["https://localhost:", integer_to_list(maps:get(port, Server))]
     ),

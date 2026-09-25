@@ -92,21 +92,17 @@ init(#{
 response_headers() ->
     [{<<"capsule-protocol">>, <<"?1">>}].
 
-claim_stream(
-    #state{
-        conn = Conn,
-        stream_id = StreamId,
-        cap_buf = Buf
-    } = S
-) ->
-    case quic_h3:set_stream_handler(Conn, StreamId, self()) of
-        ok ->
-            {ok, S};
-        {ok, Chunks} ->
-            More = iolist_to_binary([D || {D, _Fin} <- Chunks]),
-            {ok, S#state{cap_buf = <<Buf/binary, More/binary>>}};
-        {error, _} = Err ->
-            Err
+%% `drain_buffer => false' makes quic_h3 replay bytes that arrived
+%% before the claim as ordinary `{data, _, _, Fin}' messages, ahead of
+%% any later data, so they go through the normal decode path.
+claim_stream(#state{conn = Conn, stream_id = StreamId} = S) ->
+    case
+        quic_h3:set_stream_handler(Conn, StreamId, self(), #{
+            drain_buffer => false
+        })
+    of
+        {error, _} = Err -> Err;
+        _ -> {ok, S}
     end.
 
 handle_call(
@@ -443,6 +439,10 @@ drain_capsules(Buf, Fin, S) ->
         {more, _} when Fin, Buf =/= <<>> ->
             %% Stream closed mid-capsule — truncated.
             reset_and_stop(truncated_capsule, S);
+        {more, _} when Fin ->
+            %% Clean FIN on a capsule boundary: the client ended the
+            %% tunnel. terminate/2 sends our FIN back.
+            {stop, normal, S#state{cap_buf = <<>>}};
         {more, _} ->
             {noreply, S#state{cap_buf = Buf}};
         {error, _Reason} ->

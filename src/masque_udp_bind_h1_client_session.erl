@@ -128,7 +128,7 @@ connecting(internal, {do_handshake, Opts}, Data) ->
                     TableOpts = #{advertised_families => Families},
                     Data1 = Data#data{
                         socket = Socket,
-                        cap_buf = Buffer,
+                        cap_buf = <<>>,
                         public_addresses = Addrs,
                         own_table = masque_compression_table:new_own(
                             ?CLIENT_ROLE, TableOpts
@@ -139,7 +139,7 @@ connecting(internal, {do_handshake, Opts}, Data) ->
                     },
                     _ = setopts_active_once(Socket),
                     reply_handshake(Data, ok),
-                    {next_state, open, Data1};
+                    {next_state, open, Data1, drain_leftover(Socket, Buffer)};
                 {error, Reason} ->
                     _ =
                         (try
@@ -830,3 +830,11 @@ build_authority(Host, Port) ->
 
 to_bin(B) when is_binary(B) -> B;
 to_bin(L) when is_list(L) -> iolist_to_binary(L).
+
+%% Capsules the proxy sent right behind the 101 arrive in the upgrade
+%% leftover; feed them through the `open' decode path immediately
+%% instead of waiting for the next socket read.
+drain_leftover(_Socket, <<>>) ->
+    [];
+drain_leftover(Socket, Buffer) ->
+    [{next_event, info, {ssl, Socket, Buffer}}].

@@ -206,6 +206,9 @@ drain_capsules(Buf, Fin, S) ->
             end;
         {more, _} when Fin, Buf =/= <<>> ->
             reset_and_stop(truncated_capsule, S);
+        {more, _} when Fin ->
+            %% Clean END_STREAM: terminate/2 sends our END_STREAM back.
+            {stop, normal, S#state{cap_buf = <<>>}};
         {more, _} ->
             {noreply, S#state{cap_buf = Buf}}
     end.

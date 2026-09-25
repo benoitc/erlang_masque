@@ -157,8 +157,10 @@ send_response(#state{transport = h3, conn = C, stream_id = S}, Status, Hdrs) ->
 send_response(#state{transport = h2, conn = C, stream_id = S}, Status, Hdrs) ->
     h2:send_response(C, S, Status, Hdrs).
 
+%% `drain_buffer => false': bytes that arrived before the claim are
+%% replayed as `{data, _, _, Fin}' messages through the normal path.
 claim_stream(#state{transport = h3, conn = C, stream_id = S}) ->
-    quic_h3:set_stream_handler(C, S, self());
+    quic_h3:set_stream_handler(C, S, self(), #{drain_buffer => false});
 claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
     h2:set_stream_handler(C, S, self()).
 
@@ -176,7 +178,7 @@ handle_call(
     case send_response(S, 200, response_headers()) of
         ok ->
             case claim_stream(S) of
-                Ok when Ok =:= ok; is_tuple(Ok) ->
+                Ok when Ok =:= ok; element(1, Ok) =:= ok ->
                     %% Stream is now open: run the handler's init actions,
                     %% then flush any actions buffered before finalize.
                     {reply, ok,
@@ -363,6 +365,9 @@ drain_capsules(Buf, Fin, S) ->
             end;
         {more, _} when Fin, Buf =/= <<>> ->
             reset_and_stop(truncated_capsule, S);
+        {more, _} when Fin ->
+            %% Clean FIN: terminate/2 sends our FIN back.
+            {stop, normal, S#state{cap_buf = <<>>}};
         {more, _} ->
             {noreply, S#state{cap_buf = Buf}};
         {error, _} ->
