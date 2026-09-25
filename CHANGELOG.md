@@ -36,6 +36,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Erlang/OTP 29 is now the only supported release (`minimum_otp_vsn`
+  in `rebar.config`); CI runs tests, lint and dialyzer on OTP 29 only.
 - Bumped `quic` 1.3.0 -> 2.0.1 and `h1` (erlang_h1) 0.6.2 -> 0.9.1.
 - Bumped `h2` 0.9.0 -> 0.12.3.
 - Bumped `instrument` 1.1.3 -> 1.1.5 and `hackney` 4.3.0 -> 4.7.4.
