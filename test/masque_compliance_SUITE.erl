@@ -467,7 +467,7 @@ client_connects_to_server(Config) ->
     Server = ?config(server, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]
+        ["https://127.0.0.1:", integer_to_list(Port)]
     ),
     {ok, Sess} = masque:connect(
         ProxyURI,
@@ -491,7 +491,7 @@ client_handshake_rejected_maps_error(Config) ->
     Server = ?config(server, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]
+        ["https://127.0.0.1:", integer_to_list(Port)]
     ),
     {error, {handshake_rejected, 404}} =
         masque:connect(
@@ -634,7 +634,7 @@ udp_proxy_round_trip(Config) ->
     Server = ?config(server, Config),
     UdpPort = ?config(udp_port, Config),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(maps:get(port, Server))]
+        ["https://127.0.0.1:", integer_to_list(maps:get(port, Server))]
     ),
     {ok, Sess} = masque:connect(
         ProxyURI,
@@ -659,7 +659,7 @@ udp_proxy_policy_denies(Config) ->
     Server = ?config(server, Config),
     UdpPort = ?config(udp_port, Config),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(maps:get(port, Server))]
+        ["https://127.0.0.1:", integer_to_list(maps:get(port, Server))]
     ),
     %% Policy says deny-all → handshake should come back 403.
     ?assertMatch(
@@ -679,7 +679,7 @@ integration_custom_h3_listener(Config) ->
     Server = ?config(server, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]
+        ["https://127.0.0.1:", integer_to_list(Port)]
     ),
     %% (a) MASQUE tunnel still works through the integration wiring.
     {ok, Sess} = masque:connect(
@@ -808,7 +808,7 @@ udp_source_spoofing_rejected(Config) ->
     UdpPort = ?config(udp_port, Config),
     ProxyBindPort = ?config(proxy_bind_port, Config),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(maps:get(port, Server))]
+        ["https://127.0.0.1:", integer_to_list(maps:get(port, Server))]
     ),
     {ok, Sess} = masque:connect(
         ProxyURI,
@@ -847,7 +847,7 @@ handshake_rejected_when_init_fails(Config) ->
     Server = ?config(server, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]
+        ["https://127.0.0.1:", integer_to_list(Port)]
     ),
     %% DNS resolution fails inside `init/2'. Because the 200 response
     %% is only sent AFTER init succeeds, the client must see a 502
@@ -891,7 +891,7 @@ chain_round_trip(Config) ->
     UdpPort = ?config(udp_port, Config),
     IngressPort = maps:get(port, Ingress),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(IngressPort)]
+        ["https://127.0.0.1:", integer_to_list(IngressPort)]
     ),
     {ok, Sess} = masque:connect(
         ProxyURI,
@@ -917,7 +917,7 @@ chain_multiple_packets(Config) ->
     UdpPort = ?config(udp_port, Config),
     IngressPort = maps:get(port, Ingress),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(IngressPort)]
+        ["https://127.0.0.1:", integer_to_list(IngressPort)]
     ),
     {ok, Sess} = masque:connect(
         ProxyURI,
@@ -942,7 +942,7 @@ chain_concurrent_tunnels(Config) ->
     UdpPort = ?config(udp_port, Config),
     IngressPort = maps:get(port, Ingress),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(IngressPort)]
+        ["https://127.0.0.1:", integer_to_list(IngressPort)]
     ),
     N = 3,
     Parent = self(),
@@ -990,7 +990,7 @@ chain_capsule_forwarding(Config) ->
     Ingress = ?config(server, Config),
     IngressPort = maps:get(port, Ingress),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(IngressPort)]
+        ["https://127.0.0.1:", integer_to_list(IngressPort)]
     ),
     {ok, Sess} = masque:connect(
         ProxyURI,
@@ -1016,7 +1016,7 @@ chain_upstream_failure_returns_502(Config) ->
     Server = ?config(server, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]
+        ["https://127.0.0.1:", integer_to_list(Port)]
     ),
     %% The upstream is unreachable (port 1). Depending on how fast
     %% QUIC rejects the connection, the ingress either maps the
@@ -1112,7 +1112,7 @@ h2_udp_proxy_round_trip(Config) ->
     UdpPort = ?config(udp_port, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]
+        ["https://127.0.0.1:", integer_to_list(Port)]
     ),
     {ok, Sess} = masque:connect(
         ProxyURI,
@@ -1204,7 +1204,7 @@ connect_to(Config, Transport) ->
     Server = ?config(server, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]
+        ["https://127.0.0.1:", integer_to_list(Port)]
     ),
     Opts =
         case Transport of
@@ -1258,7 +1258,7 @@ tcp_echo_round_trip(Config) ->
     TcpPort = ?config(tcp_port, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]
+        ["https://127.0.0.1:", integer_to_list(Port)]
     ),
     {ok, Sess} = masque:connect(
         ProxyURI,
@@ -1284,7 +1284,7 @@ tcp_large_transfer(Config) ->
     TcpPort = ?config(tcp_port, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]
+        ["https://127.0.0.1:", integer_to_list(Port)]
     ),
     {ok, Sess} = masque:connect(
         ProxyURI,
@@ -1309,7 +1309,7 @@ tcp_target_closes(Config) ->
     TcpPort = ?config(tcp_port, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]
+        ["https://127.0.0.1:", integer_to_list(Port)]
     ),
     {ok, Sess} = masque:connect(
         ProxyURI,
@@ -1337,7 +1337,7 @@ tcp_and_udp_same_listener(Config) ->
     UdpPort = ?config(udp_port, Config),
     Port = maps:get(port, Server),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(Port)]
+        ["https://127.0.0.1:", integer_to_list(Port)]
     ),
     %% TCP tunnel
     {ok, TcpSess} = masque:connect(
@@ -1379,7 +1379,7 @@ tcp_chain_round_trip(Config) ->
     TcpPort = ?config(tcp_port, Config),
     IngressPort = maps:get(port, Ingress),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(IngressPort)]
+        ["https://127.0.0.1:", integer_to_list(IngressPort)]
     ),
     {ok, Sess} = masque:connect(
         ProxyURI,
