@@ -182,6 +182,22 @@ info_upstream_closed_stops_session_test() ->
     ?assertEqual(S, S1),
     cleanup(Pid).
 
+info_tcp_upstream_fin_half_closes_test() ->
+    {S, Pid} = state(tcp),
+    {ok, S1, Actions} = ?M:handle_info({masque_closed, Pid, peer_fin}, S),
+    ?assertEqual([{send_data, <<>>, true}], Actions),
+    %% The client's FIN then ends both legs cleanly.
+    {stop, normal, _} = ?M:handle_eof(S1),
+    await_shutdown_write(),
+    cleanup(Pid).
+
+info_tcp_upstream_fin_after_client_fin_stops_test() ->
+    {S, Pid} = state(tcp),
+    {ok, S1} = ?M:handle_eof(S),
+    await_shutdown_write(),
+    {stop, normal, _} = ?M:handle_info({masque_closed, Pid, peer_fin}, S1),
+    cleanup(Pid).
+
 info_unknown_message_is_ignored_test() ->
     {S, Pid} = state(udp),
     ?assertMatch({ok, _}, ?M:handle_info(something_else, S)),
@@ -245,6 +261,13 @@ assert_captured(Expected) ->
             ?assertEqual(Expected, Payload)
     after 500 ->
         ?assert(false, "no upstream call captured")
+    end.
+
+await_shutdown_write() ->
+    receive
+        {captured, shutdown_write} -> ok
+    after 500 ->
+        ?assert(false, "no shutdown_write captured")
     end.
 
 cleanup(Pid) ->

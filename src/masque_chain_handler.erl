@@ -82,7 +82,10 @@
     protocol :: udp | tcp | ip,
     %% Upstream request id -> client request id for forwarded
     %% ADDRESS_REQUESTs still waiting for their ADDRESS_ASSIGN.
-    id_map = #{} :: #{pos_integer() => pos_integer()}
+    id_map = #{} :: #{pos_integer() => pos_integer()},
+    %% CONNECT-TCP half-close: which legs already sent FIN.
+    upstream_fin = false :: boolean(),
+    downstream_fin = false :: boolean()
 }).
 
 -ifdef(TEST).
@@ -281,7 +284,10 @@ handle_eof(#state{upstream = Sess} = State) ->
         catch
             _:_ -> ok
         end),
-    {ok, State}.
+    case State of
+        #state{protocol = tcp, upstream_fin = true} -> {stop, normal, State};
+        _ -> {ok, State#state{downstream_fin = true}}
+    end.
 
 -spec handle_info(term(), #state{}) ->
     {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
@@ -327,6 +333,14 @@ handle_info(
     {ok, State, [{advertise, Routes}]};
 handle_info({masque_capsule, Sess, Type, Value}, #state{upstream = Sess} = State) ->
     {ok, State, [{send_capsule, Type, Value}]};
+handle_info(
+    {masque_closed, Sess, peer_fin},
+    #state{upstream = Sess, protocol = tcp, downstream_fin = true} = State
+) ->
+    {stop, normal, State};
+handle_info({masque_closed, Sess, peer_fin}, #state{upstream = Sess, protocol = tcp} = State) ->
+    %% Upstream half-close: pass the FIN on, keep relaying client bytes.
+    {ok, State#state{upstream_fin = true}, [{send_data, <<>>, true}]};
 handle_info({masque_closed, Sess, _Reason}, #state{upstream = Sess} = State) ->
     {stop, upstream_closed, State};
 handle_info(_Other, State) ->

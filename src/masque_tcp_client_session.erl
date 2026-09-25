@@ -1,8 +1,11 @@
 %%% @doc Client-side MASQUE CONNECT-TCP session.
 %%%
 %%% TCP data travels as raw bytes on the HTTP request/response stream
-%%% body - no datagrams, no context-IDs, no capsule wrapping for the
-%%% base case. Stream END_STREAM = TCP FIN.
+%%% body - no datagrams, no context-IDs, no capsules: the request
+%%% carries no `capsule-protocol' and a 2xx claiming it is rejected.
+%%% Stream END_STREAM = TCP FIN, one per direction: after the peer's
+%%% FIN the owner can keep sending until it calls `shutdown_write/1'
+%%% or closes the session, and after its own FIN it keeps receiving.
 %%%
 %%% Supports both HTTP/3 (quic_h3) and HTTP/2 (h2) as the outer
 %%% transport, selected by `transport => h3 | h2' in opts.
@@ -52,6 +55,8 @@
     %% with `rx_overflow' rather than dropping bytes.
     rx_limit = ?MASQUE_DEFAULT_RX_QUEUE_LIMIT :: pos_integer(),
     write_closed = false :: boolean(),
+    %% The peer sent FIN; the session stays open for sending.
+    read_closed = false :: boolean(),
     %% Extra request headers prepended to the CONNECT request.
     extra_headers = [] :: [{binary(), binary()}],
     %% When set, the conn is owned by a `masque_upstream_owner';
@@ -82,8 +87,9 @@ recv(Pid, Timeout) ->
 set_mode(Pid, Mode) when Mode =:= message; Mode =:= queue ->
     gen_statem:call(Pid, {set_mode, Mode}).
 
-send_capsule(Pid, Type, Value) ->
-    gen_statem:call(Pid, {send_capsule, Type, Value}).
+%% CONNECT-TCP carries raw bytes only; there is no capsule channel.
+send_capsule(_Pid, _Type, _Value) ->
+    {error, not_supported}.
 
 %%====================================================================
 %% gen_statem
@@ -143,6 +149,8 @@ connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
 connecting({call, From}, shutdown_write, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
+connecting({call, From}, {send_capsule, _, _}, Data) ->
+    {keep_state, Data, [{reply, From, {error, not_supported}}]};
 connecting({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 connecting(info, {Tag, _Conn, {closed, _Reason}}, Data) when
@@ -166,7 +174,7 @@ connecting(
     {stop, goaway};
 connecting(
     info,
-    {Tag, _Conn, {response, StreamId, Status, _Headers}},
+    {Tag, _Conn, {response, StreamId, Status, Headers}},
     #data{stream_id = StreamId} = Data
 ) when
     Tag =:= quic_h3; Tag =:= h2
@@ -174,11 +182,17 @@ connecting(
     cancel_timer(Data#data.timeout_ref),
     case Status of
         S when S >= 200, S < 300 ->
-            reply_handshake(Data, ok),
-            {next_state, open, Data#data{
-                timeout_ref = undefined,
-                handshake_from = undefined
-            }};
+            case check_response(Headers) of
+                ok ->
+                    reply_handshake(Data, ok),
+                    {next_state, open, Data#data{
+                        timeout_ref = undefined,
+                        handshake_from = undefined
+                    }};
+                {error, Reason} ->
+                    reply_handshake(Data, {error, Reason}),
+                    {stop, Reason}
+            end;
         _ ->
             reply_handshake(Data, {error, {handshake_rejected, Status}}),
             {stop, {handshake_rejected, Status}}
@@ -223,14 +237,25 @@ open({call, From}, {set_mode, Mode}, Data) ->
     {keep_state, Data#data{mode = Mode}, [{reply, From, ok}]};
 open({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
-open({call, From}, {send_capsule, _, _}, #data{write_closed = true} = Data) ->
-    {keep_state, Data, [{reply, From, {error, write_closed}}]};
-open({call, From}, {send_capsule, Type, Value}, Data) ->
-    Enc = iolist_to_binary(masque_capsule:encode(Type, Value)),
-    Reply = transport_send_data(Data, Enc, false),
-    {keep_state, Data, [{reply, From, Reply}]};
+open({call, From}, {send_capsule, _, _}, Data) ->
+    {keep_state, Data, [{reply, From, {error, not_supported}}]};
 open({call, From}, shutdown_write, #data{write_closed = true} = Data) ->
     {keep_state, Data, [{reply, From, {error, already_closed}}]};
+open({call, From}, shutdown_write, #data{read_closed = true} = Data) ->
+    %% Both directions are done: end the session, keeping queue-mode
+    %% data the owner has not read yet.
+    case transport_send_data(Data, <<>>, true) of
+        ok ->
+            case masque_client_rx:keep_unread(Data#data.mode, Data#data.rx_buf) of
+                true ->
+                    {next_state, closed, Data2, Actions} = park_unread(closed, Data),
+                    {next_state, closed, Data2, [{reply, From, ok} | Actions]};
+                false ->
+                    {stop_and_reply, normal, [{reply, From, ok}], Data}
+            end;
+        Err ->
+            {keep_state, Data, [{reply, From, Err}]}
+    end;
 open({call, From}, shutdown_write, Data) ->
     case transport_send_data(Data, <<>>, true) of
         ok ->
@@ -254,8 +279,13 @@ open(
     case deliver(Bytes, Data) of
         {overflow, Data2} ->
             rx_overflow(Data2);
-        Data2 when Fin ->
+        #data{write_closed = true} = Data2 when Fin ->
             end_tunnel(peer_fin, {stop, normal, Data2}, Data2);
+        Data2 when Fin ->
+            %% Half-close: the owner learns the peer is done sending,
+            %% its own direction stays open.
+            _ = notify_owner_closed(peer_fin, Data2),
+            {keep_state, read_fin(Data2)};
         Data2 ->
             {keep_state, Data2}
     end;
@@ -535,9 +565,16 @@ request_headers(#data{
         {<<":protocol">>, ?MASQUE_CONNECT_TCP_PROTOCOL},
         {<<":scheme">>, <<"https">>},
         {<<":authority">>, Authority},
-        {<<":path">>, Path},
-        {<<"capsule-protocol">>, <<"?1">>}
+        {<<":path">>, Path}
     ] ++ Extra.
+
+%% A CONNECT-TCP 2xx must not switch the stream to capsules: the
+%% tunnel carries raw bytes (draft-ietf-httpbis-connect-tcp).
+check_response(Headers) ->
+    case proplists:get_value(<<"capsule-protocol">>, Headers) of
+        <<"?1", _/binary>> -> {error, {bad_response, capsule_protocol}};
+        _ -> ok
+    end.
 
 sanitise_extra_headers(List) when is_list(List) ->
     Reserved = [
@@ -564,6 +601,8 @@ handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
     case queue:out(Buf) of
         {{value, Bytes}, Buf2} ->
             {keep_state, Data#data{rx_buf = Buf2}, [{reply, From, {ok, Bytes}}]};
+        {empty, _} when Data#data.read_closed ->
+            {keep_state, Data, [{reply, From, {error, closed}}]};
         {empty, _} ->
             TRef = erlang:start_timer(Timeout, self(), {recv_timeout, From}),
             {keep_state, Data#data{
@@ -587,6 +626,13 @@ deliver(Bytes, #data{mode = queue, rx_waiters = Ws, rx_buf = Buf} = Data) ->
                 true -> {overflow, Data}
             end
     end.
+
+%% The peer's FIN: queued bytes stay readable, then `recv/2' returns
+%% `{error, closed}'; waiters (only present with an empty queue) get
+%% it now.
+read_fin(Data) ->
+    ok = cancel_all_waiters(Data),
+    Data#data{read_closed = true, rx_waiters = queue:new()}.
 
 drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->
     Ws2 = queue:filter(

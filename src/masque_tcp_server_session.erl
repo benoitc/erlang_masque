@@ -1,8 +1,10 @@
 %%% @doc Per-tunnel server session for CONNECT-TCP.
 %%%
 %%% Raw bytes on the HTTP stream body are relayed to/from the handler
-%%% module. No datagram framing, no context-IDs. Stream END_STREAM
-%%% maps to TCP FIN.
+%%% module. No datagram framing, no context-IDs, no capsules (the 2xx
+%%% carries no `capsule-protocol'). Stream END_STREAM maps to TCP FIN
+%%% in each direction: a FIN from one side half-closes the tunnel and
+%%% the other direction keeps flowing until it ends too.
 -module(masque_tcp_server_session).
 -behaviour(gen_server).
 
@@ -36,7 +38,9 @@
     %% Actions from handler init, applied after finalize (H3 path)
     pending_actions :: [term()] | undefined,
     %% Monitor on the router (H3 path).
-    router_ref :: reference() | undefined
+    router_ref :: reference() | undefined,
+    %% Our side of the stream already ended with FIN.
+    fin_sent = false :: boolean()
 }).
 
 %%====================================================================
@@ -85,13 +89,7 @@ init(
                     {ok, State#state{pending_actions = Actions}};
                 false ->
                     %% H2 path: immediate finalize
-                    case
-                        send_response(
-                            State,
-                            200,
-                            [{<<"capsule-protocol">>, <<"?1">>}]
-                        )
-                    of
+                    case send_response(State, 200, []) of
                         ok ->
                             case claim_stream(State) of
                                 ok ->
@@ -128,7 +126,7 @@ handle_call(
 ) when
     Actions =/= undefined
 ->
-    case send_response(S, 200, [{<<"capsule-protocol">>, <<"?1">>}]) of
+    case send_response(S, 200, []) of
         ok ->
             case claim_stream(S) of
                 ok ->
@@ -244,10 +242,17 @@ terminate(
 maybe_release_h2_tunnel(h2, Conn) -> masque_h2_server:release_tunnel(Conn);
 maybe_release_h2_tunnel(_, _) -> ok.
 
-%% A clean end (ours or the target's FIN) closes the stream with FIN.
-%% Anything else (target reset or error, handler crash) resets it
-%% with CONNECT_ERROR so the client does not mistake it for a clean
-%% close (RFC 9114 sec 4.4, RFC 9113 sec 8.5).
+%% A clean end (ours or the target's FIN) closes the stream with FIN,
+%% unless a half-close already sent it. Anything else (target reset or
+%% error, handler crash) resets it with CONNECT_ERROR so the client
+%% does not mistake it for a clean close (RFC 9114 sec 4.4, RFC 9113
+%% sec 8.5).
+end_stream(Reason, #state{fin_sent = true}) when
+    Reason =:= normal;
+    Reason =:= target_closed;
+    Reason =:= eof_timeout
+->
+    ok;
 end_stream(Reason, S) when
     Reason =:= normal;
     Reason =:= target_closed;
@@ -337,12 +342,14 @@ do_actions([{send_data, Bytes, Fin} | Rest], S) ->
     %% (e.g. the TCP proxy's `{active, N}' re-arm) rely on every
     %% earlier write having succeeded.
     case tunnel_send(S, Bytes, Fin) of
-        ok -> do_actions(Rest, S);
+        ok -> do_actions(Rest, S#state{fin_sent = Fin orelse S#state.fin_sent});
         {error, Reason} -> {stop, {tunnel_send_failed, Reason}, S}
     end;
+do_actions([close_session | _Rest], #state{fin_sent = true} = S) ->
+    {stop, normal, S};
 do_actions([close_session | _Rest], S) ->
     _ = transport_send_data(S, <<>>, true),
-    {stop, normal, S};
+    {stop, normal, S#state{fin_sent = true}};
 do_actions([_Unknown | Rest], S) ->
     do_actions(Rest, S).
 

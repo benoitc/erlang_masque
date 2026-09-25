@@ -171,6 +171,8 @@ open({call, From}, {send, Payload}, #data{socket = Sock} = Data) ->
     {keep_state, Data, [{reply, From, Reply}]};
 open({call, From}, {recv, Timeout}, Data) ->
     handle_recv_call(From, Timeout, Data);
+open({call, From}, {send_capsule, _, _}, Data) ->
+    {keep_state, Data, [{reply, From, {error, not_supported}}]};
 open({call, From}, {set_mode, Mode}, Data) ->
     {keep_state, Data#data{mode = Mode}, [{reply, From, ok}]};
 open({call, From}, shutdown_write, #data{socket = Sock} = Data) ->

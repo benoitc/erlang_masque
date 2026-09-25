@@ -41,7 +41,13 @@
     h2_unknown_reject_reason_gets_response/1,
     h2_failed_session_releases_tunnel_slot/1,
     h3_tcp_target_reset_resets_tunnel/1,
-    h2_tcp_target_reset_resets_tunnel/1
+    h2_tcp_target_reset_resets_tunnel/1,
+    h3_tcp_client_fin_half_closes/1,
+    h2_tcp_client_fin_half_closes/1,
+    h3_tcp_target_fin_half_closes/1,
+    h2_tcp_target_fin_half_closes/1,
+    tcp_send_capsule_not_supported/1,
+    h2_tcp_rejects_capsule_protocol_response/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -75,7 +81,13 @@ all() ->
         h2_unknown_reject_reason_gets_response,
         h2_failed_session_releases_tunnel_slot,
         h3_tcp_target_reset_resets_tunnel,
-        h2_tcp_target_reset_resets_tunnel
+        h2_tcp_target_reset_resets_tunnel,
+        h3_tcp_client_fin_half_closes,
+        h2_tcp_client_fin_half_closes,
+        h3_tcp_target_fin_half_closes,
+        h2_tcp_target_fin_half_closes,
+        tcp_send_capsule_not_supported,
+        h2_tcp_rejects_capsule_protocol_response
     ].
 
 init_per_suite(Config) ->
@@ -473,9 +485,153 @@ tcp_target_reset_resets_tunnel(Config, Transport) ->
     end,
     gen_tcp:close(LSock).
 
+%% The client's FIN reaches the target as a TCP FIN; the target's
+%% reply still reaches the client.
+h3_tcp_client_fin_half_closes(Config) ->
+    tcp_client_fin_half_closes(Config, h3).
+
+h2_tcp_client_fin_half_closes(Config) ->
+    tcp_client_fin_half_closes(Config, h2).
+
+tcp_client_fin_half_closes(Config, Transport) ->
+    {LSock, TPort} = tcp_target_listen(),
+    Self = self(),
+    Target = spawn(fun() ->
+        {ok, Sock} = gen_tcp:accept(LSock, 10000),
+        Got = recv_until_closed(Sock, <<>>),
+        ok = gen_tcp:send(Sock, <<"reply:", Got/binary>>),
+        Self ! {target_got, Got},
+        gen_tcp:close(Sock)
+    end),
+    ok = gen_tcp:controlling_process(LSock, Target),
+    Sess = tcp_connect(Config, Transport, TPort),
+    MRef = erlang:monitor(process, Sess),
+    ok = masque:send(Sess, <<"request">>),
+    ok = masque:shutdown_write(Sess),
+    receive
+        {target_got, <<"request">>} -> ok
+    after 5000 -> ct:fail(target_saw_no_fin)
+    end,
+    <<"reply:request">> = recv_tcp(Sess, <<>>),
+    receive
+        {'DOWN', MRef, process, Sess, normal} -> ok
+    after 5000 -> ct:fail(session_alive)
+    end,
+    gen_tcp:close(LSock).
+
+%% The target's FIN reaches the client as end of data; the client can
+%% still send until it half-closes too.
+h3_tcp_target_fin_half_closes(Config) ->
+    tcp_target_fin_half_closes(Config, h3).
+
+h2_tcp_target_fin_half_closes(Config) ->
+    tcp_target_fin_half_closes(Config, h2).
+
+tcp_target_fin_half_closes(Config, Transport) ->
+    {LSock, TPort} = tcp_target_listen(),
+    Self = self(),
+    Target = spawn(fun() ->
+        {ok, Sock} = gen_tcp:accept(LSock, 10000),
+        ok = gen_tcp:send(Sock, <<"banner">>),
+        ok = gen_tcp:shutdown(Sock, write),
+        Self ! {target_got, recv_until_closed(Sock, <<>>)},
+        gen_tcp:close(Sock)
+    end),
+    ok = gen_tcp:controlling_process(LSock, Target),
+    Sess = tcp_connect(Config, Transport, TPort),
+    <<"banner">> = recv_tcp(Sess, <<>>),
+    receive
+        {masque_closed, Sess, peer_fin} -> ok
+    after 5000 -> ct:fail(no_peer_fin)
+    end,
+    ok = masque:send(Sess, <<"late">>),
+    ok = masque:send(Sess, <<" bytes">>),
+    MRef = erlang:monitor(process, Sess),
+    ok = masque:shutdown_write(Sess),
+    receive
+        {target_got, <<"late bytes">>} -> ok;
+        {target_got, Other} -> ct:fail({target_got, Other})
+    after 5000 -> ct:fail(target_saw_no_fin)
+    end,
+    receive
+        {'DOWN', MRef, process, Sess, normal} -> ok
+    after 5000 -> ct:fail(session_alive)
+    end,
+    gen_tcp:close(LSock).
+
+tcp_send_capsule_not_supported(Config) ->
+    {EchoPid, EchoPort} = start_tcp_echo(),
+    Sess = tcp_connect(Config, h3, EchoPort),
+    {error, not_supported} = masque:send_capsule(Sess, 16#ff00, <<"x">>),
+    ok = masque:send(Sess, <<"still raw">>),
+    <<"still raw">> = recv_tcp(Sess, <<>>),
+    ok = masque:close(Sess),
+    exit(EchoPid, kill).
+
+%% A CONNECT-TCP 2xx that switches the stream to capsules is refused.
+h2_tcp_rejects_capsule_protocol_response(Config) ->
+    #{cert_file := CertFile, key_file := KeyFile} = ?config(certs, Config),
+    Handler = fun(Conn, Sid, _Method, _Path, _Headers) ->
+        h2:send_response(Conn, Sid, 200, [{<<"capsule-protocol">>, <<"?1">>}])
+    end,
+    {ok, {_, _, Port} = Ref} = h2:start_server(0, #{
+        cert => CertFile,
+        key => KeyFile,
+        handler => Handler,
+        enable_connect_protocol => true
+    }),
+    try
+        {error, _} = masque:connect(
+            iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+            {<<"192.0.2.6">>, 443},
+            #{verify => verify_none, transports => [h2], protocol => tcp}
+        )
+    after
+        h2:stop_server(Ref)
+    end.
+
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+tcp_target_listen() ->
+    {ok, LSock} = gen_tcp:listen(0, [
+        binary, {active, false}, {ip, {127, 0, 0, 1}}, {exit_on_close, false}
+    ]),
+    {ok, TPort} = inet:port(LSock),
+    {LSock, TPort}.
+
+tcp_connect(Config, Transport, TPort) ->
+    Port = maps:get(port, ?config(Transport, Config)),
+    {ok, Sess} = masque:connect(
+        iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+        {<<"127.0.0.1">>, TPort},
+        #{verify => verify_none, transports => [Transport], protocol => tcp}
+    ),
+    Sess.
+
+recv_until_closed(Sock, Acc) ->
+    case gen_tcp:recv(Sock, 0, 5000) of
+        {ok, Bytes} -> recv_until_closed(Sock, <<Acc/binary, Bytes/binary>>);
+        {error, _} -> Acc
+    end.
+
+%% Collect tunnel bytes until none arrive for 200 ms.
+recv_tcp(Sess, Acc) ->
+    receive
+        {masque_data, Sess, Bytes} -> recv_tcp(Sess, <<Acc/binary, Bytes/binary>>)
+    after 200 ->
+        case Acc of
+            <<>> -> recv_tcp_wait(Sess);
+            _ -> Acc
+        end
+    end.
+
+recv_tcp_wait(Sess) ->
+    receive
+        {masque_data, Sess, Bytes} -> recv_tcp(Sess, Bytes)
+    after 5000 -> ct:fail(no_tunnel_data)
+    end.
 
 h2_connect(Config) ->
     h2:connect(
