@@ -47,7 +47,11 @@
     h3_tcp_target_fin_half_closes/1,
     h2_tcp_target_fin_half_closes/1,
     tcp_send_capsule_not_supported/1,
-    h2_tcp_rejects_capsule_protocol_response/1
+    h2_tcp_rejects_capsule_protocol_response/1,
+    h3_udp_bind_close_ends_connection/1,
+    h2_udp_bind_close_ends_connection/1,
+    h3_udp_bind_parked_session_closes_connection/1,
+    h2_udp_bind_parked_session_closes_connection/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -87,7 +91,11 @@ all() ->
         h3_tcp_target_fin_half_closes,
         h2_tcp_target_fin_half_closes,
         tcp_send_capsule_not_supported,
-        h2_tcp_rejects_capsule_protocol_response
+        h2_tcp_rejects_capsule_protocol_response,
+        h3_udp_bind_close_ends_connection,
+        h2_udp_bind_close_ends_connection,
+        h3_udp_bind_parked_session_closes_connection,
+        h2_udp_bind_parked_session_closes_connection
     ].
 
 init_per_suite(Config) ->
@@ -147,12 +155,16 @@ end_per_testcase(_Case, Config) ->
 
 extra_opts(Case) when
     Case =:= h3_udp_bind_round_trip;
-    Case =:= h2_udp_bind_round_trip
+    Case =:= h2_udp_bind_round_trip;
+    Case =:= h3_udp_bind_close_ends_connection;
+    Case =:= h2_udp_bind_close_ends_connection
 ->
     bind_opts();
 extra_opts(Case) when
     Case =:= h3_bind_handler_crash_resets_stream;
-    Case =:= h2_bind_handler_crash_resets_stream
+    Case =:= h2_bind_handler_crash_resets_stream;
+    Case =:= h3_udp_bind_parked_session_closes_connection;
+    Case =:= h2_udp_bind_parked_session_closes_connection
 ->
     (bind_opts())#{bind_handler => masque_crash_bind_handler};
 extra_opts(Case) when
@@ -370,6 +382,68 @@ udp_bind_round_trip(Config, Transport) ->
     end,
     ok = masque:close(Sess),
     gen_udp:close(Peer).
+
+h3_udp_bind_close_ends_connection(Config) ->
+    udp_bind_close_ends_connection(Config, h3).
+
+h2_udp_bind_close_ends_connection(Config) ->
+    udp_bind_close_ends_connection(Config, h2).
+
+%% The session dialed its own connection; closing the session closes it.
+udp_bind_close_ends_connection(Config, Transport) ->
+    Sess = bind_connect(Config, Transport),
+    %% `conn' is the 9th field of the session's `#data{}' record.
+    {open, Data} = sys:get_state(Sess),
+    Conn = element(10, Data),
+    true = is_process_alive(Conn),
+    MRef = erlang:monitor(process, Conn),
+    ok = masque:close(Sess),
+    receive
+        {'DOWN', MRef, process, Conn, _} -> ok
+    after 5000 -> ct:fail(connection_alive)
+    end.
+
+h3_udp_bind_parked_session_closes_connection(Config) ->
+    udp_bind_parked_session_closes_connection(Config, h3).
+
+h2_udp_bind_parked_session_closes_connection(Config) ->
+    udp_bind_parked_session_closes_connection(Config, h2).
+
+%% A queue-mode session whose tunnel ended with data unread lingers
+%% for `recv/2', but its connection closes right away.
+udp_bind_parked_session_closes_connection(Config, Transport) ->
+    {ok, Peer} = gen_udp:open(0, [binary, {ip, {127, 0, 0, 1}}, {active, true}]),
+    {ok, PeerPort} = inet:port(Peer),
+    Sess = bind_connect(Config, Transport),
+    ok = masque:set_mode(Sess, queue),
+    {ok, _} = masque:open_uncompressed_context(Sess),
+    ok = wait_until(fun() -> uncompressed_acked(Sess) end, 50),
+    ok = masque:send_to(Sess, {{127, 0, 0, 1}, PeerPort}, <<"ping">>),
+    {ProxyIP, ProxyPort} =
+        receive
+            {udp, Peer, FromIP, FromPort, <<"ping">>} -> {FromIP, FromPort}
+        after 5000 -> ct:fail(no_packet_at_peer)
+        end,
+    ok = gen_udp:send(Peer, ProxyIP, ProxyPort, <<"pong">>),
+    timer:sleep(200),
+    {open, Data} = sys:get_state(Sess),
+    Conn = element(10, Data),
+    MRef = erlang:monitor(process, Conn),
+    %% The crash handler resets the stream on this capsule.
+    ok = masque:send_capsule(Sess, 16#ff01, <<>>),
+    receive
+        {'DOWN', MRef, process, Conn, _} -> ok
+    after 5000 -> ct:fail(connection_alive)
+    end,
+    {ok, _, <<"pong">>} = masque:recv(Sess, 1000),
+    {error, closed} = masque:recv(Sess, 1000),
+    gen_udp:close(Peer).
+
+uncompressed_acked(Sess) ->
+    receive
+        {masque_compression_acked, Sess, _} -> true
+    after 0 -> false
+    end.
 
 h3_bind_handler_crash_resets_stream(Config) ->
     bind_handler_crash_resets_stream(Config, h3).

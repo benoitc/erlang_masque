@@ -438,10 +438,31 @@ closed(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
 %% A parked dial error was already returned to `handshake_await'.
 terminate(_Reason, failed, _Data) ->
     ok;
-terminate(Reason, _State, #data{owner = Owner, mode = message}) ->
+terminate(Reason, _State, #data{owner = Owner, mode = message} = Data) ->
     masque_client_owner:send(Owner, {masque_closed, self(), Reason}),
+    close_conn(Data);
+terminate(_Reason, _State, Data) ->
+    close_conn(Data).
+
+%% The session dialed its own connection (udp-bind is never pooled):
+%% close it with the session.
+close_conn(#data{conn = undefined}) ->
     ok;
-terminate(_Reason, _State, _Data) ->
+close_conn(#data{transport = h3, conn = Conn}) ->
+    _ =
+        (try
+            quic_h3:close(Conn)
+        catch
+            _:_ -> ok
+        end),
+    ok;
+close_conn(#data{transport = h2, conn = Conn}) ->
+    _ =
+        (try
+            h2:close(Conn)
+        catch
+            _:_ -> ok
+        end),
     ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
@@ -710,7 +731,9 @@ lookup_context(Ctx, #data{peer_table = PT, own_table = OT}) ->
 end_tunnel(Result, #data{mode = Mode, rx_buf = Buf} = Data) ->
     case masque_client_rx:keep_unread(Mode, Buf) of
         true ->
-            {next_state, closed, Data#data{rx_buf = masque_client_rx:close_queue(Buf, closed)},
+            ok = close_conn(Data),
+            {next_state, closed,
+                Data#data{conn = undefined, rx_buf = masque_client_rx:close_queue(Buf, closed)},
                 masque_client_rx:closed_enter()};
         false ->
             Result
