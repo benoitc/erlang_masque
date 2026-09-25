@@ -203,7 +203,7 @@ init_per_testcase(chain_round_trip, Config) ->
             handler_opts => #{
                 upstream_proxy =>
                     iolist_to_binary([
-                        "https://localhost:",
+                        "https://127.0.0.1:",
                         integer_to_list(EgressPort)
                     ]),
                 upstream_opts => #{
@@ -240,7 +240,7 @@ init_per_testcase(chain_capsule_forwarding, Config) ->
             handler_opts => #{
                 upstream_proxy =>
                     iolist_to_binary([
-                        "https://localhost:",
+                        "https://127.0.0.1:",
                         integer_to_list(EgressPort)
                     ]),
                 upstream_opts => #{
@@ -266,7 +266,7 @@ init_per_testcase(tcp_chain_round_trip, Config) ->
             handler_opts => #{
                 upstream_proxy =>
                     iolist_to_binary([
-                        "https://localhost:",
+                        "https://127.0.0.1:",
                         integer_to_list(EgressPort)
                     ]),
                 upstream_opts => #{
