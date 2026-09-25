@@ -31,7 +31,12 @@
     h3_server_fin_notifies_client/1,
     h2_server_fin_notifies_client/1,
     h3_early_address_request_answered/1,
-    h3_tcp_bytes_before_claim_arrive/1
+    h3_tcp_bytes_before_claim_arrive/1,
+    h3_udp_bind_round_trip/1,
+    h2_udp_bind_round_trip/1,
+    h3_bind_handler_crash_resets_stream/1,
+    h2_bind_handler_crash_resets_stream/1,
+    bind_message_before_finalize/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -55,7 +60,12 @@ all() ->
         h3_server_fin_notifies_client,
         h2_server_fin_notifies_client,
         h3_early_address_request_answered,
-        h3_tcp_bytes_before_claim_arrive
+        h3_tcp_bytes_before_claim_arrive,
+        h3_udp_bind_round_trip,
+        h2_udp_bind_round_trip,
+        h3_bind_handler_crash_resets_stream,
+        h2_bind_handler_crash_resets_stream,
+        bind_message_before_finalize
     ].
 
 init_per_suite(Config) ->
@@ -113,8 +123,24 @@ end_per_testcase(_Case, Config) ->
         end),
     ok.
 
+extra_opts(Case) when
+    Case =:= h3_udp_bind_round_trip;
+    Case =:= h2_udp_bind_round_trip
+->
+    bind_opts();
+extra_opts(Case) when
+    Case =:= h3_bind_handler_crash_resets_stream;
+    Case =:= h2_bind_handler_crash_resets_stream
+->
+    (bind_opts())#{bind_handler => masque_crash_bind_handler};
 extra_opts(_Case) ->
     #{}.
+
+bind_opts() ->
+    #{
+        accept_bind => true,
+        handler_opts => #{bind_address => {127, 0, 0, 1}, allow_loopback => true}
+    }.
 
 %%====================================================================
 %% Connection close
@@ -283,8 +309,98 @@ h3_tcp_bytes_before_claim_arrive(Config) ->
     exit(EchoPid, kill).
 
 %%====================================================================
+%% Connect-UDP-Bind lifecycle
+%%====================================================================
+
+h3_udp_bind_round_trip(Config) ->
+    udp_bind_round_trip(Config, h3).
+
+h2_udp_bind_round_trip(Config) ->
+    udp_bind_round_trip(Config, h2).
+
+udp_bind_round_trip(Config, Transport) ->
+    {ok, Peer} = gen_udp:open(0, [binary, {ip, {127, 0, 0, 1}}, {active, true}]),
+    {ok, PeerPort} = inet:port(Peer),
+    Sess = bind_connect(Config, Transport),
+    %% The uncompressed context carries the proxy's replies; the
+    %% compressed one carries ours to the peer.
+    {ok, _} = masque:open_uncompressed_context(Sess),
+    {ok, _} = masque:assign_compression(Sess, {{127, 0, 0, 1}, PeerPort}),
+    [
+        receive
+            {masque_compression_acked, Sess, _} -> ok
+        after 5000 -> ct:fail(no_compression_ack)
+        end
+     || _ <- [1, 2]
+    ],
+    ok = masque:send_to(Sess, {{127, 0, 0, 1}, PeerPort}, <<"ping">>),
+    {ProxyIP, ProxyPort} =
+        receive
+            {udp, Peer, FromIP, FromPort, <<"ping">>} -> {FromIP, FromPort}
+        after 5000 -> ct:fail(no_packet_at_peer)
+        end,
+    ok = gen_udp:send(Peer, ProxyIP, ProxyPort, <<"pong">>),
+    receive
+        {masque_bind_packet, Sess, {{127, 0, 0, 1}, PeerPort}, <<"pong">>} -> ok
+    after 5000 -> ct:fail(no_packet_from_peer)
+    end,
+    ok = masque:close(Sess),
+    gen_udp:close(Peer).
+
+h3_bind_handler_crash_resets_stream(Config) ->
+    bind_handler_crash_resets_stream(Config, h3).
+
+h2_bind_handler_crash_resets_stream(Config) ->
+    bind_handler_crash_resets_stream(Config, h2).
+
+bind_handler_crash_resets_stream(Config, Transport) ->
+    Sess = bind_connect(Config, Transport),
+    ok = masque:send_capsule(Sess, 16#ff01, <<>>),
+    receive
+        {masque_closed, Sess, peer_reset} -> ok
+    after 5000 -> ct:fail(no_reset_on_crash)
+    end.
+
+%% Messages reaching an h3 session before the router finalizes it (and
+%% a stop in that window) must not crash it.
+bind_message_before_finalize(_Config) ->
+    %% A dead conn pid: transport calls fail fast with noproc.
+    Conn = spawn(fun() -> ok end),
+    Args = #{
+        conn => Conn,
+        stream_id => 0,
+        transport => h3,
+        router => self(),
+        protocol => udp_bind,
+        handler => masque_udp_bind_proxy_handler,
+        handler_opts => #{bind_address => {127, 0, 0, 1}},
+        req => #{bind => unscoped}
+    },
+    {ok, Pid} = gen_server:start(masque_udp_bind_server_session, Args, []),
+    MRef = erlang:monitor(process, Pid),
+    Pid ! {masque_datagram_in, 0, <<0, 1, 2>>},
+    Pid ! unrelated,
+    gen_server:cast(Pid, ignored),
+    timer:sleep(100),
+    true = is_process_alive(Pid),
+    ok = gen_server:stop(Pid),
+    receive
+        {'DOWN', MRef, process, Pid, normal} -> ok
+    after 5000 -> ct:fail(no_clean_stop)
+    end.
+
+%%====================================================================
 %% Helpers
 %%====================================================================
+
+bind_connect(Config, Transport) ->
+    Port = maps:get(port, ?config(Transport, Config)),
+    {ok, Sess} = masque:bind_connect(
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+        unscoped,
+        #{transports => [Transport], verify => verify_none, timeout => 5000}
+    ),
+    Sess.
 
 start_h1_server(#{cert_file := CertFile, key_file := KeyFile}, Opts) ->
     Name = list_to_atom(

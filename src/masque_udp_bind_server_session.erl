@@ -25,7 +25,7 @@
 %%%       `close_session').</li>
 %%% </ul>
 %%%
-%%% Deliberately minimal in this first PR:
+%%% Compression policy:
 %%%
 %%% <ul>
 %%%   <li>Wait-for-ACK on send is implemented via the table's
@@ -34,10 +34,18 @@
 %%%       payloads only against `installed' entries; otherwise it
 %%%       falls through to the uncompressed channel if open, or
 %%%       drops the packet.</li>
-%%%   <li>The `max_pending_compression_responses' bound and the
-%%%       post-close prohibition are deferred to a follow-up PR; the
-%%%       hooks are in place but the policy is permissive.</li>
+%%%   <li>`{compression_assign, {IP, Port}}' opens a mapping on the
+%%%       own table. At most `max_pending_compression_responses'
+%%%       (default 16) of them wait for a response at once; beyond
+%%%       that, and after the client closed its uncompressed context
+%%%       (post-close prohibition), the assign is dropped.</li>
+%%%   <li>Dropped datagrams and assigns are counted with
+%%%       `masque_metrics:bind_drop_inc/1'.</li>
 %%% </ul>
+%%%
+%%% Over h3 the router (`masque_server_connection') calls `finalize'
+%%% once the session is registered; over h2 there is no router and the
+%%% session sends the 2xx and claims the stream from `init/1'.
 -module(masque_udp_bind_server_session).
 -behaviour(gen_server).
 
@@ -75,8 +83,18 @@
     %% Actions returned by handler init, applied after response
     %% headers have been emitted.
     pending_actions :: [term()] | undefined,
+    %% Handler `{response_headers, _}' spliced into the 2xx.
+    resp_headers = [] :: [{binary(), binary()}],
+    %% Monitor on the router (h3 only).
+    router_ref :: reference() | undefined,
+    max_pending :: non_neg_integer(),
+    %% Set once the client's uncompressed context has been closed.
+    uncompressed_closed = false :: boolean(),
     start_time :: integer() | undefined
 }).
+
+-define(DEFAULT_MAX_PENDING_RESPONSES, 16).
+-define(H3_INTERNAL_ERROR, 16#102).
 
 -define(PROXY_ROLE, proxy).
 
@@ -92,17 +110,23 @@ start_link(Args) ->
 %% gen_server
 %%====================================================================
 
-init(#{
-    conn := Conn,
-    stream_id := StreamId,
-    transport := Transport,
-    router := Router,
-    handler := Handler,
-    handler_opts := HOpts,
-    req := Req
-}) ->
+init(
+    #{
+        conn := Conn,
+        stream_id := StreamId,
+        transport := Transport,
+        handler := Handler,
+        handler_opts := HOpts,
+        req := Req
+    } = Args
+) ->
     process_flag(trap_exit, true),
-    erlang:monitor(process, Router),
+    Router = maps:get(router, Args, undefined),
+    RouterRef =
+        case Router of
+            undefined -> undefined;
+            _ -> erlang:monitor(process, Router)
+        end,
     MaxCap = maps:get(
         max_capsule_size,
         HOpts,
@@ -145,20 +169,32 @@ init(#{
                     TableOpts
                 ),
                 max_cap = MaxCap,
-                pending_actions = OtherActions
+                pending_actions = OtherActions,
+                resp_headers = Headers,
+                router_ref = RouterRef,
+                max_pending = maps:get(
+                    max_pending_compression_responses,
+                    HOpts,
+                    ?DEFAULT_MAX_PENDING_RESPONSES
+                )
             },
-            {ok, {State, Headers}};
+            case Router of
+                undefined ->
+                    %% h2: no router, finalize now.
+                    case finalize(State) of
+                        {ok, S2} -> {ok, S2};
+                        {error, _} -> {stop, stream_dead}
+                    end;
+                _ ->
+                    {ok, State}
+            end;
         {stop, Reason} ->
             {stop, Reason}
     end.
 
-handle_call(
-    finalize,
-    _From,
-    {#state{pending_actions = Actions} = State, Headers}
-) when
-    Actions =/= undefined
-->
+%% Send the 2xx (with the handler's extra headers), claim the stream
+%% and run the handler's init actions.
+finalize(#state{pending_actions = Actions, resp_headers = Headers} = State) ->
     case send_response(State, 200, base_response_headers() ++ Headers) of
         ok ->
             case claim_stream(State#state{pending_actions = undefined}) of
@@ -169,7 +205,7 @@ handle_call(
                             transport => State#state.transport
                         }
                     ),
-                    {reply, ok,
+                    {ok,
                         run_init_actions(
                             Actions,
                             S2#state{
@@ -178,10 +214,18 @@ handle_call(
                             }
                         )};
                 {error, _} = Err ->
-                    {reply, Err, State}
+                    Err
             end;
         {error, _} = Err ->
-            {reply, Err, State}
+            Err
+    end.
+
+handle_call(finalize, _From, #state{pending_actions = Actions} = State) when
+    Actions =/= undefined
+->
+    case finalize(State) of
+        {ok, S2} -> {reply, ok, S2};
+        {error, _} = Err -> {reply, Err, State}
     end;
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
@@ -211,6 +255,11 @@ handle_info(
 ) ->
     handle_stream_bytes(Data, Fin, S);
 handle_info(
+    {h2, _Conn, {data, StreamId, Data, Fin}},
+    #state{transport = h2, stream_id = StreamId} = S
+) ->
+    handle_stream_bytes(Data, Fin, S);
+handle_info(
     {masque_stream_reset, StreamId, _ErrorCode},
     #state{stream_id = StreamId} = S
 ) ->
@@ -224,8 +273,10 @@ handle_info(
     {stop, peer_reset, S};
 handle_info({h2, _Conn, {closed, _Reason}}, S) ->
     {stop, peer_closed, S};
-handle_info({'DOWN', _MRef, process, _Pid, _Reason}, S) ->
+handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
     {stop, router_gone, S};
+handle_info({'EXIT', _Pid, _Reason}, S) ->
+    {noreply, S};
 handle_info(Msg, S) ->
     %% Hand all other messages (notably {udp, ...} from the bind
     %% handler's gen_udp socket) through the handler's handle_info/2.
@@ -234,6 +285,11 @@ handle_info(Msg, S) ->
 terminate(Reason, #state{} = S) ->
     emit_tunnel_closed(S),
     terminate_transport(Reason, S),
+    _ =
+        case S#state.transport of
+            h2 -> masque_h2_server:release_tunnel(S#state.conn);
+            h3 -> ok
+        end,
     _ =
         case S#state.router of
             undefined ->
@@ -280,6 +336,7 @@ handle_inbound_datagram(Payload, #state{} = S) ->
         {ok, {Ctx, Inner}} when is_integer(Ctx), Ctx > 0 ->
             handle_known_context(Ctx, Inner, S);
         {error, _} ->
+            masque_metrics:bind_drop_inc(malformed),
             {noreply, S}
     end.
 
@@ -291,8 +348,8 @@ handle_context_zero(Inner, #state{bind_scope = scoped} = S) ->
     %% defer to handle_packet/2 if exported (legacy UDP semantics).
     dispatch(handle_packet, [Inner], S);
 handle_context_zero(_Inner, S) ->
-    %% Unscoped: malformed; per draft-11 we drop. Counter bump goes
-    %% in a follow-up PR.
+    %% Unscoped: malformed; per draft-11 we drop.
+    masque_metrics:bind_drop_inc(context_zero),
     {noreply, S}.
 
 handle_known_context(Ctx, Inner, #state{} = S) ->
@@ -311,7 +368,8 @@ handle_known_context(Ctx, Inner, #state{} = S) ->
         not_found ->
             %% Unknown context ID. Per draft-11 sections 4 and 5
             %% these arrive on a context the peer never installed:
-            %% drop. (Telemetry attribution lands in a follow-up.)
+            %% drop.
+            masque_metrics:bind_drop_inc(unknown_context),
             {noreply, S}
     end.
 
@@ -320,6 +378,7 @@ handle_uncompressed_payload(Inner, S) ->
         {ok, {_V, IP, Port}, UdpPayload} ->
             handle_bind_to_peer({IP, Port}, UdpPayload, S);
         {error, _} ->
+            masque_metrics:bind_drop_inc(malformed),
             {noreply, S}
     end.
 
@@ -331,9 +390,9 @@ handle_bind_to_peer(
         h_state = HS
     } = S
 ) ->
-    case erlang:function_exported(Handler, handle_bind_packet, 3) of
+    case exported(Handler, handle_bind_packet, 3) of
         true ->
-            case Handler:handle_bind_packet(Peer, UdpPayload, HS) of
+            case safe_apply(Handler, handle_bind_packet, [Peer, UdpPayload, HS]) of
                 {ok, HS2} ->
                     {noreply, S#state{h_state = HS2}};
                 {ok, HS2, Actions} ->
@@ -341,10 +400,15 @@ handle_bind_to_peer(
                         Actions,
                         S#state{h_state = HS2}
                     );
-                {drop, _Reason, HS2} ->
+                {drop, Reason, HS2} ->
+                    masque_metrics:bind_drop_inc(Reason),
                     {noreply, S#state{h_state = HS2}};
                 {stop, R, HS2} ->
-                    {stop, R, S#state{h_state = HS2}}
+                    {stop, R, S#state{h_state = HS2}};
+                {stop, R} ->
+                    {stop, R, S};
+                _ ->
+                    {noreply, S}
             end;
         false ->
             {noreply, S}
@@ -404,6 +468,13 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_CLOSE, Body, S) ->
         {ok, Close} -> handle_peer_close(Close, S);
         {error, _} -> reset_and_stop(malformed_capsule, S)
     end;
+dispatch_capsule(0, Value, #state{transport = h2} = S) ->
+    %% h2 carries HTTP datagrams as RFC 9297 DATAGRAM capsules (type 0).
+    masque_metrics:bytes_in(
+        byte_size(Value),
+        #{protocol => udp_bind, transport => h2}
+    ),
+    handle_inbound_datagram(Value, S);
 dispatch_capsule(Type, Value, S) ->
     %% Unknown capsule: defer to handler's handle_capsule/3, otherwise
     %% silently drop per RFC 9297.
@@ -443,10 +514,23 @@ handle_peer_close(Close, #state{own_table = OT, peer_table = PT} = S) ->
         {ok, OT2} ->
             {noreply, S#state{own_table = OT2}};
         {error, unknown_context} ->
+            Closed = is_uncompressed(PT, Close#compression_close.context_id),
             case masque_compression_table:install_close(PT, Close) of
-                {ok, PT2} -> {noreply, S#state{peer_table = PT2}};
-                {error, _} -> reset_and_stop(malformed_capsule, S)
+                {ok, PT2} ->
+                    {noreply, S#state{
+                        peer_table = PT2,
+                        uncompressed_closed =
+                            S#state.uncompressed_closed orelse Closed
+                    }};
+                {error, _} ->
+                    reset_and_stop(malformed_capsule, S)
             end
+    end.
+
+is_uncompressed(Table, Id) ->
+    case masque_compression_table:lookup_by_id(Table, Id) of
+        {ok, #compression_entry{ip_version = 0}} -> true;
+        _ -> false
     end.
 
 %%====================================================================
@@ -471,6 +555,8 @@ do_actions([], S) ->
     {ok, S};
 do_actions([{send_bind_packet, Peer, Bytes} | Rest], S) ->
     do_actions(Rest, send_bind_payload(Peer, Bytes, S));
+do_actions([{compression_assign, {IP, Port}} | Rest], S) ->
+    do_actions(Rest, open_compression(IP, Port, S));
 do_actions([{compression_assign, Entry} | Rest], S) ->
     do_actions(Rest, send_compression_assign(Entry, S));
 do_actions([{compression_ack, Id} | Rest], S) ->
@@ -618,6 +704,38 @@ send_datagram(Ctx, Inner, #state{transport = h2} = S) ->
     {noreply, S2} = send_capsule_bytes(Cap, S),
     S2.
 
+%% Open an own-table mapping for a peer and announce it. Dropped when
+%% `max_pending' assigns already wait for a response, or after the
+%% client closed its uncompressed context (post-close prohibition).
+open_compression(_IP, _Port, #state{uncompressed_closed = true} = S) ->
+    masque_metrics:bind_drop_inc(uncompressed_closed),
+    S;
+open_compression(IP, Port, #state{own_table = OT} = S) ->
+    case pending_responses(OT) >= S#state.max_pending of
+        true ->
+            masque_metrics:bind_drop_inc(pending_limit),
+            S;
+        false ->
+            case
+                masque_compression_table:open_compressed(
+                    OT, {family_of(IP), IP, Port}
+                )
+            of
+                {ok, Entry, OT2} ->
+                    send_compression_assign(Entry, S#state{own_table = OT2});
+                {error, _} ->
+                    masque_metrics:bind_drop_inc(other),
+                    S
+            end
+    end.
+
+pending_responses(Table) ->
+    length([
+        E
+     || #compression_entry{state = pending_ack} = E <-
+            masque_compression_table:entries(Table)
+    ]).
+
 send_compression_assign(Entry, S) ->
     Bytes = masque_compression_capsule:encode(
         #compression_assign{
@@ -678,8 +796,12 @@ claim_stream(#state{transport = h3, conn = C, stream_id = Sid} = S) ->
         {error, _} = Err -> Err;
         _ -> {ok, S}
     end;
-claim_stream(#state{transport = h2} = S) ->
-    {ok, S}.
+claim_stream(#state{transport = h2, conn = C, stream_id = Sid} = S) ->
+    %% h2 replays bytes buffered before the claim as messages.
+    case h2:set_stream_handler(C, Sid, self()) of
+        {error, _} = Err -> Err;
+        _ -> {ok, S}
+    end.
 
 reset_and_stop(
     Reason,
@@ -736,7 +858,30 @@ terminate_transport(normal, #state{
             _:_ -> ok
         end),
     ok;
-terminate_transport(_Reason, _S) ->
+terminate_transport(Reason, _S) when
+    Reason =:= peer_reset;
+    Reason =:= peer_closed;
+    Reason =:= connection_closed;
+    Reason =:= router_gone
+->
+    ok;
+terminate_transport(_Reason, #state{transport = h3, conn = C, stream_id = Sid}) ->
+    %% Any other stop (handler crash, bad init action, ...) resets the
+    %% stream so the client does not wait on a dead tunnel.
+    _ =
+        (try
+            quic_h3:cancel(C, Sid, ?H3_INTERNAL_ERROR)
+        catch
+            _:_ -> ok
+        end),
+    ok;
+terminate_transport(_Reason, #state{transport = h2, conn = C, stream_id = Sid}) ->
+    _ =
+        (try
+            h2:cancel(C, Sid, internal_error)
+        catch
+            _:_ -> ok
+        end),
     ok.
 
 %%====================================================================
@@ -744,9 +889,9 @@ terminate_transport(_Reason, _S) ->
 %%====================================================================
 
 init_handler(Handler, Req, HOpts) ->
-    case erlang:function_exported(Handler, init, 2) of
+    case exported(Handler, init, 2) of
         true ->
-            case Handler:init(Req, HOpts) of
+            case safe_apply(Handler, init, [Req, HOpts]) of
                 {ok, HState} -> {ok, HState, []};
                 {ok, HState, Actions} -> {ok, HState, Actions};
                 {stop, Reason} -> {stop, Reason};
@@ -757,9 +902,9 @@ init_handler(Handler, Req, HOpts) ->
     end.
 
 dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
-    case erlang:function_exported(Handler, CB, length(Extra) + 1) of
+    case exported(Handler, CB, length(Extra) + 1) of
         true ->
-            case apply(Handler, CB, Extra ++ [HS]) of
+            case safe_apply(Handler, CB, Extra ++ [HS]) of
                 {ok, HS2} ->
                     {noreply, S#state{h_state = HS2}};
                 {ok, HS2, Actions} ->
@@ -768,11 +913,29 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
                     );
                 {stop, R, HS2} ->
                     {stop, R, S#state{h_state = HS2}};
+                {stop, R} ->
+                    {stop, R, S};
                 _ ->
                     {noreply, S}
             end;
         false ->
             {noreply, S}
+    end.
+
+exported(Mod, Fun, Arity) ->
+    _ = code:ensure_loaded(Mod),
+    erlang:function_exported(Mod, Fun, Arity).
+
+safe_apply(M, F, A) ->
+    try
+        apply(M, F, A)
+    catch
+        Class:Reason:Stack ->
+            error_logger:error_msg(
+                "masque udp-bind handler ~p:~p/~p failed: ~p:~p~n~p~n",
+                [M, F, length(A), Class, Reason, Stack]
+            ),
+            {stop, {handler_crash, Reason}}
     end.
 
 try_callback(Mod, Fun, Args) ->
