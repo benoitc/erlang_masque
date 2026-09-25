@@ -114,6 +114,7 @@ init({Target, Opts, Owner}) ->
     {ProxyHost, ProxyPort} = maps:get(proxy, Opts),
     {TargetHost, TargetPort} = Target,
     MRef = erlang:monitor(process, Owner),
+    ok = masque_client_owner:init(Opts),
     Mode = maps:get(mode, Opts, message),
     MaxCap = maps:get(
         max_capsule_size,
@@ -374,7 +375,7 @@ header_value(Name, Headers) ->
     end.
 
 notify_owner_closed(Reason, #data{owner = Owner, mode = message}) ->
-    Owner ! {masque_closed, self(), Reason};
+    masque_client_owner:send(Owner, {masque_closed, self(), Reason});
 notify_owner_closed(_Reason, _Data) ->
     ok.
 
@@ -383,6 +384,7 @@ notify_owner_closed(_Reason, _Data) ->
 swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
     _ = erlang:demonitor(OldRef, [flush]),
     NewRef = erlang:monitor(process, NewOwner),
+    ok = masque_client_owner:release(NewOwner),
     Data#data{owner = NewOwner, owner_ref = NewRef}.
 
 handle_recv_call(From, Timeout, #data{rx_buf = Buf, rx_waiters = Ws} = Data) ->
@@ -395,7 +397,7 @@ handle_recv_call(From, Timeout, #data{rx_buf = Buf, rx_waiters = Ws} = Data) ->
     end.
 
 deliver_packet(UdpBytes, #data{mode = message, owner = Owner} = Data) ->
-    Owner ! {masque_data, self(), UdpBytes},
+    masque_client_owner:send(Owner, {masque_data, self(), UdpBytes}),
     Data;
 deliver_packet(
     UdpBytes,
@@ -420,7 +422,7 @@ deliver_packet(
 drain_client_capsules(Buf, Fin, #data{owner = Owner} = Data) ->
     case masque_capsule:decode(Buf) of
         {ok, {Type, Value, Rest}} ->
-            Owner ! {masque_capsule, self(), Type, Value},
+            masque_client_owner:send(Owner, {masque_capsule, self(), Type, Value}),
             drain_client_capsules(Rest, Fin, Data#data{cap_buf = <<>>});
         {more, _} when Fin, Buf =/= <<>> ->
             %% Stream closed mid-capsule.

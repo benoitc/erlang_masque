@@ -21,14 +21,18 @@
 -export([
     connect_and_close/1,
     roundtrip_ipv4_packet/1,
-    request_addresses_reject_all/1
+    request_addresses_reject_all/1,
+    race_delivers_early_address_assign/1,
+    deferred_owner_gets_early_address_assign/1
 ]).
 
 all() ->
     [
         connect_and_close,
         roundtrip_ipv4_packet,
-        request_addresses_reject_all
+        request_addresses_reject_all,
+        race_delivers_early_address_assign,
+        deferred_owner_gets_early_address_assign
     ].
 
 init_per_suite(Config) ->
@@ -125,9 +129,91 @@ request_addresses_reject_all(Config) ->
     end,
     ok = masque:close(Sess).
 
+%% The proxy sends ADDRESS_ASSIGN right after the 2xx. Through a
+%% two-transport race the session belongs to a race worker at that
+%% point; the assignment must still reach the caller.
+race_delivers_early_address_assign(Config) ->
+    {Ref, Port} = start_assign_on_init_listener(Config),
+    try
+        Url = iolist_to_binary(["https://127.0.0.1:", integer_to_binary(Port)]),
+        {ok, Sess} = masque:connect(
+            Url,
+            {'*', '*'},
+            #{
+                protocol => ip,
+                transports => [h2, h1],
+                prefer_timeout_ms => 1000,
+                verify => verify_none
+            }
+        ),
+        receive
+            {masque_address_assign, Sess, [Assign]} ->
+                ?assertEqual({10, 77, 0, 1}, Assign#ip_assignment.address)
+        after 2000 ->
+            ct:fail(address_assign_lost)
+        end,
+        ok = masque:close(Sess)
+    after
+        _ = masque_h2_server:stop_listener(Ref)
+    end.
+
+%% Same event, made deterministic: a session started the way the
+%% racer starts it holds the ADDRESS_ASSIGN that arrives before
+%% `set_owner' and hands it to the new owner.
+deferred_owner_gets_early_address_assign(Config) ->
+    {Ref, Port} = start_assign_on_init_listener(Config),
+    Holder = spawn(fun() ->
+        receive
+            stop -> ok
+        end
+    end),
+    try
+        {ok, Sess} = masque_ip_client_session:start(
+            {'*', '*'},
+            #{
+                proxy => {<<"127.0.0.1">>, Port},
+                transport => h2,
+                capsule_protocol => true,
+                verify => verify_none,
+                defer_owner => true
+            },
+            Holder
+        ),
+        ok = gen_statem:call(Sess, handshake_await, 5000),
+        timer:sleep(300),
+        {messages, Held} = erlang:process_info(Holder, messages),
+        ?assertEqual([], Held),
+        ok = gen_statem:call(Sess, {set_owner, self()}),
+        receive
+            {masque_address_assign, Sess, [Assign]} ->
+                ?assertEqual({10, 77, 0, 1}, Assign#ip_assignment.address)
+        after 2000 ->
+            ct:fail(address_assign_lost)
+        end,
+        ok = masque:close(Sess)
+    after
+        Holder ! stop,
+        _ = masque_h2_server:stop_listener(Ref)
+    end.
+
 %%====================================================================
 %% Internal
 %%====================================================================
+
+start_assign_on_init_listener(Config) ->
+    Ctx = ?config(ctx, Config),
+    Name = list_to_atom(
+        "ip_h2_assign_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
+    {ok, Ref} = masque_h2_server:start_listener(Name, #{
+        port => 0,
+        cert => maps:get(cert_file, Ctx),
+        key => maps:get(key_file, Ctx),
+        ip_handler => masque_ip_unprompted_handler,
+        handler_opts => #{assign_on_init => true}
+    }),
+    {_, _, Port} = Ref,
+    {Ref, Port}.
 
 do_connect(Port) ->
     Url = iolist_to_binary(

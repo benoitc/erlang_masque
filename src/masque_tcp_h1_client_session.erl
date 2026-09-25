@@ -87,6 +87,7 @@ init({Target, Opts, Owner}) ->
     {ProxyHost, ProxyPort} = maps:get(proxy, Opts),
     {TargetHost, TargetPort} = Target,
     MRef = erlang:monitor(process, Owner),
+    ok = masque_client_owner:init(Opts),
     Mode = maps:get(mode, Opts, message),
     ProxyAuth = maps:get(proxy_authorization, Opts, undefined),
     ok = validate_proxy_auth(ProxyAuth),
@@ -403,7 +404,7 @@ setopts_active_once(Socket) ->
 deliver_bytes(<<>>, Data) ->
     Data;
 deliver_bytes(Bin, #data{mode = message, owner = Owner} = Data) ->
-    Owner ! {masque_data, self(), Bin},
+    masque_client_owner:send(Owner, {masque_data, self(), Bin}),
     Data;
 deliver_bytes(
     Bin,
@@ -452,13 +453,14 @@ drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->
 %%====================================================================
 
 notify_owner_closed(Reason, #data{owner = Owner, mode = message}) ->
-    Owner ! {masque_closed, self(), Reason};
+    masque_client_owner:send(Owner, {masque_closed, self(), Reason});
 notify_owner_closed(_Reason, _Data) ->
     ok.
 
 swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
     _ = erlang:demonitor(OldRef, [flush]),
     NewRef = erlang:monitor(process, NewOwner),
+    ok = masque_client_owner:release(NewOwner),
     Data#data{owner = NewOwner, owner_ref = NewRef}.
 
 session_info(

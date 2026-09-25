@@ -124,6 +124,7 @@ init({{Target, IPProto}, Opts, Owner}) ->
     process_flag(trap_exit, true),
     {ProxyHost, ProxyPort} = maps:get(proxy, Opts),
     MRef = erlang:monitor(process, Owner),
+    ok = masque_client_owner:init(Opts),
     Mode = maps:get(mode, Opts, message),
     MaxCap = maps:get(
         max_capsule_size,
@@ -487,7 +488,7 @@ deliver_capsule(
 ) ->
     case masque_ip_capsule:decode_address_assign(Inner) of
         {ok, Entries} ->
-            Owner ! {masque_address_assign, self(), Entries},
+            masque_client_owner:send(Owner, {masque_address_assign, self(), Entries}),
             Data#data{assigned = Entries};
         {error, _} ->
             {abort, malformed_capsule}
@@ -499,7 +500,7 @@ deliver_capsule(
 ) ->
     case masque_ip_capsule:decode_address_request(Inner) of
         {ok, Entries} ->
-            Owner ! {masque_address_request, self(), Entries},
+            masque_client_owner:send(Owner, {masque_address_request, self(), Entries}),
             Pend1 = lists:foldl(
                 fun(R, Acc) ->
                     Id = element(2, R),
@@ -519,7 +520,7 @@ deliver_capsule(
 ) ->
     case masque_ip_capsule:decode_route_advertisement(Inner) of
         {ok, Entries} ->
-            Owner ! {masque_route_advertisement, self(), Entries},
+            masque_client_owner:send(Owner, {masque_route_advertisement, self(), Entries}),
             Data#data{routes = Entries};
         {error, _} ->
             {abort, malformed_capsule}
@@ -527,7 +528,7 @@ deliver_capsule(
 deliver_capsule(Type, Inner, #data{owner = Owner} = Data) when
     is_integer(Type)
 ->
-    Owner ! {masque_capsule, self(), Type, Inner},
+    masque_client_owner:send(Owner, {masque_capsule, self(), Type, Inner}),
     Data.
 
 abort(Reason, #data{socket = Socket} = Data) ->
@@ -743,7 +744,7 @@ handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
     end.
 
 deliver_packet(Pkt, #data{mode = message, owner = Owner} = Data) ->
-    Owner ! {masque_ip_packet, self(), Pkt},
+    masque_client_owner:send(Owner, {masque_ip_packet, self(), Pkt}),
     Data;
 deliver_packet(
     Pkt,
@@ -798,13 +799,14 @@ reply_handshake(#data{handshake_from = undefined}, _Reply) -> ok;
 reply_handshake(#data{handshake_from = From}, Reply) -> gen_statem:reply(From, Reply).
 
 notify_owner_closed(Reason, #data{owner = Owner, mode = message}) ->
-    Owner ! {masque_closed, self(), Reason};
+    masque_client_owner:send(Owner, {masque_closed, self(), Reason});
 notify_owner_closed(_Reason, _Data) ->
     ok.
 
 swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
     _ = erlang:demonitor(OldRef, [flush]),
     NewRef = erlang:monitor(process, NewOwner),
+    ok = masque_client_owner:release(NewOwner),
     Data#data{owner = NewOwner, owner_ref = NewRef}.
 
 session_info(

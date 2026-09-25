@@ -89,6 +89,7 @@ init({Target, Opts, Owner}) ->
     process_flag(trap_exit, true),
     {ProxyHost, ProxyPort} = maps:get(proxy, Opts),
     MRef = erlang:monitor(process, Owner),
+    ok = masque_client_owner:init(Opts),
     Mode = maps:get(mode, Opts, message),
     MaxCap = maps:get(
         max_capsule_size,
@@ -160,6 +161,8 @@ connecting(internal, {do_handshake, Opts}, Data) ->
     end;
 connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
+connecting({call, From}, {set_owner, NewOwner}, Data) ->
+    {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 connecting({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
 connecting(
@@ -184,6 +187,8 @@ failed(Type, Event, #data{failure = Reason, owner_ref = Ref}) ->
 
 open({call, From}, handshake_await, Data) ->
     {keep_state, Data, [{reply, From, ok}]};
+open({call, From}, {set_owner, NewOwner}, Data) ->
+    {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 open({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, open)}]};
 open({call, From}, {send_to, Peer, Bytes}, Data) ->
@@ -267,7 +272,7 @@ terminate(Reason, _State, #data{
                     _:_ -> ok
                 end
         end,
-    Owner ! {masque_closed, self(), Reason},
+    masque_client_owner:send(Owner, {masque_closed, self(), Reason}),
     ok;
 terminate(_Reason, _State, #data{socket = Socket}) ->
     _ =
@@ -500,10 +505,12 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_ASSIGN, Body, Data) ->
             of
                 {ok, T2} ->
                     Owner = Data#data.owner,
-                    Owner !
+                    masque_client_owner:send(
+                        Owner,
                         {masque_compression_assigned, self(), A#compression_assign.context_id, {
                             A#compression_assign.address, A#compression_assign.port
-                        }},
+                        }}
+                    ),
                     %% Send ACK
                     Bytes = iolist_to_binary(
                         masque_compression_capsule:encode(
@@ -530,8 +537,10 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_ACK, Body, Data) ->
                 )
             of
                 {ok, T2} ->
-                    Data#data.owner !
-                        {masque_compression_acked, self(), Ack#compression_ack.context_id},
+                    masque_client_owner:send(
+                        Data#data.owner,
+                        {masque_compression_acked, self(), Ack#compression_ack.context_id}
+                    ),
                     {ok, Data#data{own_table = T2}};
                 {error, _} ->
                     {stop, malformed_capsule}
@@ -549,8 +558,9 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_CLOSE, Body, Data) ->
                 )
             of
                 {ok, T2} ->
-                    Data#data.owner !
-                        {masque_compression_closed, self(), Id},
+                    masque_client_owner:send(
+                        Data#data.owner, {masque_compression_closed, self(), Id}
+                    ),
                     {ok, Data#data{peer_table = T2}};
                 {error, unknown_context} ->
                     case
@@ -559,8 +569,9 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_CLOSE, Body, Data) ->
                         )
                     of
                         {ok, T2} ->
-                            Data#data.owner !
-                                {masque_compression_closed, self(), Id},
+                            masque_client_owner:send(
+                                Data#data.owner, {masque_compression_closed, self(), Id}
+                            ),
                             {ok, Data#data{own_table = T2}};
                         {error, _} ->
                             {stop, malformed_capsule}
@@ -606,7 +617,7 @@ deliver_bind_packet(
     Bytes,
     #data{mode = message, owner = Owner} = Data
 ) ->
-    Owner ! {masque_bind_packet, self(), Peer, Bytes},
+    masque_client_owner:send(Owner, {masque_bind_packet, self(), Peer, Bytes}),
     Data;
 deliver_bind_packet(
     Peer,
@@ -842,6 +853,14 @@ family_of({_, _, _, _, _, _, _, _}) -> 6.
 
 reply_handshake(#data{handshake_from = undefined}, _Reply) -> ok;
 reply_handshake(#data{handshake_from = From}, Reply) -> gen_statem:reply(From, Reply).
+
+%% Used by the transport racer to flip ownership from the race worker
+%% to the real caller after a winning handshake.
+swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
+    _ = erlang:demonitor(OldRef, [flush]),
+    NewRef = erlang:monitor(process, NewOwner),
+    ok = masque_client_owner:release(NewOwner),
+    Data#data{owner = NewOwner, owner_ref = NewRef}.
 
 session_info(#data{bind_scope = Scope}, State) ->
     #{

@@ -9,7 +9,11 @@
 %%% stripped.
 %%%
 %%% This module implements that logic for a single `masque:connect/3'
-%%% call. It runs in the caller's process; no extra supervision.
+%%% call. The race loop runs in the caller's process and receives
+%%% through an `erlang:alias/0' that is dropped before `race/4'
+%%% returns, so late attempt reports never reach the caller's
+%%% mailbox. Each attempt runs in a worker process that monitors the
+%%% caller and gives up at the race deadline.
 %%%
 %%% Flow for `[T1, T2, T3]' (T3 optional):
 %%% <ol>
@@ -20,21 +24,26 @@
 %%%  <li>First attempt to report `ok' on its `handshake_await' call
 %%%      wins. Shadow owner is flipped to the real owner via
 %%%      `gen_statem:call(Pid, {set_owner, RealOwner})', losers are
-%%%      killed.</li>
+%%%      stopped.</li>
 %%% </ol>
 %%%
-%%% Note: the session modules already deliver to the owner set on
-%%% start. To avoid a racey burst of messages going to the caller
-%%% from losing attempts, each session is started with the racer as
-%%% owner; on win we transfer owner via a session call. Since the
-%%% race completes before any datagrams are sent (sessions only
-%%% reach `open' on 2xx / 101), the owner swap happens on a quiet
-%%% mailbox.
+%%% Sessions are started with the race worker as owner and
+%%% `defer_owner => true': events they produce before `set_owner'
+%%% (for example a CONNECT-IP ADDRESS_ASSIGN sent right after the 2xx)
+%%% are held by the session and flushed in order to the real owner
+%%% on `set_owner' (see `masque_client_owner').
 -module(masque_racer).
 
 -export([race/4, checkout_pool/2]).
 
 -include("masque.hrl").
+
+%% Workers outlive the race deadline by this much so a winner that
+%% reports just before the deadline still sees the racer's verdict.
+-define(WORKER_GRACE_MS, 1000).
+
+%% The racing process and the alias it receives attempt reports on.
+-type racer() :: {pid(), reference()}.
 
 %% @doc Race the listed transports and return the winning session.
 -spec race([masque:transport()], masque:target(), map(), pid()) ->
@@ -45,15 +54,16 @@ race(Transports, Target, Opts, RealOwner) ->
     Timeout = maps:get(timeout, Opts, 5000),
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
     [Primary | Rest] = Transports,
-    Racer = self(),
-    P1 = spawn_attempt(Racer, Primary, Target, Opts),
+    Alias = erlang:alias(),
+    Racer = {self(), Alias},
+    P1 = spawn_attempt(Racer, Primary, Target, Opts, Deadline),
     %% Arm the first head-start timer only when there's more to spawn.
     NextTRef =
         case Rest of
             [] -> undefined;
-            _ -> erlang:send_after(PreferMs, self(), start_next_attempt)
+            _ -> erlang:send_after(PreferMs, self(), {Alias, start_next_attempt})
         end,
-    loop(#{
+    S = #{
         real_owner => RealOwner,
         attempts => #{P1 => {Primary, undefined}},
         pending => Rest,
@@ -64,7 +74,13 @@ race(Transports, Target, Opts, RealOwner) ->
         deadline => Deadline,
         racer => Racer,
         last_error => undefined
-    }).
+    },
+    try
+        loop(S)
+    after
+        _ = erlang:unalias(Alias),
+        flush(Alias)
+    end.
 
 %%====================================================================
 %% Internal
@@ -81,34 +97,41 @@ head_start_queue([_Secondary | Rest], H1PreferMs) ->
     %% attempt. Any further transports inherit the same cadence.
     [H1PreferMs || _ <- Rest].
 
-loop(S) ->
-    Now = erlang:monotonic_time(millisecond),
-    RemainingMs = max(0, maps:get(deadline, S) - Now),
+loop(#{racer := {_, Alias}} = S) ->
     receive
-        {attempt_ready, AttemptPid, Transport, SessionPid} ->
+        {Alias, {attempt_ready, AttemptPid, Transport, SessionPid}} ->
             handle_attempt_ready(AttemptPid, Transport, SessionPid, S);
-        {attempt_failed, AttemptPid, Transport, Reason} ->
+        {Alias, {attempt_failed, AttemptPid, Transport, Reason}} ->
             handle_attempt_failed(AttemptPid, Transport, Reason, S);
-        start_next_attempt ->
+        {Alias, start_next_attempt} ->
             handle_start_next(S)
-    after RemainingMs ->
+    after remaining(maps:get(deadline, S)) ->
         cleanup_all(S),
         {error, {race_timeout, maps:get(last_error, S)}}
     end.
+
+%% Drop reports that reached the alias before it was deactivated.
+flush(Alias) ->
+    receive
+        {Alias, _} -> flush(Alias)
+    after 0 -> ok
+    end.
+
+remaining(Deadline) ->
+    max(0, Deadline - erlang:monotonic_time(millisecond)).
 
 handle_attempt_ready(Pid, Transport, Sess, S) ->
     RealOwner = maps:get(real_owner, S),
     case transfer_owner(Transport, Sess, RealOwner) of
         ok ->
-            _ = notify_result(Pid, win),
+            _ = notify_result(Pid, win, S),
             cleanup_others(Pid, S),
             {ok, Sess};
         {error, Reason} ->
             %% The winner died between `attempt_ready' and
-            %% `set_owner'. Clean up every attempt (including losers
-            %% that have not reported yet) and keep racing what's
-            %% pending; otherwise a lost winner would strand the
-            %% other attempts with no-one to reply `lose' to them.
+            %% `set_owner'. Tell its worker to stop the session and
+            %% keep racing what's still running or pending.
+            _ = notify_result(Pid, lose, S),
             _ =
                 (try
                     exit(Sess, kill)
@@ -153,10 +176,11 @@ handle_start_next(
         attempts := Attempts,
         target := Target,
         opts := Opts,
-        racer := Racer
+        deadline := Deadline,
+        racer := {_, Alias} = Racer
     } = S
 ) ->
-    P = spawn_attempt(Racer, T, Target, Opts),
+    P = spawn_attempt(Racer, T, Target, Opts, Deadline),
     {NextTRef, HeadStarts1} =
         case {Rest, HeadStarts} of
             {[], _} ->
@@ -164,7 +188,7 @@ handle_start_next(
             {_, []} ->
                 {undefined, []};
             {_, [Delay | RestDelays]} ->
-                {erlang:send_after(Delay, self(), start_next_attempt), RestDelays}
+                {erlang:send_after(Delay, self(), {Alias, start_next_attempt}), RestDelays}
         end,
     loop(S#{
         attempts := maps:put(P, {T, undefined}, Attempts),
@@ -174,63 +198,89 @@ handle_start_next(
     }).
 
 %% Spawn a worker that performs one transport attempt and reports the
-%% outcome to the racer. The session is owned by the worker; on loss
-%% we kill the worker which in turn kills the session.
--spec spawn_attempt(pid(), masque:transport(), masque:target(), map()) -> pid().
-spawn_attempt(Racer, Transport, Target, Opts) ->
-    spawn(fun() -> attempt(Racer, Transport, Target, Opts) end).
+%% outcome to the racer alias. The session is owned by the worker
+%% until the racer transfers it; the worker stops the session when it
+%% loses, when the caller goes away, or at the race deadline.
+-spec spawn_attempt(racer(), masque:transport(), masque:target(), map(), integer()) -> pid().
+spawn_attempt(Racer, Transport, Target, Opts, Deadline) ->
+    spawn(fun() -> attempt(Racer, Transport, Target, Opts, Deadline) end).
 
--spec attempt(pid(), masque:transport(), masque:target(), map()) -> ok.
-attempt(Racer, Transport, Target, Opts) ->
+-spec attempt(racer(), masque:transport(), masque:target(), map(), integer()) -> ok.
+attempt({RacerPid, _} = Racer, Transport, Target, Opts, Deadline) ->
+    RRef = erlang:monitor(process, RacerPid),
     Mod = resolve_mod(Transport, Opts),
     case maybe_inject_pool_owner(Transport, Opts) of
         {error, Reason} ->
-            Racer ! {attempt_failed, self(), Transport, Reason},
-            ok;
+            report(Racer, {attempt_failed, self(), Transport, Reason});
         {ok, Opts1} ->
-            start_attempt(Racer, Transport, Target, Opts1, Mod)
+            start_attempt(Racer, RRef, Deadline, Transport, Target, Opts1, Mod)
     end.
 
-start_attempt(Racer, Transport, Target, Opts, Mod) ->
-    case Mod:start(Target, Opts#{transport => Transport}, self()) of
+start_attempt(Racer, RRef, Deadline, Transport, Target, Opts, Mod) ->
+    SessOpts = Opts#{transport => Transport, defer_owner => true},
+    case Mod:start(Target, SessOpts, self()) of
         {ok, Pid} ->
-            MRef = erlang:monitor(process, Pid),
-            T = maps:get(timeout, Opts, 5000),
-            Result =
-                try
-                    gen_statem:call(Pid, handshake_await, T + 1000)
-                catch
-                    exit:_ -> {error, session_died}
-                end,
-            erlang:demonitor(MRef, [flush]),
-            case Result of
+            ReqId = gen_statem:send_request(Pid, handshake_await),
+            case await_handshake(ReqId, Racer, RRef, Deadline) of
                 ok ->
-                    Racer ! {attempt_ready, self(), Transport, Pid},
-                    receive
-                        win ->
-                            ok;
-                        lose ->
-                            _ =
-                                (try
-                                    Mod:stop(Pid)
-                                catch
-                                    _:_ -> ok
-                                end),
-                            ok
+                    report(Racer, {attempt_ready, self(), Transport, Pid}),
+                    case await_result(Racer, RRef, Deadline) of
+                        win -> ok;
+                        lose -> stop_session(Mod, Pid)
                     end;
+                lose ->
+                    stop_session(Mod, Pid);
                 {error, Reason} ->
-                    try
-                        exit(Pid, kill)
-                    catch
-                        _:_ -> ok
-                    end,
-                    Racer ! {attempt_failed, self(), Transport, Reason},
-                    ok
+                    kill_session(Pid),
+                    report(Racer, {attempt_failed, self(), Transport, Reason})
             end;
         {error, Reason} ->
-            Racer ! {attempt_failed, self(), Transport, Reason},
-            ok
+            report(Racer, {attempt_failed, self(), Transport, Reason})
     end.
+
+%% Wait for the session's `handshake_await' reply. The racer can end
+%% the attempt early with `lose' (another transport won or the race
+%% gave up) and the attempt ends on its own when the caller dies.
+await_handshake(ReqId, {_, Alias} = Racer, RRef, Deadline) ->
+    receive
+        {Alias, lose} ->
+            lose;
+        {'DOWN', RRef, process, _, _} ->
+            lose;
+        Msg ->
+            case gen_statem:check_response(Msg, ReqId) of
+                {reply, Reply} -> Reply;
+                {error, {Reason, _}} -> {error, Reason};
+                no_reply -> await_handshake(ReqId, Racer, RRef, Deadline)
+            end
+    after remaining(Deadline) + ?WORKER_GRACE_MS ->
+        {error, handshake_timeout}
+    end.
+
+await_result({_, Alias}, RRef, Deadline) ->
+    receive
+        {Alias, win} -> win;
+        {Alias, lose} -> lose;
+        {'DOWN', RRef, process, _, _} -> lose
+    after remaining(Deadline) + ?WORKER_GRACE_MS ->
+        lose
+    end.
+
+report({_, Alias}, Event) ->
+    Alias ! {Alias, Event},
+    ok.
+
+stop_session(Mod, Pid) ->
+    try
+        _ = Mod:stop(Pid),
+        ok
+    catch
+        _:_ -> kill_session(Pid)
+    end.
+
+kill_session(Pid) ->
+    exit(Pid, kill),
+    ok.
 
 %% If `upstream_pool => true' and the transport supports pooling
 %% (h2, h3), check out a shared owner from the pool. h1 bypasses
@@ -334,17 +384,19 @@ transport_mod(h1, Opts) ->
 %% The session is in its `open' state when the winner reports, so
 %% `set_owner' is a trivial synchronous hop; a long timeout here only
 %% hides real bugs. 500 ms is comfortably above any reasonable
-%% scheduler hiccup on a healthy node.
+%% scheduler hiccup on a healthy node. The call's reply goes through
+%% its own alias, so a late reply after a timeout is dropped.
 transfer_owner(_Transport, Pid, Owner) ->
     try gen_statem:call(Pid, {set_owner, Owner}, 500) of
         ok -> ok;
-        _ -> {error, owner_transfer_failed}
+        Other -> {error, {owner_transfer_failed, Other}}
     catch
-        _:_ -> {error, owner_transfer_failed}
+        exit:{Reason, {gen_statem, call, _}} -> {error, Reason};
+        _:Reason -> {error, Reason}
     end.
 
-notify_result(Pid, Tag) ->
-    Pid ! Tag.
+notify_result(Pid, Tag, #{racer := {_, Alias}}) ->
+    Pid ! {Alias, Tag}.
 
 cleanup_others(WinnerPid, S) ->
     Losers = [
@@ -352,11 +404,11 @@ cleanup_others(WinnerPid, S) ->
      || P <- maps:keys(maps:get(attempts, S)),
         P =/= WinnerPid
     ],
-    [notify_result(P, lose) || P <- Losers],
+    _ = [notify_result(P, lose, S) || P <- Losers],
     cancel_next_timer(S).
 
 cleanup_all(S) ->
-    [notify_result(P, lose) || P <- maps:keys(maps:get(attempts, S))],
+    _ = [notify_result(P, lose, S) || P <- maps:keys(maps:get(attempts, S))],
     cancel_next_timer(S).
 
 cancel_next_timer(#{next_timer := undefined}) ->

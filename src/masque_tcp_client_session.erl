@@ -93,6 +93,7 @@ init({Target, Opts, Owner}) ->
     {ProxyHost, ProxyPort} = maps:get(proxy, Opts),
     {TargetHost, TargetPort} = Target,
     MRef = erlang:monitor(process, Owner),
+    ok = masque_client_owner:init(Opts),
     Mode = maps:get(mode, Opts, message),
     Transport = maps:get(transport, Opts, h3),
     Data = #data{
@@ -563,7 +564,7 @@ handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
     end.
 
 deliver(Bytes, #data{mode = message, owner = Owner} = Data) ->
-    Owner ! {masque_data, self(), Bytes},
+    masque_client_owner:send(Owner, {masque_data, self(), Bytes}),
     Data;
 deliver(Bytes, #data{mode = queue, rx_waiters = Ws, rx_buf = Buf} = Data) ->
     case queue:out(Ws) of
@@ -623,13 +624,14 @@ cancel_timer(Ref) ->
     ok.
 
 notify_owner_closed(Reason, #data{owner = Owner, mode = message}) ->
-    Owner ! {masque_closed, self(), Reason};
+    masque_client_owner:send(Owner, {masque_closed, self(), Reason});
 notify_owner_closed(_Reason, _Data) ->
     ok.
 
 swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
     _ = erlang:demonitor(OldRef, [flush]),
     NewRef = erlang:monitor(process, NewOwner),
+    ok = masque_client_owner:release(NewOwner),
     Data#data{owner = NewOwner, owner_ref = NewRef}.
 
 to_bin(X) when is_binary(X) -> X;

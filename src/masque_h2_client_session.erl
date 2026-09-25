@@ -97,6 +97,7 @@ init({Target, Opts, Owner}) ->
     {ProxyHost, ProxyPort} = maps:get(proxy, Opts),
     {TargetHost, TargetPort} = Target,
     MRef = erlang:monitor(process, Owner),
+    ok = masque_client_owner:init(Opts),
     Mode = maps:get(mode, Opts, message),
     MaxCap = maps:get(
         max_capsule_size,
@@ -516,7 +517,7 @@ deliver_capsule(datagram, Inner, Data) ->
 deliver_capsule(Type, Inner, #data{owner = Owner} = Data) when
     is_integer(Type)
 ->
-    Owner ! {masque_capsule, self(), Type, Inner},
+    masque_client_owner:send(Owner, {masque_capsule, self(), Type, Inner}),
     Data.
 
 client_stream_abort(
@@ -592,7 +593,7 @@ handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
     end.
 
 deliver_packet(UdpBytes, #data{mode = message, owner = Owner} = Data) ->
-    Owner ! {masque_data, self(), UdpBytes},
+    masque_client_owner:send(Owner, {masque_data, self(), UdpBytes}),
     Data;
 deliver_packet(
     UdpBytes,
@@ -657,13 +658,14 @@ cancel_timer(Ref) ->
     ok.
 
 notify_owner_closed(Reason, #data{owner = Owner, mode = message}) ->
-    Owner ! {masque_closed, self(), Reason};
+    masque_client_owner:send(Owner, {masque_closed, self(), Reason});
 notify_owner_closed(_Reason, _Data) ->
     ok.
 
 swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
     _ = erlang:demonitor(OldRef, [flush]),
     NewRef = erlang:monitor(process, NewOwner),
+    ok = masque_client_owner:release(NewOwner),
     Data#data{owner = NewOwner, owner_ref = NewRef}.
 
 to_bin(X) when is_binary(X) -> X;
