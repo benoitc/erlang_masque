@@ -18,7 +18,7 @@
 -export([send_capsule/3]).
 
 -export([init/1, callback_mode/0, terminate/3, code_change/4]).
--export([connecting/3, open/3, closing/3]).
+-export([connecting/3, failed/3, open/3, closing/3]).
 
 -include("masque.hrl").
 
@@ -49,6 +49,8 @@
     conn :: pid() | undefined,
     stream_id :: non_neg_integer() | undefined,
     handshake_from :: gen_statem:from() | undefined,
+    %% Dial error parked in the `failed' state.
+    failure :: term(),
     timeout_ref :: reference() | undefined,
     %% Delivery mode: `message' delivers incoming UDP payloads to the
     %% owner as `{masque_data, Sess, Data}', `queue' buffers them
@@ -145,7 +147,7 @@ init({Target, Opts, Owner}) ->
 %%====================================================================
 
 connecting(internal, {do_handshake, Opts}, Data) ->
-    case do_connect(Data, Opts) of
+    case masque_client_failed:guard(fun() -> do_connect(Data, Opts) end) of
         {ok, Conn, StreamId} ->
             Timeout = maps:get(timeout, Opts, 5000),
             TRef = erlang:start_timer(Timeout, self(), handshake_timeout),
@@ -155,7 +157,8 @@ connecting(internal, {do_handshake, Opts}, Data) ->
                 timeout_ref = TRef
             }};
         {error, Reason} ->
-            {stop, {handshake_failed, Reason}}
+            %% The caller's `handshake_await' is not processed yet.
+            {next_state, failed, Data#data{failure = Reason}, masque_client_failed:enter(Opts)}
     end;
 connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
@@ -218,6 +221,13 @@ connecting({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, connecting)}]};
 connecting({call, From}, stop, Data) ->
     {stop_and_reply, normal, [{reply, From, ok}], Data}.
+
+%%====================================================================
+%% State: failed (dial error parked for `handshake_await')
+%%====================================================================
+
+failed(Type, Event, #data{failure = Reason, owner_ref = Ref}) ->
+    masque_client_failed:handle(Type, Event, Reason, Ref).
 
 open({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, open)}]};
@@ -556,6 +566,7 @@ do_connect(Data, Opts) ->
     ConnOpts0 = maps:with([verify, cacerts], Opts),
     ConnOpts = ConnOpts0#{
         sync => true,
+        connect_timeout => maps:get(timeout, Opts, 5000),
         settings => #{enable_connect_protocol => 1, h3_datagram => 1},
         h3_datagram_enabled => true,
         quic_opts => #{

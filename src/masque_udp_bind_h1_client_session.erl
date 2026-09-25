@@ -18,7 +18,7 @@
 -export([send_capsule/3]).
 
 -export([init/1, callback_mode/0, terminate/3, code_change/4]).
--export([connecting/3, open/3, closing/3]).
+-export([connecting/3, failed/3, open/3, closing/3]).
 
 -include("masque.hrl").
 -include("masque_udp_bind.hrl").
@@ -34,6 +34,8 @@
     bind_scope :: scoped | unscoped,
     socket :: ssl:sslsocket() | undefined,
     handshake_from :: gen_statem:from() | undefined,
+    %% Dial error parked in the `failed' state.
+    failure :: term(),
     mode :: message | queue,
     rx_buf :: queue:queue({inet:ip_address(), inet:port_number(), binary()}),
     rx_waiters :: queue:queue({gen_statem:from(), reference()}),
@@ -46,6 +48,8 @@
 }).
 
 -define(CLIENT_ROLE, client).
+%% Cap on the 101 response head, same as the CONNECT-TCP h1 client.
+-define(MAX_RESPONSE_HEADER, 65536).
 
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
@@ -117,7 +121,7 @@ init({Target, Opts, Owner}) ->
 %%====================================================================
 
 connecting(internal, {do_handshake, Opts}, Data) ->
-    case do_connect(Data, Opts) of
+    case masque_client_failed:guard(fun() -> do_connect(Data, Opts) end) of
         {ok, Socket, Buffer, RespHeaders} ->
             case validate_response(RespHeaders) of
                 {ok, Addrs} ->
@@ -147,12 +151,12 @@ connecting(internal, {do_handshake, Opts}, Data) ->
                         catch
                             _:_ -> ok
                         end),
-                    reply_handshake(Data, {error, Reason}),
-                    {stop, {handshake_failed, Reason}}
+                    {next_state, failed, Data#data{failure = Reason},
+                        masque_client_failed:enter(Opts)}
             end;
         {error, Reason} ->
-            reply_handshake(Data, {error, Reason}),
-            {stop, {handshake_failed, Reason}}
+            %% The caller's `handshake_await' is not processed yet.
+            {next_state, failed, Data#data{failure = Reason}, masque_client_failed:enter(Opts)}
     end;
 connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
@@ -170,6 +174,13 @@ connecting(info, _Msg, Data) ->
 %%====================================================================
 %% State: open
 %%====================================================================
+
+%%====================================================================
+%% State: failed (dial error parked for `handshake_await')
+%%====================================================================
+
+failed(Type, Event, #data{failure = Reason, owner_ref = Ref}) ->
+    masque_client_failed:handle(Type, Event, Reason, Ref).
 
 open({call, From}, handshake_await, Data) ->
     {keep_state, Data, [{reply, From, ok}]};
@@ -237,6 +248,9 @@ closing(internal, do_close, #data{socket = Socket} = Data) ->
 closing(_, _, Data) ->
     {keep_state, Data}.
 
+%% A parked dial error was already returned to `handshake_await'.
+terminate(_Reason, failed, _Data) ->
+    ok;
 terminate(Reason, _State, #data{
     owner = Owner,
     mode = message,
@@ -649,15 +663,18 @@ drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->
 %%====================================================================
 
 do_connect(Data, Opts) ->
+    %% One deadline covers connect, TLS and the Upgrade exchange.
+    Timeout = maps:get(timeout, Opts, 5000),
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
     SslOpts = masque_tls:client_opts(Data#data.proxy_host, Opts),
     Host = binary_to_list(Data#data.proxy_host),
     Port = Data#data.proxy_port,
-    case ssl:connect(Host, Port, SslOpts) of
+    case ssl:connect(Host, Port, SslOpts, Timeout) of
         {ok, Socket} ->
             ReqBin = build_request(Data),
             case ssl:send(Socket, ReqBin) of
                 ok ->
-                    case read_response(Socket) of
+                    case read_response(Socket, Deadline) of
                         {ok, RespHeaders, Buffer} ->
                             {ok, Socket, Buffer, RespHeaders};
                         {error, R} ->
@@ -704,16 +721,23 @@ expand_path({Host, Port}) ->
         {Host, Port}
     ).
 
-read_response(Socket) ->
-    read_response_lines(Socket, <<>>).
+read_response(Socket, Deadline) ->
+    read_response_lines(Socket, <<>>, Deadline).
 
-read_response_lines(Socket, Acc) ->
-    case ssl:recv(Socket, 0, 5000) of
+read_response_lines(_Socket, Acc, _Deadline) when byte_size(Acc) > ?MAX_RESPONSE_HEADER ->
+    {error, headers_too_large};
+read_response_lines(Socket, Acc, Deadline) ->
+    Remaining = Deadline - erlang:monotonic_time(millisecond),
+    case Remaining > 0 andalso ssl:recv(Socket, 0, Remaining) of
+        false ->
+            {error, handshake_timeout};
+        {error, timeout} ->
+            {error, handshake_timeout};
         {ok, Bytes} ->
             New = <<Acc/binary, Bytes/binary>>,
             case binary:match(New, <<"\r\n\r\n">>) of
                 nomatch ->
-                    read_response_lines(Socket, New);
+                    read_response_lines(Socket, New, Deadline);
                 {Pos, 4} ->
                     Header = binary:part(New, 0, Pos),
                     Buffer = binary:part(
@@ -738,7 +762,10 @@ parse_response_header(HeaderBin, Buffer) ->
                      || L <- HdrLines,
                         L =/= <<>>
                     ],
-                    {ok, Headers, Buffer};
+                    case is_upgrade_ack(Headers) of
+                        true -> {ok, Headers, Buffer};
+                        false -> {error, bad_upgrade_response}
+                    end;
                 {ok, S} ->
                     {error, {bad_status, S}};
                 {error, R} ->
@@ -748,10 +775,30 @@ parse_response_header(HeaderBin, Buffer) ->
             {error, malformed_response}
     end.
 
-parse_status(<<"HTTP/1.1 ", Status:3/binary, _/binary>>) ->
-    {ok, binary_to_integer(Status)};
+parse_status(<<"HTTP/1.1 ", D1, D2, D3, Rest/binary>>) when
+    D1 >= $1,
+    D1 =< $5,
+    D2 >= $0,
+    D2 =< $9,
+    D3 >= $0,
+    D3 =< $9,
+    (Rest =:= <<>> orelse binary_part(Rest, 0, 1) =:= <<" ">>)
+->
+    {ok, (D1 - $0) * 100 + (D2 - $0) * 10 + (D3 - $0)};
 parse_status(_) ->
     {error, bad_status_line}.
+
+%% RFC 9110 section 7.8: a 101 names the protocol switched to in
+%% `Upgrade' and carries `Connection: upgrade'.
+is_upgrade_ack(Headers) ->
+    Upgrade = proplists:get_value(<<"upgrade">>, Headers, <<>>),
+    Connection = proplists:get_value(<<"connection">>, Headers, <<>>),
+    Tokens = [
+        string:trim(T)
+     || T <- binary:split(string:lowercase(Connection), <<",">>, [global])
+    ],
+    string:lowercase(Upgrade) =:= <<"connect-udp">> andalso
+        lists:member(<<"upgrade">>, Tokens).
 
 parse_header_line(Line) ->
     case binary:split(Line, <<":">>) of

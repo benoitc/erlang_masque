@@ -16,7 +16,7 @@
 -export([send_capsule/3]).
 
 -export([init/1, callback_mode/0, terminate/3, code_change/4]).
--export([connecting/3, open/3, closing/3]).
+-export([connecting/3, failed/3, open/3, closing/3]).
 
 -ifdef(TEST).
 -export([
@@ -50,6 +50,8 @@
     capsule_proto :: boolean(),
     socket :: ssl:sslsocket() | undefined,
     handshake_from :: gen_statem:from() | undefined,
+    %% Dial error parked in the `failed' state.
+    failure :: term(),
     mode :: message | queue,
     rx_buf = queue:new() :: queue:queue(binary()),
     rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
@@ -129,7 +131,7 @@ init({Target, Opts, Owner}) ->
 %%====================================================================
 
 connecting(internal, {do_handshake, Opts}, Data) ->
-    case do_connect(Data, Opts) of
+    case masque_client_failed:guard(fun() -> do_connect(Data, Opts) end) of
         {ok, Socket, Buffer} ->
             case setopts_active_once(Socket) of
                 ok ->
@@ -148,12 +150,12 @@ connecting(internal, {do_handshake, Opts}, Data) ->
                         catch
                             _:_ -> ok
                         end),
-                    reply_handshake(Data, {error, {setopts, Reason}}),
-                    {stop, {setopts, Reason}}
+                    {next_state, failed, Data#data{failure = {setopts, Reason}},
+                        masque_client_failed:enter(Opts)}
             end;
         {error, Reason} ->
-            reply_handshake(Data, {error, Reason}),
-            {stop, {handshake_failed, Reason}}
+            %% The caller's `handshake_await' is not processed yet.
+            {next_state, failed, Data#data{failure = Reason}, masque_client_failed:enter(Opts)}
     end;
 connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
@@ -177,6 +179,13 @@ connecting(
     {stop, owner_gone};
 connecting(info, _Msg, Data) ->
     {keep_state, Data}.
+
+%%====================================================================
+%% State: failed (dial error parked for `handshake_await')
+%%====================================================================
+
+failed(Type, Event, #data{failure = Reason, owner_ref = Ref}) ->
+    masque_client_failed:handle(Type, Event, Reason, Ref).
 
 open({call, From}, handshake_await, Data) ->
     %% Handshake is synchronous on h1; by the time we're in `open'
@@ -283,7 +292,9 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%====================================================================
 
 do_connect(Data, Opts) ->
+    %% One deadline covers connect, TLS and the Upgrade exchange.
     Timeout = maps:get(timeout, Opts, 5000),
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
     SSLOpts = masque_tls:client_opts(Data#data.proxy_host, Opts),
     ConnOpts = #{
         transport => ssl,
@@ -299,9 +310,9 @@ do_connect(Data, Opts) ->
         )
     of
         {ok, Conn} ->
-            case h1:wait_connected(Conn, Timeout) of
+            case h1:wait_connected(Conn, remaining(Deadline)) of
                 ok ->
-                    do_upgrade(Conn, Data, Timeout);
+                    do_upgrade(Conn, Data, remaining(Deadline));
                 {error, Reason} ->
                     _ =
                         (try
@@ -314,6 +325,10 @@ do_connect(Data, Opts) ->
         {error, Reason} ->
             {error, {connect, Reason}}
     end.
+
+%% Milliseconds left before the overall handshake deadline.
+remaining(Deadline) ->
+    max(0, Deadline - erlang:monotonic_time(millisecond)).
 
 do_upgrade(Conn, Data, Timeout) ->
     Headers = request_headers(Data),

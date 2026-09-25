@@ -1,9 +1,13 @@
-%%% @doc Client-side failure paths: TLS verification of the proxy
-%%% certificate on every transport.
+%%% @doc Client-side failure paths.
 %%%
-%%% The listeners use a self-signed certificate, so a client with the
+%%% TLS verification of the proxy certificate on every transport: the
+%%% listeners use a self-signed certificate, so a client with the
 %%% default options must refuse it, and a client that trusts the
 %%% certificate through `cacerts' must accept it.
+%%%
+%%% Failed handshakes (refused port, bad certificate, silent proxy)
+%%% return `{error, _}' from `masque:connect/3' instead of raising, for
+%%% every transport and tunnel protocol.
 -module(masque_client_errors_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
@@ -28,7 +32,11 @@
     default_opts_reject_self_signed_bind_h1/1,
     trusted_cacerts_accepted_h3/1,
     trusted_cacerts_accepted_h2/1,
-    trusted_cacerts_accepted_h1/1
+    trusted_cacerts_accepted_h1/1,
+    refused_port_returns_error/1,
+    silent_proxy_times_out/1,
+    no_session_left_after_failure/1,
+    bind_h1_bad_responses_rejected/1
 ]).
 
 -define(TARGET, {<<"192.0.2.6">>, 443}).
@@ -50,7 +58,11 @@ all() ->
         default_opts_reject_self_signed_bind_h1,
         trusted_cacerts_accepted_h3,
         trusted_cacerts_accepted_h2,
-        trusted_cacerts_accepted_h1
+        trusted_cacerts_accepted_h1,
+        refused_port_returns_error,
+        silent_proxy_times_out,
+        no_session_left_after_failure,
+        bind_h1_bad_responses_rejected
     ].
 
 init_per_suite(Config) ->
@@ -138,9 +150,179 @@ trusted_cacerts_accepted_h2(Config) ->
 trusted_cacerts_accepted_h1(Config) ->
     assert_accepted(connect(Config, h1, trusted(Config))).
 
+refused_port_returns_error(_Config) ->
+    Port = closed_port(),
+    URI = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    [
+        ?assertMatch(
+            {error, _},
+            dial(URI, Transport, Protocol, #{timeout => 1000}),
+            {Transport, Protocol}
+        )
+     || Transport <- [h3, h2, h1], Protocol <- [udp, tcp, ip, udp_bind]
+    ],
+    assert_no_close_messages().
+
+%% A proxy that accepts the TCP connection (or swallows QUIC packets)
+%% and never answers: the dial fails with an error once the handshake
+%% timeout passes.
+silent_proxy_times_out(_Config) ->
+    {ok, LSock} = gen_tcp:listen(0, [binary, {active, false}, {ip, {127, 0, 0, 1}}]),
+    {ok, TcpPort} = inet:port(LSock),
+    Acceptor = spawn(fun() -> accept_and_hold(LSock, []) end),
+    ok = gen_tcp:controlling_process(LSock, Acceptor),
+    {ok, Udp} = gen_udp:open(0, [binary, {ip, {127, 0, 0, 1}}]),
+    {ok, UdpPort} = inet:port(Udp),
+    try
+        [
+            begin
+                Port =
+                    case Transport of
+                        h3 -> UdpPort;
+                        _ -> TcpPort
+                    end,
+                URI = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+                T0 = erlang:monotonic_time(millisecond),
+                Result = dial(URI, Transport, Protocol, #{timeout => 1000}),
+                Elapsed = erlang:monotonic_time(millisecond) - T0,
+                ?assertMatch({error, _}, Result, {Transport, Protocol}),
+                ?assert(Elapsed < 4000)
+            end
+         || Transport <- [h3, h2, h1], Protocol <- [udp, tcp, ip, udp_bind]
+        ]
+    after
+        exit(Acceptor, kill),
+        gen_udp:close(Udp)
+    end,
+    assert_no_close_messages().
+
+%% A failed dial leaves no client session process behind.
+no_session_left_after_failure(Config) ->
+    Before = erlang:processes(),
+    [
+        _ = dial(proxy_uri(Config, T), T, udp, #{})
+     || T <- [h3, h2, h1]
+    ],
+    timer:sleep(200),
+    Sessions = [
+        P
+     || P <- erlang:processes() -- Before,
+        is_client_session(P)
+    ],
+    ?assertEqual([], Sessions).
+
+%% The udp-bind h1 client checks the 101 it gets back: a non-numeric
+%% status, a 101 without the Upgrade / Connection pair, an oversized
+%% head and a head trickled past the deadline are all errors.
+bind_h1_bad_responses_rejected(Config) ->
+    Cases = [
+        {<<"HTTP/1.1 1x1 Switching\r\n\r\n">>, bad_status_line},
+        {<<"HTTP/1.1 101 Switching Protocols\r\nupgrade: connect-udp\r\n\r\n">>,
+            bad_upgrade_response},
+        {
+            <<"HTTP/1.1 101 Switching Protocols\r\nx: ", (binary:copy(<<"a">>, 70000))/binary>>,
+            headers_too_large
+        },
+        {trickle, handshake_timeout}
+    ],
+    [
+        begin
+            Port = start_fake_h1_proxy(Config, Reply),
+            URI = iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+            ?assertEqual(
+                {error, Expected},
+                dial(URI, h1, udp_bind, #{verify => verify_none, timeout => 1000})
+            )
+        end
+     || {Reply, Expected} <- Cases
+    ].
+
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+%% One-shot TLS server: reads the request head and answers with
+%% `Reply', or with one byte of a valid head every 300 ms for `trickle'.
+start_fake_h1_proxy(Config, Reply) ->
+    #{cert_file := CertFile, key_file := KeyFile} = ?config(certs, Config),
+    Parent = self(),
+    spawn(fun() ->
+        {ok, LSock} = ssl:listen(0, [
+            binary,
+            {active, false},
+            {reuseaddr, true},
+            {certfile, CertFile},
+            {keyfile, KeyFile}
+        ]),
+        {ok, {_, Port}} = ssl:sockname(LSock),
+        Parent ! {fake_proxy, Port},
+        {ok, T} = ssl:transport_accept(LSock, 5000),
+        {ok, Sock} = ssl:handshake(T, 5000),
+        {ok, _Req} = ssl:recv(Sock, 0, 5000),
+        case Reply of
+            trickle ->
+                [
+                    begin
+                        _ = ssl:send(Sock, <<C>>),
+                        timer:sleep(300)
+                    end
+                 || <<C>> <= <<"HTTP/1.1 101 Switching Protocols\r\n\r\n">>
+                ];
+            _ ->
+                ssl:send(Sock, Reply)
+        end,
+        timer:sleep(1000),
+        ssl:close(Sock)
+    end),
+    receive
+        {fake_proxy, Port} -> Port
+    after 5000 -> ct:fail(fake_proxy_start)
+    end.
+
+dial(URI, Transport, udp_bind, Extra) ->
+    catch_all(fun() ->
+        masque:bind_connect(URI, unscoped, Extra#{transports => [Transport]})
+    end);
+dial(URI, Transport, Protocol, Extra) ->
+    Target =
+        case Protocol of
+            ip -> {'*', '*'};
+            _ -> ?TARGET
+        end,
+    Opts = Extra#{transports => [Transport], protocol => Protocol},
+    catch_all(fun() -> masque:connect(URI, Target, Opts) end).
+
+closed_port() ->
+    {ok, L} = gen_tcp:listen(0, [{ip, {127, 0, 0, 1}}]),
+    {ok, Port} = inet:port(L),
+    ok = gen_tcp:close(L),
+    Port.
+
+accept_and_hold(LSock, Held) ->
+    case gen_tcp:accept(LSock) of
+        {ok, Sock} -> accept_and_hold(LSock, [Sock | Held]);
+        {error, _} -> ok
+    end.
+
+assert_no_close_messages() ->
+    receive
+        {masque_closed, _, _} = Msg -> ct:fail({stray_message, Msg})
+    after 200 -> ok
+    end.
+
+is_client_session(Pid) ->
+    case erlang:process_info(Pid, dictionary) of
+        {dictionary, Dict} ->
+            case proplists:get_value('$initial_call', Dict) of
+                {Mod, init, 1} ->
+                    lists:prefix("masque_", atom_to_list(Mod)) andalso
+                        string:find(atom_to_list(Mod), "client_session") =/= nomatch;
+                _ ->
+                    false
+            end;
+        undefined ->
+            false
+    end.
 
 trusted(Config) ->
     #{cacerts => [maps:get(ca_cert, ?config(ca, Config))]}.
@@ -225,10 +407,12 @@ catch_all(Fun) ->
 assert_rejected({ok, Sess}) ->
     _ = masque:close(Sess),
     ct:fail(self_signed_certificate_accepted);
-assert_rejected(Other) ->
+assert_rejected({error, _} = Err) ->
     %% The listener is up, so the failure must come from TLS rather
     %% than from a refused connection.
-    ?assertEqual(nomatch, string:find(io_lib:format("~0p", [Other]), "econnrefused")).
+    ?assertEqual(nomatch, string:find(io_lib:format("~0p", [Err]), "econnrefused"));
+assert_rejected(Other) ->
+    ct:fail({expected_error, Other}).
 
 assert_accepted({ok, Sess}) ->
     ok = masque:close(Sess);

@@ -371,7 +371,10 @@ dial_single(Mod, Target, Opts, Owner) ->
                 catch
                     exit:{noproc, _} -> {error, session_died};
                     exit:{normal, _} -> {error, session_died};
-                    exit:{{shutdown, _}, _} -> {error, session_died}
+                    exit:{{shutdown, _}, _} -> {error, session_died};
+                    exit:{timeout, _} -> {error, handshake_timeout};
+                    exit:{Why, {gen_statem, call, _}} -> {error, Why};
+                    exit:Other -> {error, Other}
                 end,
             erlang:demonitor(MRef, [flush]),
             case Result of

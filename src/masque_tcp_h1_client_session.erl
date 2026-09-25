@@ -246,7 +246,9 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%====================================================================
 
 do_connect(Data, Opts) ->
+    %% One deadline covers connect, TLS and the CONNECT exchange.
     Timeout = maps:get(timeout, Opts, 5000),
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
     SSLOpts = masque_tls:client_opts(Data#data.proxy_host, Opts),
     case
         ssl:connect(
@@ -260,7 +262,7 @@ do_connect(Data, Opts) ->
             Req = connect_request(Data),
             case ssl:send(Socket, Req) of
                 ok ->
-                    case read_status_line(Socket, Timeout) of
+                    case read_status_line(Socket, remaining(Deadline)) of
                         {ok, Code, _Phrase, Leftover} when
                             Code >= 200, Code < 300
                         ->
@@ -283,6 +285,10 @@ do_connect(Data, Opts) ->
         {error, Reason} ->
             {error, {connect, Reason}}
     end.
+
+%% Milliseconds left before the overall handshake deadline.
+remaining(Deadline) ->
+    max(0, Deadline - erlang:monotonic_time(millisecond)).
 
 connect_request(#data{
     target_host = Host,
