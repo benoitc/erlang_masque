@@ -51,7 +51,8 @@
     h3_udp_bind_close_ends_connection/1,
     h2_udp_bind_close_ends_connection/1,
     h3_udp_bind_parked_session_closes_connection/1,
-    h2_udp_bind_parked_session_closes_connection/1
+    h2_udp_bind_parked_session_closes_connection/1,
+    h3_tcp_data_before_finalize_is_kept/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -95,7 +96,8 @@ all() ->
         h3_udp_bind_close_ends_connection,
         h2_udp_bind_close_ends_connection,
         h3_udp_bind_parked_session_closes_connection,
-        h2_udp_bind_parked_session_closes_connection
+        h2_udp_bind_parked_session_closes_connection,
+        h3_tcp_data_before_finalize_is_kept
     ].
 
 init_per_suite(Config) ->
@@ -172,6 +174,8 @@ extra_opts(Case) when
     Case =:= h2_unknown_reject_reason_gets_response
 ->
     #{handler => masque_weird_reject_handler};
+extra_opts(h3_tcp_data_before_finalize_is_kept) ->
+    #{tcp_handler => masque_report_tcp_handler, handler_opts => #{early_data => <<"early">>}};
 extra_opts(h2_failed_session_releases_tunnel_slot) ->
     #{handler => masque_stop_init_handler, max_tunnels_per_connection => 1};
 extra_opts(_Case) ->
@@ -632,6 +636,18 @@ tcp_target_fin_half_closes(Config, Transport) ->
     after 5000 -> ct:fail(session_alive)
     end,
     gen_tcp:close(LSock).
+
+%% Target bytes that reach an h3 session before the router finalizes
+%% the stream (a fast target, a busy router) wait for the 2xx instead
+%% of failing the tunnel.
+h3_tcp_data_before_finalize_is_kept(Config) ->
+    {EchoPid, EchoPort} = start_tcp_echo(),
+    Sess = tcp_connect(Config, h3, EchoPort),
+    <<"early">> = recv_tcp(Sess, <<>>),
+    ok = masque:send(Sess, <<"then echo">>),
+    <<"then echo">> = recv_tcp(Sess, <<>>),
+    ok = masque:close(Sess),
+    exit(EchoPid, kill).
 
 tcp_send_capsule_not_supported(Config) ->
     {EchoPid, EchoPort} = start_tcp_echo(),

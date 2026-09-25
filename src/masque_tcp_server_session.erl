@@ -40,7 +40,10 @@
     %% Monitor on the router (H3 path).
     router_ref :: reference() | undefined,
     %% Our side of the stream already ended with FIN.
-    fin_sent = false :: boolean()
+    fin_sent = false :: boolean(),
+    %% H3 path: handler messages (e.g. target bytes) that arrived
+    %% before finalize, newest first. Replayed once the 2xx is sent.
+    early = [] :: [term()]
 }).
 
 %%====================================================================
@@ -114,6 +117,30 @@ send_response(#state{transport = h2, conn = C, stream_id = S}, Status, Hdrs) ->
 
 %% `drain_buffer => false': bytes the client wrote before the claim are
 %% replayed as `{data, _, _, Fin}' messages instead of being dropped.
+%% H3 path: send the 2xx, claim the stream, run the handler's init
+%% actions, then replay the handler messages that arrived meanwhile.
+finalize(#state{pending_actions = Actions} = S) ->
+    case send_response(S, 200, []) of
+        ok ->
+            case claim_stream(S) of
+                {error, _} ->
+                    {error, S};
+                _ ->
+                    S1 = run_init_actions(Actions, S#state{pending_actions = undefined}),
+                    replay_early(lists:reverse(S1#state.early), S1#state{early = []})
+            end;
+        {error, _} ->
+            {error, S}
+    end.
+
+replay_early([], S) ->
+    {ok, S};
+replay_early([Msg | Rest], S) ->
+    case handle_info(Msg, S) of
+        {noreply, S2} -> replay_early(Rest, S2);
+        {stop, Reason, S2} -> {stop, Reason, S2}
+    end.
+
 claim_stream(#state{transport = h3, conn = C, stream_id = S}) ->
     quic_h3:set_stream_handler(C, S, self(), #{drain_buffer => false});
 claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
@@ -126,26 +153,10 @@ handle_call(
 ) when
     Actions =/= undefined
 ->
-    case send_response(S, 200, []) of
-        ok ->
-            case claim_stream(S) of
-                ok ->
-                    {reply, ok,
-                        run_init_actions(
-                            Actions,
-                            S#state{pending_actions = undefined}
-                        )};
-                {ok, _} ->
-                    {reply, ok,
-                        run_init_actions(
-                            Actions,
-                            S#state{pending_actions = undefined}
-                        )};
-                {error, _} ->
-                    {reply, {error, stream_dead}, S}
-            end;
-        {error, _} ->
-            {reply, {error, stream_dead}, S}
+    case finalize(S) of
+        {ok, S2} -> {reply, ok, S2};
+        {stop, Reason, S2} -> {stop, Reason, ok, S2};
+        {error, S2} -> {reply, {error, stream_dead}, S2}
     end;
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
@@ -153,12 +164,20 @@ handle_call(_Req, _From, S) ->
 %% Asynchronous finalize from the router: run the same steps as the
 %% `finalize' call and report back; the session stops if the stream
 %% could not be opened.
-handle_cast({finalize, Router}, S) ->
-    {reply, Result, S2} = handle_call(finalize, undefined, S),
-    Router ! {masque_finalized, S#state.stream_id, self(), Result},
+handle_cast({finalize, Router}, #state{pending_actions = Actions} = S) when
+    Actions =/= undefined
+->
+    Result = finalize(S),
+    Reply =
+        case Result of
+            {error, _} -> {error, stream_dead};
+            _ -> ok
+        end,
+    Router ! {masque_finalized, S#state.stream_id, self(), Reply},
     case Result of
-        ok -> {noreply, S2};
-        _ -> {stop, stream_dead, S2}
+        {ok, S2} -> {noreply, S2};
+        {stop, Reason, S2} -> {stop, Reason, S2};
+        {error, S2} -> {stop, stream_dead, S2}
     end;
 handle_cast(connection_closed, S) ->
     {stop, connection_closed, S};
@@ -203,6 +222,13 @@ handle_info({'EXIT', _Pid, _Reason}, S) ->
 handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
     %% Router died - clean up
     {stop, router_gone, S};
+handle_info(Msg, #state{pending_actions = Actions, early = Early} = S) when
+    Actions =/= undefined
+->
+    %% Not finalized yet: nothing may be written to the stream before
+    %% the 2xx, so keep the message for `finalize'. A TCP target's
+    %% `{active, N}' window bounds how many pile up.
+    {noreply, S#state{early = [Msg | Early]}};
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
