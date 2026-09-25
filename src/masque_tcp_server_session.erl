@@ -176,7 +176,7 @@ handle_info(
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
-handle_info({h2, _Conn, closed}, S) ->
+handle_info({h2, _Conn, {closed, _Reason}}, S) ->
     {stop, peer_closed, S};
 handle_info({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};

@@ -11,6 +11,7 @@
 
 -export([
     start_link/1,
+    start_link/2,
     start_session/2,
     cancel_pending/2,
     register_session/3,
@@ -40,7 +41,11 @@
             {gen_server:from(), pid(), [term()]}
     },
     %% 0 = unlimited
-    max_tunnels = 0 :: non_neg_integer()
+    max_tunnels = 0 :: non_neg_integer(),
+    %% Monitors on the QUIC connection (from `connection_handler') and
+    %% the H3 connection (from `connected'). Either going down ends
+    %% the router so its sessions are told the connection is gone.
+    conn_mons = [] :: [reference()]
 }).
 
 %%====================================================================
@@ -50,6 +55,13 @@
 -spec start_link(non_neg_integer()) -> {ok, pid()} | ignore | {error, term()}.
 start_link(MaxTunnels) ->
     gen_server:start_link(?MODULE, [MaxTunnels], []).
+
+%% @doc Start a router that also monitors `QuicConn', the QUIC
+%% connection the listener accepted, and stops when it goes down.
+-spec start_link(non_neg_integer(), pid()) ->
+    {ok, pid()} | ignore | {error, term()}.
+start_link(MaxTunnels, QuicConn) ->
+    gen_server:start_link(?MODULE, [MaxTunnels, QuicConn], []).
 
 %% @doc Start a session process and register it. The router spawns the
 %% session asynchronously so it stays responsive for datagram routing.
@@ -90,7 +102,11 @@ session_module(_) -> masque_server_session.
 
 init([MaxTunnels]) ->
     process_flag(trap_exit, true),
-    {ok, #state{max_tunnels = MaxTunnels}}.
+    {ok, #state{max_tunnels = MaxTunnels}};
+init([MaxTunnels, QuicConn]) ->
+    process_flag(trap_exit, true),
+    MRef = erlang:monitor(process, QuicConn),
+    {ok, #state{max_tunnels = MaxTunnels, conn_mons = [MRef]}}.
 
 handle_call({start_session, Args}, From, S) ->
     Active = maps:size(S#state.sessions) + maps:size(S#state.pending),
@@ -227,7 +243,22 @@ handle_info({quic_h3, _Conn, {stream_reset, StreamId, ErrorCode}}, S) ->
             error -> ok
         end,
     {noreply, drop_stream(StreamId, S)};
+%% The H3 connection is up: watch it so a crash (no `closed' event)
+%% still ends the router.
+handle_info({quic_h3, Conn, connected}, #state{conn_mons = Mons} = S) ->
+    MRef = erlang:monitor(process, Conn),
+    {noreply, S#state{conn_mons = [MRef | Mons]}};
+handle_info({quic_h3, _Conn, {closed, _Reason}}, S) ->
+    {stop, normal, S};
 handle_info({'DOWN', MRef, process, DownPid, Reason}, S) ->
+    case lists:member(MRef, S#state.conn_mons) of
+        true -> {stop, normal, S};
+        false -> handle_down(MRef, DownPid, Reason, S)
+    end;
+handle_info(_Msg, S) ->
+    {noreply, S}.
+
+handle_down(MRef, DownPid, Reason, S) ->
     case maps:take(MRef, S#state.monitors) of
         {StreamId, Monitors2} ->
             %% Session died
@@ -253,11 +284,7 @@ handle_info({'DOWN', MRef, process, DownPid, Reason}, S) ->
             end;
         error ->
             {noreply, S}
-    end;
-handle_info({quic_h3, _Conn, closed}, S) ->
-    {stop, connection_closed, S};
-handle_info(_Msg, S) ->
-    {noreply, S}.
+    end.
 
 terminate(_Reason, #state{sessions = Sessions, pending = Pending}) ->
     maps:foreach(

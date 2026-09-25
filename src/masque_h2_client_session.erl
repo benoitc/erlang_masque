@@ -146,9 +146,16 @@ connecting({call, From}, shutdown_write, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
 connecting({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
-connecting(info, {h2, _Conn, closed}, Data) ->
+connecting(info, {h2, _Conn, {closed, _Reason}}, Data) ->
     reply_handshake(Data, {error, peer_closed}),
     {stop, peer_closed};
+connecting(
+    info,
+    {h2, _Conn, {goaway, LastId, _Code}},
+    #data{stream_id = StreamId} = Data
+) when is_integer(StreamId), StreamId > LastId ->
+    reply_handshake(Data, {error, goaway}),
+    {stop, goaway};
 connecting(
     info,
     {h2, _Conn, {response, StreamId, Status, Headers}},
@@ -242,9 +249,18 @@ open(
 ) ->
     _ = notify_owner_closed(peer_reset, Data),
     {stop, peer_reset, Data};
-open(info, {h2, _Conn, closed}, Data) ->
+open(info, {h2, _Conn, {closed, _Reason}}, Data) ->
     _ = notify_owner_closed(peer_closed, Data),
     {stop, peer_closed, Data};
+%% RFC 9113 sec 6.8: streams above the GOAWAY last-stream-id were not
+%% processed; lower ids keep running.
+open(
+    info,
+    {h2, _Conn, {goaway, LastId, _Code}},
+    #data{stream_id = StreamId} = Data
+) when StreamId > LastId ->
+    _ = notify_owner_closed(goaway, Data),
+    {stop, goaway, Data};
 open(
     info,
     {'DOWN', Ref, process, _, _},

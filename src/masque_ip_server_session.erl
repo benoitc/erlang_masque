@@ -245,7 +245,7 @@ handle_info(
     Tag =:= quic_h3; Tag =:= h2
 ->
     {stop, peer_reset, S};
-handle_info({h2, _Conn, closed}, S) ->
+handle_info({h2, _Conn, {closed, _Reason}}, S) ->
     {stop, peer_closed, S};
 handle_info(flush_cap_buf, #state{cap_buf = Buf} = S) when Buf =/= <<>> ->
     drain_capsules(Buf, false, S#state{cap_buf = <<>>});

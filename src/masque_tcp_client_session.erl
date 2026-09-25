@@ -137,9 +137,25 @@ connecting({call, From}, shutdown_write, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
 connecting({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
-connecting(info, {h2, _Conn, closed}, Data) ->
+connecting(info, {Tag, _Conn, {closed, _Reason}}, Data) when
+    Tag =:= quic_h3; Tag =:= h2
+->
     reply_handshake(Data, {error, peer_closed}),
     {stop, peer_closed};
+connecting(
+    info,
+    {quic_h3, _Conn, {goaway, Id}},
+    #data{stream_id = StreamId} = Data
+) when is_integer(StreamId), StreamId >= Id ->
+    reply_handshake(Data, {error, goaway}),
+    {stop, goaway};
+connecting(
+    info,
+    {h2, _Conn, {goaway, LastId, _Code}},
+    #data{stream_id = StreamId} = Data
+) when is_integer(StreamId), StreamId > LastId ->
+    reply_handshake(Data, {error, goaway}),
+    {stop, goaway};
 connecting(
     info,
     {Tag, _Conn, {response, StreamId, Status, _Headers}},
@@ -237,9 +253,27 @@ open(
 ->
     _ = notify_owner_closed(peer_reset, Data),
     {stop, peer_reset, Data};
-open(info, {h2, _Conn, closed}, Data) ->
+open(info, {Tag, _Conn, {closed, _Reason}}, Data) when
+    Tag =:= quic_h3; Tag =:= h2
+->
     _ = notify_owner_closed(peer_closed, Data),
     {stop, peer_closed, Data};
+%% GOAWAY: requests the peer did not process (h3: id at or above the
+%% GOAWAY id, h2: id above the last-stream-id) end; others keep running.
+open(
+    info,
+    {quic_h3, _Conn, {goaway, Id}},
+    #data{stream_id = StreamId} = Data
+) when StreamId >= Id ->
+    _ = notify_owner_closed(goaway, Data),
+    {stop, goaway, Data};
+open(
+    info,
+    {h2, _Conn, {goaway, LastId, _Code}},
+    #data{stream_id = StreamId} = Data
+) when StreamId > LastId ->
+    _ = notify_owner_closed(goaway, Data),
+    {stop, goaway, Data};
 open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
 open(

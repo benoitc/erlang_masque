@@ -215,6 +215,15 @@ handle_info(
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
+handle_info(
+    {Tag, _Conn, {stream_reset, StreamId, _ErrorCode}},
+    #state{stream_id = StreamId} = S
+) when
+    Tag =:= quic_h3; Tag =:= h2
+->
+    {stop, peer_reset, S};
+handle_info({h2, _Conn, {closed, _Reason}}, S) ->
+    {stop, peer_closed, S};
 handle_info({'DOWN', _MRef, process, _Pid, _Reason}, S) ->
     {stop, router_gone, S};
 handle_info(Msg, S) ->

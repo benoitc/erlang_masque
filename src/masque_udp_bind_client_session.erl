@@ -234,6 +234,25 @@ connecting(
             reply_handshake(Data, {error, {bad_status, Status}}),
             {stop, {handshake_failed, {bad_status, Status}}}
     end;
+connecting(info, {Tag, _Conn, {closed, _Reason}}, Data) when
+    Tag =:= quic_h3; Tag =:= h2
+->
+    reply_handshake(Data, {error, peer_closed}),
+    {stop, peer_closed, Data};
+connecting(
+    info,
+    {quic_h3, _Conn, {goaway, Id}},
+    #data{stream_id = StreamId} = Data
+) when is_integer(StreamId), StreamId >= Id ->
+    reply_handshake(Data, {error, goaway}),
+    {stop, goaway, Data};
+connecting(
+    info,
+    {h2, _Conn, {goaway, LastId, _Code}},
+    #data{stream_id = StreamId} = Data
+) when is_integer(StreamId), StreamId > LastId ->
+    reply_handshake(Data, {error, goaway}),
+    {stop, goaway, Data};
 connecting(
     info,
     {timeout, TRef, handshake_timeout},
@@ -312,14 +331,28 @@ open(
     end;
 open(
     info,
-    {Tag, _Conn, {reset, StreamId, _Code}},
+    {Tag, _Conn, {stream_reset, StreamId, _Code}},
     #data{stream_id = StreamId}
 ) when
     Tag =:= quic_h3; Tag =:= h2
 ->
     {stop, peer_reset};
-open(info, {Tag, _Conn, closed}, _Data) when Tag =:= h2; Tag =:= quic_h3 ->
+open(info, {Tag, _Conn, {closed, _Reason}}, _Data) when
+    Tag =:= h2; Tag =:= quic_h3
+->
     {stop, peer_closed};
+%% GOAWAY: requests the peer did not process (h3: id at or above the
+%% GOAWAY id, h2: id above the last-stream-id) end; others keep running.
+open(info, {quic_h3, _Conn, {goaway, Id}}, #data{stream_id = StreamId}) when
+    StreamId >= Id
+->
+    {stop, goaway};
+open(
+    info,
+    {h2, _Conn, {goaway, LastId, _Code}},
+    #data{stream_id = StreamId}
+) when StreamId > LastId ->
+    {stop, goaway};
 open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
 open(

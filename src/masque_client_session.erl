@@ -189,6 +189,16 @@ connecting(
             ),
             {stop, {handshake_rejected, Status}}
     end;
+connecting(info, {quic_h3, _Conn, {closed, _Reason}}, Data) ->
+    reply_handshake(Data, {error, peer_closed}),
+    {stop, peer_closed};
+connecting(
+    info,
+    {quic_h3, _Conn, {goaway, Id}},
+    #data{stream_id = StreamId} = Data
+) when is_integer(StreamId), StreamId >= Id ->
+    reply_handshake(Data, {error, goaway}),
+    {stop, goaway};
 connecting(
     info,
     {timeout, TRef, handshake_timeout},
@@ -271,6 +281,18 @@ open(
 ) ->
     _ = notify_owner_closed(peer_reset, Data),
     {stop, peer_reset, Data};
+open(info, {quic_h3, _Conn, {closed, _Reason}}, Data) ->
+    _ = notify_owner_closed(peer_closed, Data),
+    {stop, peer_closed, Data};
+%% RFC 9114 sec 5.2: requests at or above the GOAWAY id were not
+%% processed; lower ids keep running until the peer closes.
+open(
+    info,
+    {quic_h3, _Conn, {goaway, Id}},
+    #data{stream_id = StreamId} = Data
+) when StreamId >= Id ->
+    _ = notify_owner_closed(goaway, Data),
+    {stop, goaway, Data};
 open(
     info,
     {'DOWN', Ref, process, _, _},

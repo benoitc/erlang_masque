@@ -193,6 +193,12 @@ handle_info(
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
+%% Once the stream is claimed, quic_h3 reports resets to us directly.
+handle_info(
+    {quic_h3, _Conn, {stream_reset, StreamId, _ErrorCode}},
+    #state{stream_id = StreamId} = S
+) ->
+    {stop, peer_reset, S};
 handle_info({'DOWN', _MRef, process, _Pid, _Reason}, S) ->
     %% Router died - clean up
     {stop, router_gone, S};

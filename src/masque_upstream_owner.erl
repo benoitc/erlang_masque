@@ -275,23 +275,32 @@ handle_info(
 %% can surface `peer_closed' cleanly, then stop so the registry
 %% evicts this owner.
 handle_info(
-    {h2, _Conn, closed} = Evt,
+    {h2, _Conn, {closed, _Reason}} = Evt,
     #state{transport = h2} = S
 ) ->
     broadcast(Evt, S),
     {stop, normal, S};
 handle_info(
-    {quic_h3, _Conn, closed} = Evt,
+    {quic_h3, _Conn, {closed, _Reason}} = Evt,
     #state{transport = quic_h3} = S
 ) ->
     broadcast(Evt, S),
     {stop, normal, S};
+%% quic_h3 reports GOAWAY to the connection owner only; each session
+%% decides from its own stream id whether it is affected. (h2 already
+%% tells every stream handler.)
+handle_info(
+    {quic_h3, _Conn, {goaway, _Id}} = Evt,
+    #state{transport = quic_h3} = S
+) ->
+    broadcast(Evt, S),
+    {noreply, S};
 %% The monitored conn died without a graceful close - same outcome.
 handle_info(
-    {'DOWN', Ref, process, _Pid, _Reason},
+    {'DOWN', Ref, process, _Pid, Reason},
     #state{conn_mon = Ref} = S
 ) ->
-    broadcast({tagged_closed(S), S#state.conn, closed}, S),
+    broadcast({tagged_closed(S), S#state.conn, {closed, Reason}}, S),
     {stop, normal, S};
 %% A registered session died. Release its slot.
 handle_info({'DOWN', Ref, process, Pid, _Reason}, S) ->

@@ -202,8 +202,8 @@ h3_handlers(Opts0) ->
         name => DrainKey
     },
     MaxTunnels = maps:get(max_tunnels_per_connection, Opts, 0),
-    ConnectionHandler = fun(_ConnPid) ->
-        {ok, Router} = masque_server_connection:start_link(MaxTunnels),
+    ConnectionHandler = fun(ConnPid) ->
+        {ok, Router} = masque_server_connection:start_link(MaxTunnels, ConnPid),
         #{
             owner => Router,
             handler => make_dispatch_fun(Dispatch, Router),
