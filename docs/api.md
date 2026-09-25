@@ -10,7 +10,7 @@ exported from the `masque` module unless noted otherwise.
 -type proxy_uri()     :: binary() | string().
 -type target()        :: {binary() | inet:hostname() | inet:ip_address(),
                           inet:port_number()}.
--type transport()     :: h3 | h2.
+-type transport()     :: h3 | h2 | h1.
 ```
 
 ### connect_opts()
@@ -19,19 +19,20 @@ Options for `connect/3`:
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `protocol` | `udp \| tcp` | `udp` | Tunnel protocol. `udp` opens a CONNECT-UDP tunnel (RFC 9298). `tcp` opens a CONNECT-TCP tunnel. |
+| `protocol` | `udp \| tcp \| ip` | `udp` | Tunnel protocol. `udp` opens a CONNECT-UDP tunnel (RFC 9298), `tcp` a CONNECT-TCP tunnel, `ip` a CONNECT-IP tunnel (RFC 9484). |
 | `transports` | `[transport()]` | `[h3, h2]` | Transport preference. When both are listed, h3 and h2 race with h3 getting a head start. |
 | `prefer_timeout_ms` | `non_neg_integer()` | `250` | Milliseconds h3 gets before h2 starts racing. |
 | `timeout` | `pos_integer()` | `5000` | Handshake timeout in milliseconds. |
-| `verify` | `verify_peer \| verify_none` | `verify_peer` | TLS certificate verification. |
-| `cacerts` | `[der_encoded()]` | system CAs | Custom CA certificates for `verify_peer`. |
+| `verify` | `verify_peer \| verify_none` | `verify_peer` | TLS certificate verification, on every transport. `verify_peer` also checks the hostname and sends SNI. Use `verify_none` or `cacerts` for self-signed proxies. |
+| `cacerts` | `[der_encoded()]` | system CAs | Custom CA certificates for `verify_peer` (honoured on h1, h2 and h3). |
 | `ssl_opts` | `[ssl:tls_client_option()]` | `[]` | Extra TLS options passed to the transport. |
 | `uri_template` | `binary()` | `/.well-known/masque/udp/{target_host}/{target_port}/` | URI template for the CONNECT request. |
-| `capsule_protocol` | `boolean()` | `true` | Whether to validate the `capsule-protocol: ?1` response header. |
+| `capsule_protocol` | `boolean()` | `true` | Whether to validate the `capsule-protocol: ?1` response header. Ignored for `tcp`: CONNECT-TCP never sends the header and rejects a 2xx that carries it. |
 | `owner` | `pid()` | `self()` | Process that receives `{masque_data, ...}` messages. |
 | `mode` | `message \| queue` | `message` | Initial delivery mode. |
+| `rx_queue_limit` | `pos_integer()` | `1000` | Most items buffered in `queue` mode. Datagram sessions drop and count (`rx_dropped` in `info/1`) past it; a TCP session ends with `{error, rx_overflow}`. |
 | `upstream_pool` | `boolean()` | `false` | Opt-in connection pooling. When `true`, h2 / h3 attempts share a pooled transport connection keyed by host / port / transport plus a hash of connect-affecting opts (`verify`, `cacerts`, `ssl_opts`, `alpn`). Each tunnel rides a fresh stream on the shared conn. h1 always bypasses the pool (1-tunnel-per-socket). |
-| `upstream_pool_opts` | `map()` | `#{}` | Tuning forwarded to pooled owners on cold dials. Recognised keys: `idle_timeout_ms` (non-neg integer, default 30000), `max_streams` (positive integer or `dynamic`). |
+| `upstream_pool_opts` | `map()` | `#{}` | Tuning forwarded to pooled owners on cold dials. Recognised keys: `idle_timeout_ms` (non-neg integer, default 30000), `max_streams` (positive integer or `dynamic`), `checkout_timeout_ms` (default 60000; past it `connect/3` returns `{error, timeout}`). |
 | `request_headers` | `[{binary(), binary()}]` | `[]` | Extra headers prepended to the CONNECT (or GET+Upgrade on h1) request. Useful for auth schemes that ride on the handshake (e.g. `Authorization: PrivateToken token=...`). Reserved pseudo-headers (`:method`, `:authority`, `:path`, `:protocol`, `capsule-protocol`) are silently dropped. On h1, CR/LF in either key or value is rejected to prevent request-line injection. |
 
 ### listener_opts()
@@ -73,17 +74,21 @@ Open a MASQUE tunnel through a proxy to the given target.
 naming the endpoint to reach. Returns `{ok, Session}` after the proxy
 responds with 2xx.
 
+On failure it returns `{error, Reason}` instead of exiting. `Reason`
+is the raw cause, for example `{connect, econnrefused}`, a TLS alert,
+`handshake_timeout`, `bad_upgrade_response`, `headers_too_large` or
+`bad_status_line`.
+
 ```erlang
 {ok, Sess} = masque:connect(<<"https://proxy.example:4433">>,
-                            {<<"1.1.1.1">>, 53},
-                            #{verify => verify_none}).
+                            {<<"1.1.1.1">>, 53}).
 ```
 
 For TCP tunnels:
 
 ```erlang
 {ok, Sess} = masque:connect(ProxyURI, {<<"example.com">>, 80},
-                            #{protocol => tcp, verify => verify_none}).
+                            #{protocol => tcp}).
 ```
 
 ### send/2,3
@@ -110,7 +115,10 @@ use only; context 0 is the default).
 ```
 
 Block until data arrives or `Timeout` milliseconds elapse. Requires
-the session to be in `queue` delivery mode.
+the session to be in `queue` delivery mode. After the peer closes,
+`recv/2` still returns the unread data, then `{error, closed}`; a
+closed session keeps its queue for at most 30 s. On a dead session it
+returns `{error, closed}`.
 
 ```erlang
 ok = masque:set_mode(Sess, queue),
@@ -143,7 +151,8 @@ Send an RFC 9297 capsule on the tunnel's request stream. The capsule
 `Type` is a varint-encoded capsule type; `Value` is the capsule body.
 
 The peer receives it as `{masque_capsule, Sess, Type, Value}` in
-message mode.
+message mode. CONNECT-TCP tunnels carry raw bytes only, so
+`send_capsule/3` returns `{error, not_supported}` on them.
 
 ### shutdown_write/1
 
@@ -153,6 +162,9 @@ message mode.
 
 Half-close the write side of a TCP tunnel. Sends END_STREAM and
 prevents further writes. The session stays open for receiving data.
+A half-closed tunnel with no traffic ends after 30 s. On h1 a FIN
+ends the whole tunnel: OTP `ssl` drops the connection on the peer's
+TLS `close_notify`.
 
 Returns:
 - `ok` - FIN sent successfully.
@@ -177,6 +189,8 @@ returns `ok` after a 5-second timeout without blocking indefinitely.
 ```
 
 Return a map describing the session's current state and peers.
+Datagram sessions (UDP, IP, udp-bind) include `rx_dropped`, the
+number of items dropped because the queue was full.
 
 ### version/0
 
@@ -197,7 +211,8 @@ these messages from an active session:
 | --- | --- |
 | `{masque_data, Sess, Data}` | Inbound UDP packet or TCP bytes. |
 | `{masque_capsule, Sess, Type, Value}` | Inbound RFC 9297 capsule. |
-| `{masque_closed, Sess, Reason}` | Session closed (peer reset, timeout, etc.). |
+| `{masque_closed, Sess, Reason}` | Session closed (`peer_reset`, `goaway`, `normal`, ...). |
+| `{masque_closed, Sess, peer_fin}` | CONNECT-TCP: the peer finished sending. The session stays writable until `shutdown_write/1` or `close/1`. |
 
 Monitor the session pid for definitive shutdown notification:
 
@@ -349,7 +364,8 @@ callbacks are optional.
   | {reject, handshake_error(), ExtraHeaders :: [{binary(), binary()}]}.
 ```
 
-Synchronous accept/reject gate. Runs before the 200 response. The
+Synchronous accept/reject gate. Runs before the 200 response. A
+reject reason the library does not know maps to 502. The
 3-tuple form attaches custom response headers to the error (e.g.
 `WWW-Authenticate: PrivateToken ...` for a Privacy Pass
 challenge); caller-supplied headers override the library's defaults
@@ -361,6 +377,9 @@ on key collision.
 ```
 
 Session start. Opens resources (sockets, upstream connections).
+Over h3 the 2xx is sent after `init/2` returns; any output the
+handler produces before that (for example from `handle_info/2`) is
+held and sent after the 2xx, in order.
 
 ```erlang
 -callback handle_packet(binary(), State) ->
@@ -454,6 +473,8 @@ Handler options:
 | `resolver` | `fun(hostname()) -> {ok, ip()} \| {error, _}` | Custom resolver. |
 | `family` | `inet \| inet6 \| auto` | Address family. Default: `auto`. |
 | `socket_opts` | `[gen_udp:option()]` | Extra socket options. |
+| `allow_private` | `boolean()` | Allow non-public targets. Default: `false`. |
+| `active_n` | `pos_integer()` | Datagrams read per `{active, N}` window. Default: `32`. |
 
 ### masque_tcp_proxy_handler
 
@@ -464,6 +485,7 @@ Handler options: same as UDP proxy, plus:
 | Key | Type | Description |
 | --- | --- | --- |
 | `connect_timeout` | `pos_integer()` | TCP connect timeout in ms. Default: `5000`. |
+| `active_n` | `pos_integer()` | Segments read per `{active, N}` window. Default: `16`. The socket is re-armed only after the tunnel write succeeds; a write that fails or stays blocked for 30 s resets the tunnel. |
 
 ### masque_chain_handler
 
@@ -478,6 +500,12 @@ Handler options:
 | `upstream_opts` | `map()` | Options forwarded to `masque:connect/3` for the upstream leg. Set `upstream_pool => true` here to share one pooled connection to the egress across tunnels. |
 | `upstream_timeout` | `pos_integer()` | Upstream connect timeout in ms. Default: `5000`. |
 | `allow` | `fun(target()) -> boolean()` | Policy gate. |
+| `via_token` | `binary()` | This hop's pseudonym in the `via` header. The chain listeners create one per listener; otherwise `masque_chain_handler:node_token/0`. Create your own with `masque_chain_handler:new_token/0`. |
+
+The upstream leg verifies the egress certificate by default; pass
+`verify => verify_none` or `cacerts` in `upstream_opts` for a private
+PKI. A request whose `via` header already carries this hop's token is
+rejected with 508 and Proxy-Status `proxy_loop_detected`.
 
 ---
 
@@ -485,5 +513,6 @@ Handler options:
 
 | Dependency | Version | Role |
 | --- | --- | --- |
-| [erlang_quic](https://github.com/benoitc/erlang_quic) | v1.1.0 | QUIC + HTTP/3 transport |
-| [erlang_h2](https://github.com/benoitc/erlang_h2) | 0.4.0 | HTTP/2 transport |
+| [erlang_quic](https://github.com/benoitc/erlang_quic) | 2.0.1 | QUIC + HTTP/3 transport |
+| [erlang_h2](https://github.com/benoitc/erlang_h2) | 0.12.3 | HTTP/2 transport |
+| [erlang_h1](https://github.com/benoitc/erlang_h1) | 0.9.1 | HTTP/1.1 transport |
