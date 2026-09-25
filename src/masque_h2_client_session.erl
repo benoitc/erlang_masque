@@ -355,12 +355,11 @@ do_connect(#data{pool_owner = PoolOwner} = Data, _Opts) when
         {error, _} = Err -> Err
     end;
 do_connect(Data, Opts) ->
-    SSLOpts = build_ssl_opts(Opts),
+    SSLOpts = masque_tls:client_opts(Data#data.proxy_host, Opts, [<<"h2">>]),
     ConnOpts = #{
         transport => ssl,
         ssl_opts => SSLOpts,
         sync => true,
-        verify => maps:get(verify, Opts, verify_none),
         timeout => maps:get(timeout, Opts, 5000),
         settings => #{enable_connect_protocol => 1}
     },
@@ -405,21 +404,6 @@ verify_h2_peer_settings(Conn) ->
         true -> ok;
         1 -> ok;
         _ -> {error, no_extended_connect}
-    end.
-
-%% `h2:connect/3' merges `verify'/`cacerts' and `ssl_opts' into the
-%% TLS socket options. We build the SNI + ALPN bits here and leave
-%% user-supplied overrides intact.
-build_ssl_opts(Opts) ->
-    Base = [{server_name_indication, host_to_sni(Opts)}],
-    UserOpts = maps:get(ssl_opts, Opts, []),
-    Base ++ UserOpts.
-
-host_to_sni(Opts) ->
-    case maps:get(proxy, Opts) of
-        {H, _} when is_binary(H) -> binary_to_list(H);
-        {H, _} when is_list(H) -> H;
-        _ -> "localhost"
     end.
 
 request_headers(#data{

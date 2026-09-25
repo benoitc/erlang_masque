@@ -273,7 +273,7 @@ pool_fingerprint(Transport, Opts) ->
                     transport => PoolTransport,
                     host => Host,
                     port => Port,
-                    connect_opts => pool_connect_opts(Transport, Opts)
+                    connect_opts => pool_connect_opts(Transport, Host, Opts)
                 },
                 maps:get(upstream_pool_opts, Opts, #{})
             ),
@@ -282,7 +282,7 @@ pool_fingerprint(Transport, Opts) ->
             {error, no_proxy}
     end.
 
-pool_connect_opts(h3, Opts) ->
+pool_connect_opts(h3, _Host, Opts) ->
     Base = maps:with([verify, cacerts], Opts),
     Base#{
         quic_opts => #{
@@ -290,12 +290,10 @@ pool_connect_opts(h3, Opts) ->
             max_datagram_frame_size => 65535
         }
     };
-pool_connect_opts(h2, Opts) ->
-    SSLOpts = maps:get(ssl_opts, Opts, []),
+pool_connect_opts(h2, Host, Opts) ->
     #{
         transport => ssl,
-        ssl_opts => SSLOpts,
-        verify => maps:get(verify, Opts, verify_none),
+        ssl_opts => masque_tls:client_opts(Host, Opts, [<<"h2">>]),
         timeout => maps:get(timeout, Opts, 5000)
     }.
 

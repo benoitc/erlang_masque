@@ -838,15 +838,9 @@ drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->
 %%====================================================================
 
 do_connect(#data{transport = h3} = Data, Opts) ->
-    SSLOpts = [
-        {server_name_indication, binary_to_list(Data#data.proxy_host)}
-        | maps:get(ssl_opts, Opts, [])
-    ],
-    ConnOpts = #{
-        transport => ssl,
-        ssl_opts => SSLOpts,
+    ConnOpts0 = maps:with([verify, cacerts], Opts),
+    ConnOpts = ConnOpts0#{
         sync => true,
-        verify => maps:get(verify, Opts, verify_none),
         timeout => maps:get(timeout, Opts, 5000),
         settings => #{enable_connect_protocol => 1, h3_datagram => 1},
         h3_datagram_enabled => true,
@@ -886,15 +880,11 @@ do_connect(#data{transport = h3} = Data, Opts) ->
             {error, {connect, R}}
     end;
 do_connect(#data{transport = h2} = Data, Opts) ->
-    SSLOpts = [
-        {server_name_indication, binary_to_list(Data#data.proxy_host)}
-        | maps:get(ssl_opts, Opts, [])
-    ],
+    SSLOpts = masque_tls:client_opts(Data#data.proxy_host, Opts, [<<"h2">>]),
     ConnOpts = #{
         transport => ssl,
         ssl_opts => SSLOpts,
         sync => true,
-        verify => maps:get(verify, Opts, verify_none),
         timeout => maps:get(timeout, Opts, 5000),
         settings => #{enable_connect_protocol => 1}
     },

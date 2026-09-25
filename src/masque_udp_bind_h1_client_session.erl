@@ -649,7 +649,7 @@ drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->
 %%====================================================================
 
 do_connect(Data, Opts) ->
-    SslOpts = build_ssl_opts(Opts),
+    SslOpts = masque_tls:client_opts(Data#data.proxy_host, Opts),
     Host = binary_to_list(Data#data.proxy_host),
     Port = Data#data.proxy_port,
     case ssl:connect(Host, Port, SslOpts) of
@@ -671,15 +671,6 @@ do_connect(Data, Opts) ->
         {error, R} ->
             {error, R}
     end.
-
-build_ssl_opts(Opts) ->
-    Defaults = [
-        {verify, verify_none},
-        {active, false},
-        {alpn_advertised_protocols, [<<"http/1.1">>]}
-    ],
-    Custom = maps:get(ssl_opts, Opts, []),
-    lists:keymerge(1, Custom, Defaults).
 
 build_request(Data) ->
     Path = expand_path(Data#data.bind_target),

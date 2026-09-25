@@ -502,15 +502,11 @@ do_connect(#data{transport = h3} = Data, Opts) ->
             {error, {connect, Reason}}
     end;
 do_connect(#data{transport = h2} = Data, Opts) ->
-    SSLOpts = [
-        {server_name_indication, binary_to_list(Data#data.proxy_host)}
-        | maps:get(ssl_opts, Opts, [])
-    ],
+    SSLOpts = masque_tls:client_opts(Data#data.proxy_host, Opts, [<<"h2">>]),
     ConnOpts = #{
         transport => ssl,
         ssl_opts => SSLOpts,
         sync => true,
-        verify => maps:get(verify, Opts, verify_none),
         timeout => maps:get(timeout, Opts, 5000),
         settings => #{enable_connect_protocol => 1}
     },

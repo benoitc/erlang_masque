@@ -1,10 +1,11 @@
-%%% @doc Safe TLS client options for MASQUE's HTTP/1.1 rung.
+%%% @doc Safe TLS client options for MASQUE's TCP-based rungs.
 %%%
-%%% Centralises the TLS options every h1 client session sends to
-%%% `ssl:connect/4'. Defaults match the posture `erlang_h1' uses on
+%%% Centralises the TLS options every h1 and h2 client session sends
+%%% to `ssl:connect/4' (directly or through `h2:connect/3'). Defaults
+%%% match the posture `erlang_h1' uses on
 %%% its own TLS client: verify the peer, trust the system CA store,
 %%% check the hostname against the certificate, and advertise
-%%% `http/1.1' in ALPN. IPv6 literals are not valid SNI values
+%%% `http/1.1' in ALPN (`h2' for the HTTP/2 rung via `client_opts/3'). IPv6 literals are not valid SNI values
 %%% (RFC 6066 section 3), so SNI is omitted when the proxy host is
 %%% an IP literal.
 %%%
@@ -13,7 +14,7 @@
 %%% shorthand is honoured for parity with the h2/h3 sessions.
 -module(masque_tls).
 
--export([client_opts/2]).
+-export([client_opts/2, client_opts/3]).
 
 -export_type([proxy_host/0]).
 
@@ -25,21 +26,29 @@
 %% map. The following opts keys are consumed:
 %%
 %%   `verify'   : `verify_peer | verify_none' (default `verify_peer')
+%%   `cacerts'  : DER trust anchors (default: the system CA store)
 %%   `ssl_opts' : list of extra `ssl:tls_client_option()' merged last
 %%
 %% Everything else in the opts map is ignored. Returns a plain list
 %% ready to pass through to `ssl:connect/4'.
 -spec client_opts(proxy_host(), map()) -> [ssl:tls_client_option()].
 client_opts(Host, Opts) ->
+    client_opts(Host, Opts, [<<"http/1.1">>]).
+
+%% @doc Same as `client_opts/2' with an explicit ALPN list, e.g.
+%% `[<<"h2">>]' for the HTTP/2 rung.
+-spec client_opts(proxy_host(), map(), [binary()]) ->
+    [ssl:tls_client_option()].
+client_opts(Host, Opts, Alpn) ->
     HostBin = to_bin(Host),
     IsIpLiteral = is_ip_literal(HostBin),
     Base =
         [
             {mode, binary},
             {active, false},
-            {alpn_advertised_protocols, [<<"http/1.1">>]},
+            {alpn_advertised_protocols, Alpn},
             {verify, maps:get(verify, Opts, verify_peer)},
-            {cacerts, cacerts()},
+            {cacerts, maps:get(cacerts, Opts, cacerts())},
             {customize_hostname_check, [
                 {match_fun, public_key:pkix_verify_hostname_match_fun(https)}
             ]}

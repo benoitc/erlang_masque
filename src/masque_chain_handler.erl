@@ -35,7 +35,8 @@
 %%%       (e.g. `<<"https://egress:4434">>'). Required.</li>
 %%%   <li>`upstream_opts => map()' - options forwarded to
 %%%       `masque:connect/3' for the upstream leg (verify, transports,
-%%%       timeout, etc.). Default `#{verify => verify_none}'.</li>
+%%%       timeout, etc.). Default `#{}', which verifies the upstream
+%%%       certificate against the system CA store.</li>
 %%%   <li>`allow => fun(target()) -> boolean()' - optional policy
 %%%       gate, same as `masque_udp_proxy_handler'.</li>
 %%% </ul>
@@ -108,7 +109,7 @@ init(
     Opts
 ) ->
     UpstreamURI = maps:get(upstream_proxy, Opts),
-    UpstreamOpts = maps:get(upstream_opts, Opts, #{verify => verify_none}),
+    UpstreamOpts = maps:get(upstream_opts, Opts, #{}),
     Timeout = maps:get(upstream_timeout, Opts, 5000),
     ConnOpts = UpstreamOpts#{
         timeout => Timeout,
@@ -130,7 +131,7 @@ init(
     Opts
 ) ->
     UpstreamURI = maps:get(upstream_proxy, Opts),
-    UpstreamOpts = maps:get(upstream_opts, Opts, #{verify => verify_none}),
+    UpstreamOpts = maps:get(upstream_opts, Opts, #{}),
     Timeout = maps:get(upstream_timeout, Opts, 5000),
     ConnOpts = UpstreamOpts#{
         timeout => Timeout,

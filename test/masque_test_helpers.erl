@@ -11,7 +11,8 @@
     start_masque_server/1,
     stop_masque_server/1,
     h3_client_connect/2,
-    h3_await_response/2
+    h3_await_response/2,
+    decode_key/1
 ]).
 
 -include_lib("common_test/include/ct.hrl").
