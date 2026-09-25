@@ -24,7 +24,7 @@
 -export([send_capsule/3]).
 
 -export([init/1, callback_mode/0, terminate/3, code_change/4]).
--export([connecting/3, open/3, closing/3]).
+-export([connecting/3, open/3, closing/3, closed/3]).
 
 -include("masque.hrl").
 
@@ -41,6 +41,9 @@
     mode :: message | queue,
     rx_buf = queue:new() :: queue:queue(binary()),
     rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
+    %% Bound on `rx_buf' (`rx_queue_limit'); past it the tunnel ends
+    %% with `rx_overflow' rather than dropping bytes.
+    rx_limit = ?MASQUE_DEFAULT_RX_QUEUE_LIMIT :: pos_integer(),
     write_closed = false :: boolean(),
     %% Extra request headers prepended to the CONNECT line.
     extra_headers = [] :: [{binary(), binary()}]
@@ -94,6 +97,7 @@ init({Target, Opts, Owner}) ->
     Data = #data{
         owner = Owner,
         owner_ref = MRef,
+        rx_limit = masque_client_rx:limit(Opts),
         proxy_host = to_bin(ProxyHost),
         proxy_port = ProxyPort,
         target_host = to_bin(TargetHost),
@@ -177,15 +181,17 @@ open({call, From}, {set_owner, NewOwner}, Data) ->
 open({call, From}, stop, Data) ->
     {next_state, closing, Data, [{reply, From, ok}, {next_event, internal, do_close}]};
 open(info, {ssl, Sock, Bytes}, #data{socket = Sock} = Data) ->
-    Data1 = deliver_bytes(Bytes, Data),
-    _ = setopts_active_once(Sock),
-    {keep_state, Data1};
+    case deliver_bytes(Bytes, Data) of
+        {overflow, Data1} ->
+            park_unread(rx_overflow, Data1);
+        Data1 ->
+            _ = setopts_active_once(Sock),
+            {keep_state, Data1}
+    end;
 open(info, {ssl_closed, Sock}, #data{socket = Sock} = Data) ->
-    _ = notify_owner_closed(peer_closed, Data),
-    {stop, peer_closed, Data};
+    end_tunnel(peer_closed, {stop, peer_closed, Data}, Data);
 open(info, {ssl_error, Sock, Reason}, #data{socket = Sock} = Data) ->
-    _ = notify_owner_closed({ssl_error, Reason}, Data),
-    {stop, {ssl_error, Reason}, Data};
+    end_tunnel({ssl_error, Reason}, {stop, {ssl_error, Reason}, Data}, Data);
 open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
 open(
@@ -212,6 +218,15 @@ closing(internal, do_close, #data{socket = Socket} = Data) ->
     {stop, normal, Data};
 closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
+
+%%====================================================================
+%% State: closed (peer ended the tunnel, queue-mode data unread)
+%%====================================================================
+
+closed({call, From}, info, Data) ->
+    {keep_state_and_data, [{reply, From, session_info(Data, closed)}]};
+closed(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
+    masque_client_rx:closed(Type, Event, Buf, Ref, fun(B) -> Data#data{rx_buf = B} end).
 
 terminate(_Reason, _State, #data{socket = undefined} = D) ->
     _ = erlang:demonitor(D#data.owner_ref, [flush]),
@@ -420,7 +435,10 @@ deliver_bytes(
             gen_statem:reply(From, {ok, Bin}),
             Data#data{rx_waiters = Ws2};
         {empty, _} ->
-            Data#data{rx_buf = queue:in(Bin, Buf)}
+            case masque_client_rx:is_full(Buf, Data#data.rx_limit) of
+                false -> Data#data{rx_buf = queue:in(Bin, Buf)};
+                true -> {overflow, Data}
+            end
     end.
 
 handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
@@ -456,6 +474,40 @@ notify_owner_closed(Reason, #data{owner = Owner, mode = message}) ->
     masque_client_owner:send(Owner, {masque_closed, self(), Reason});
 notify_owner_closed(_Reason, _Data) ->
     ok.
+
+%% The peer ended the tunnel. Queue-mode data the owner has not read
+%% yet stays available to `recv/2' (see `masque_client_rx');
+%% otherwise notify the owner and return `Result'.
+end_tunnel(Reason, Result, #data{mode = Mode, rx_buf = Buf} = Data) ->
+    case masque_client_rx:keep_unread(Mode, Buf) of
+        true ->
+            park_unread(closed, Data);
+        false ->
+            _ = notify_owner_closed(Reason, Data),
+            Result
+    end.
+
+%% Close the socket and keep the queue for `recv/2', which returns
+%% it and then `{error, EndReason}'. `rx_overflow': the owner did not
+%% keep up and dropping bytes would corrupt the stream.
+park_unread(EndReason, #data{rx_buf = Buf, socket = Socket} = Data) ->
+    _ =
+        case Socket of
+            undefined ->
+                ok;
+            _ ->
+                try
+                    ssl:close(Socket)
+                catch
+                    _:_ -> ok
+                end
+        end,
+    {next_state, closed,
+        Data#data{
+            socket = undefined,
+            rx_buf = masque_client_rx:close_queue(Buf, EndReason)
+        },
+        masque_client_rx:closed_enter()}.
 
 swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
     _ = erlang:demonitor(OldRef, [flush]),

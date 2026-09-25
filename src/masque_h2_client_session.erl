@@ -13,7 +13,7 @@
 -export([send_capsule/3]).
 
 -export([init/1, callback_mode/0, terminate/3, code_change/4]).
--export([connecting/3, failed/3, open/3, closing/3]).
+-export([connecting/3, failed/3, open/3, closing/3, closed/3]).
 
 -include("masque.hrl").
 
@@ -49,6 +49,9 @@
     mode :: message | queue,
     rx_buf = queue:new() :: queue:queue(binary()),
     rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
+    %% Bound on `rx_buf' (`rx_queue_limit') and datagrams dropped past it.
+    rx_limit = ?MASQUE_DEFAULT_RX_QUEUE_LIMIT :: pos_integer(),
+    rx_dropped = 0 :: non_neg_integer(),
     cap_buf = <<>> :: binary(),
     max_cap :: pos_integer(),
     %% Extra request headers prepended to the CONNECT request.
@@ -107,6 +110,7 @@ init({Target, Opts, Owner}) ->
     Data = #data{
         owner = Owner,
         owner_ref = MRef,
+        rx_limit = masque_client_rx:limit(Opts),
         proxy_host = to_bin(ProxyHost),
         proxy_port = ProxyPort,
         target_host = to_bin(TargetHost),
@@ -258,11 +262,9 @@ open(
     {h2, _Conn, {stream_reset, StreamId, _ErrorCode}},
     #data{stream_id = StreamId} = Data
 ) ->
-    _ = notify_owner_closed(peer_reset, Data),
-    {stop, peer_reset, Data};
+    end_tunnel(peer_reset, {stop, peer_reset, Data}, Data);
 open(info, {h2, _Conn, {closed, _Reason}}, Data) ->
-    _ = notify_owner_closed(peer_closed, Data),
-    {stop, peer_closed, Data};
+    end_tunnel(peer_closed, {stop, peer_closed, Data}, Data);
 %% RFC 9113 sec 6.8: streams above the GOAWAY last-stream-id were not
 %% processed; lower ids keep running.
 open(
@@ -270,8 +272,7 @@ open(
     {h2, _Conn, {goaway, LastId, _Code}},
     #data{stream_id = StreamId} = Data
 ) when StreamId > LastId ->
-    _ = notify_owner_closed(goaway, Data),
-    {stop, goaway, Data};
+    end_tunnel(goaway, {stop, goaway, Data}, Data);
 open(
     info,
     {'DOWN', Ref, process, _, _},
@@ -304,6 +305,15 @@ closing(internal, do_close, #data{conn = Conn, stream_id = StreamId} = Data) ->
     {stop, normal, Data};
 closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
+
+%%====================================================================
+%% State: closed (peer ended the tunnel, queue-mode data unread)
+%%====================================================================
+
+closed({call, From}, info, Data) ->
+    {keep_state_and_data, [{reply, From, session_info(Data, closed)}]};
+closed(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
+    masque_client_rx:closed(Type, Event, Buf, Ref, fun(B) -> Data#data{rx_buf = B} end).
 
 terminate(_Reason, _State, #data{conn = undefined} = D) ->
     cancel_all_waiters(D);
@@ -497,10 +507,13 @@ drain_capsules(Buf, Fin, #data{} = Data) ->
             client_stream_abort(truncated_capsule, Data);
         {more, _} when Fin ->
             %% Clean END_STREAM: the proxy ended the tunnel.
-            _ = notify_owner_closed(peer_fin, Data),
-            {next_state, closing, Data#data{cap_buf = <<>>}, [
-                {next_event, internal, do_close}
-            ]};
+            end_tunnel(
+                peer_fin,
+                {next_state, closing, Data#data{cap_buf = <<>>}, [
+                    {next_event, internal, do_close}
+                ]},
+                Data
+            );
         {more, _} ->
             {keep_state, Data#data{cap_buf = Buf}}
     end.
@@ -541,8 +554,7 @@ client_stream_abort(
                 end),
             ok
     end,
-    _ = notify_owner_closed(Reason, Data),
-    {stop, Reason, Data}.
+    end_tunnel(Reason, {stop, Reason, Data}, Data).
 
 %%====================================================================
 %% Response validation (mirrors the h3 session)
@@ -609,9 +621,9 @@ deliver_packet(
             gen_statem:reply(From, {ok, UdpBytes}),
             Data#data{rx_waiters = Ws2};
         {empty, _} ->
-            case queue:len(Buf) < 1000 of
-                true -> Data#data{rx_buf = queue:in(UdpBytes, Buf)};
-                false -> Data
+            case masque_client_rx:is_full(Buf, Data#data.rx_limit) of
+                false -> Data#data{rx_buf = queue:in(UdpBytes, Buf)};
+                true -> Data#data{rx_dropped = Data#data.rx_dropped + 1}
             end
     end.
 
@@ -637,6 +649,7 @@ reply_handshake(#data{handshake_from = From}, Reply) -> gen_statem:reply(From, R
 
 session_info(
     #data{
+        rx_dropped = Dropped,
         target_host = H,
         target_port = P,
         proxy_host = PH,
@@ -646,6 +659,7 @@ session_info(
 ) ->
     #{
         state => State,
+        rx_dropped => Dropped,
         transport => h2,
         proxy => {PH, PP},
         target => {H, P}
@@ -661,6 +675,24 @@ notify_owner_closed(Reason, #data{owner = Owner, mode = message}) ->
     masque_client_owner:send(Owner, {masque_closed, self(), Reason});
 notify_owner_closed(_Reason, _Data) ->
     ok.
+
+%% The peer ended the tunnel. Queue-mode data the owner has not read
+%% yet stays available to `recv/2' (see `masque_client_rx');
+%% otherwise notify the owner and return `Result'.
+end_tunnel(Reason, Result, #data{mode = Mode, rx_buf = Buf} = Data) ->
+    case masque_client_rx:keep_unread(Mode, Buf) of
+        true ->
+            _ = session_teardown(Data),
+            {next_state, closed,
+                Data#data{
+                    conn = undefined,
+                    rx_buf = masque_client_rx:close_queue(Buf, closed)
+                },
+                masque_client_rx:closed_enter()};
+        false ->
+            _ = notify_owner_closed(Reason, Data),
+            Result
+    end.
 
 swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
     _ = erlang:demonitor(OldRef, [flush]),

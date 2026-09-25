@@ -47,6 +47,13 @@
 %% `max_capsule_size' in `connect_opts' / listener `handler_opts'.
 -define(MASQUE_DEFAULT_MAX_CAPSULE_SIZE, 65536).
 
+%% Default bound on a queue-mode client session's receive queue, in
+%% received items (datagrams, IP packets or TCP chunks). Override per
+%% session with `rx_queue_limit' in `masque:connect/3' opts. Datagram
+%% tunnels drop and count past it; CONNECT-TCP ends the tunnel with
+%% `rx_overflow'.
+-define(MASQUE_DEFAULT_RX_QUEUE_LIMIT, 1000).
+
 %% RFC 9114 §8.1: stream-level error codes we emit.
 -define(MASQUE_H3_MESSAGE_ERROR, 16#10E).
 

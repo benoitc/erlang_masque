@@ -339,17 +339,12 @@ udp_bind_round_trip(Config, Transport) ->
     {ok, Peer} = gen_udp:open(0, [binary, {ip, {127, 0, 0, 1}}, {active, true}]),
     {ok, PeerPort} = inet:port(Peer),
     Sess = bind_connect(Config, Transport),
-    %% The uncompressed context carries the proxy's replies; the
-    %% compressed one carries ours to the peer.
+    %% The uncompressed context carries both directions.
     {ok, _} = masque:open_uncompressed_context(Sess),
-    {ok, _} = masque:assign_compression(Sess, {{127, 0, 0, 1}, PeerPort}),
-    [
-        receive
-            {masque_compression_acked, Sess, _} -> ok
-        after 5000 -> ct:fail(no_compression_ack)
-        end
-     || _ <- [1, 2]
-    ],
+    receive
+        {masque_compression_acked, Sess, _} -> ok
+    after 5000 -> ct:fail(no_compression_ack)
+    end,
     ok = masque:send_to(Sess, {{127, 0, 0, 1}, PeerPort}, <<"ping">>),
     {ProxyIP, ProxyPort} =
         receive

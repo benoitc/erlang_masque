@@ -18,7 +18,7 @@
 -export([send_capsule/3]).
 
 -export([init/1, callback_mode/0, terminate/3, code_change/4]).
--export([connecting/3, failed/3, open/3, closing/3]).
+-export([connecting/3, failed/3, open/3, closing/3, closed/3]).
 
 -include("masque.hrl").
 -include("masque_udp_bind.hrl").
@@ -39,6 +39,9 @@
     mode :: message | queue,
     rx_buf :: queue:queue({inet:ip_address(), inet:port_number(), binary()}),
     rx_waiters :: queue:queue({gen_statem:from(), reference()}),
+    %% Bound on `rx_buf' (`rx_queue_limit') and datagrams dropped past it.
+    rx_limit = ?MASQUE_DEFAULT_RX_QUEUE_LIMIT :: pos_integer(),
+    rx_dropped = 0 :: non_neg_integer(),
     cap_buf = <<>> :: binary(),
     max_cap :: pos_integer(),
     extra_headers = [] :: [{binary(), binary()}],
@@ -104,6 +107,7 @@ init({Target, Opts, Owner}) ->
     Data = #data{
         owner = Owner,
         owner_ref = MRef,
+        rx_limit = masque_client_rx:limit(Opts),
         proxy_host = to_bin(ProxyHost),
         proxy_port = ProxyPort,
         bind_target = Target,
@@ -222,10 +226,10 @@ open(
         true -> {stop, capsule_buffer_overflow};
         false -> drain_capsules(New, Data)
     end;
-open(info, {ssl_closed, Sock}, #data{socket = Sock}) ->
-    {stop, peer_closed};
-open(info, {ssl_error, Sock, Reason}, #data{socket = Sock}) ->
-    {stop, {ssl_error, Reason}};
+open(info, {ssl_closed, Sock}, #data{socket = Sock} = Data) ->
+    end_tunnel({stop, peer_closed}, Data);
+open(info, {ssl_error, Sock, Reason}, #data{socket = Sock} = Data) ->
+    end_tunnel({stop, {ssl_error, Reason}}, Data);
 open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
 open(
@@ -252,6 +256,15 @@ closing(internal, do_close, #data{socket = Socket} = Data) ->
     {stop, normal, Data};
 closing(_, _, Data) ->
     {keep_state, Data}.
+
+%%====================================================================
+%% State: closed (peer ended the tunnel, queue-mode data unread)
+%%====================================================================
+
+closed({call, From}, info, Data) ->
+    {keep_state_and_data, [{reply, From, session_info(Data, closed)}]};
+closed(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
+    masque_client_rx:closed(Type, Event, Buf, Ref, {bind, fun(B) -> Data#data{rx_buf = B} end}).
 
 %% A parked dial error was already returned to `handshake_await'.
 terminate(_Reason, failed, _Data) ->
@@ -319,7 +332,15 @@ handle_send_to({IP, Port}, Bytes, Data) ->
             try_uncompressed_fallback(Tuple, Bytes, Data)
     end.
 
+%% No context for this peer: use our own uncompressed context when it
+%% is installed, else one the proxy opened.
 try_uncompressed_fallback(Tuple, Bytes, Data) ->
+    case find_own_uncompressed(Data#data.own_table) of
+        {ok, _} -> send_uncompressed(Tuple, Bytes, Data);
+        not_found -> try_peer_uncompressed(Tuple, Bytes, Data)
+    end.
+
+try_peer_uncompressed(Tuple, Bytes, Data) ->
     case find_peer_uncompressed(Data#data.peer_table) of
         {ok, Id} ->
             case
@@ -612,6 +633,33 @@ handle_known_context(Ctx, Inner, Data) ->
             Data
     end.
 
+%% The peer ended the tunnel. Queue-mode data the owner has not read
+%% yet stays available to `recv/2' (see `masque_client_rx');
+%% otherwise return `Result'.
+end_tunnel(Result, #data{mode = Mode, rx_buf = Buf, socket = Socket} = Data) ->
+    case masque_client_rx:keep_unread(Mode, Buf) of
+        true ->
+            _ =
+                case Socket of
+                    undefined ->
+                        ok;
+                    _ ->
+                        try
+                            ssl:close(Socket)
+                        catch
+                            _:_ -> ok
+                        end
+                end,
+            {next_state, closed,
+                Data#data{
+                    socket = undefined,
+                    rx_buf = masque_client_rx:close_queue(Buf, closed)
+                },
+                masque_client_rx:closed_enter()};
+        false ->
+            Result
+    end.
+
 deliver_bind_packet(
     Peer,
     Bytes,
@@ -634,7 +682,10 @@ deliver_bind_packet(
             gen_statem:reply(From, {ok, Peer, Bytes}),
             Data#data{rx_waiters = Ws2};
         {empty, _} ->
-            Data#data{rx_buf = queue:in({Peer, Bytes}, Q)}
+            case masque_client_rx:is_full(Q, Data#data.rx_limit) of
+                false -> Data#data{rx_buf = queue:in({Peer, Bytes}, Q)};
+                true -> Data#data{rx_dropped = Data#data.rx_dropped + 1}
+            end
     end.
 
 %%====================================================================
@@ -862,9 +913,10 @@ swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
     ok = masque_client_owner:release(NewOwner),
     Data#data{owner = NewOwner, owner_ref = NewRef}.
 
-session_info(#data{bind_scope = Scope}, State) ->
+session_info(#data{bind_scope = Scope, rx_dropped = Dropped}, State) ->
     #{
         state => State,
+        rx_dropped => Dropped,
         protocol => udp_bind,
         transport => h1,
         bind => Scope
