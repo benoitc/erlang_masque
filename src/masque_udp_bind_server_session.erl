@@ -88,7 +88,10 @@
     %% Monitor on the router (h3 only).
     router_ref :: reference() | undefined,
     max_pending :: non_neg_integer(),
-    start_time :: integer() | undefined
+    start_time :: integer() | undefined,
+    %% h3: handler messages (e.g. peer packets) that arrived before
+    %% finalize, newest first. Replayed once the 2xx is sent.
+    early = [] :: [term()]
 }).
 
 -define(DEFAULT_MAX_PENDING_RESPONSES, 16).
@@ -181,6 +184,7 @@ init(
                     %% h2: no router, finalize now.
                     case finalize(State) of
                         {ok, S2} -> {ok, S2};
+                        {stop, Reason, _} -> {stop, Reason};
                         {error, _} -> {stop, stream_dead}
                     end;
                 _ ->
@@ -190,8 +194,9 @@ init(
             {stop, Reason}
     end.
 
-%% Send the 2xx (with the handler's extra headers), claim the stream
-%% and run the handler's init actions.
+%% Send the 2xx (with the handler's extra headers), claim the stream,
+%% run the handler's init actions, then replay the handler messages
+%% that arrived meanwhile.
 finalize(#state{pending_actions = Actions, resp_headers = Headers} = State) ->
     case send_response(State, 200, base_response_headers() ++ Headers) of
         ok ->
@@ -203,19 +208,26 @@ finalize(#state{pending_actions = Actions, resp_headers = Headers} = State) ->
                             transport => State#state.transport
                         }
                     ),
-                    {ok,
-                        run_init_actions(
-                            Actions,
-                            S2#state{
-                                start_time =
-                                    erlang:monotonic_time(millisecond)
-                            }
-                        )};
-                {error, _} = Err ->
-                    Err
+                    S3 = run_init_actions(
+                        Actions,
+                        S2#state{
+                            start_time = erlang:monotonic_time(millisecond)
+                        }
+                    ),
+                    replay_early(lists:reverse(S3#state.early), S3#state{early = []});
+                {error, _} ->
+                    {error, State}
             end;
-        {error, _} = Err ->
-            Err
+        {error, _} ->
+            {error, State}
+    end.
+
+replay_early([], S) ->
+    {ok, S};
+replay_early([Msg | Rest], S) ->
+    case handle_info(Msg, S) of
+        {noreply, S2} -> replay_early(Rest, S2);
+        {stop, Reason, S2} -> {stop, Reason, S2}
     end.
 
 handle_call(finalize, _From, #state{pending_actions = Actions} = State) when
@@ -223,7 +235,8 @@ handle_call(finalize, _From, #state{pending_actions = Actions} = State) when
 ->
     case finalize(State) of
         {ok, S2} -> {reply, ok, S2};
-        {error, _} = Err -> {reply, Err, State}
+        {stop, Reason, S2} -> {stop, Reason, ok, S2};
+        {error, S2} -> {reply, {error, stream_dead}, S2}
     end;
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
@@ -231,12 +244,20 @@ handle_call(_Req, _From, S) ->
 %% Asynchronous finalize from the router: run the same steps as the
 %% `finalize' call and report back; the session stops if the stream
 %% could not be opened.
-handle_cast({finalize, Router}, S) ->
-    {reply, Result, S2} = handle_call(finalize, undefined, S),
-    Router ! {masque_finalized, S#state.stream_id, self(), Result},
+handle_cast({finalize, Router}, #state{pending_actions = Actions} = S) when
+    Actions =/= undefined
+->
+    Result = finalize(S),
+    Reply =
+        case Result of
+            {error, _} -> {error, stream_dead};
+            _ -> ok
+        end,
+    Router ! {masque_finalized, S#state.stream_id, self(), Reply},
     case Result of
-        ok -> {noreply, S2};
-        _ -> {stop, stream_dead, S2}
+        {ok, S2} -> {noreply, S2};
+        {stop, Reason, S2} -> {stop, Reason, S2};
+        {error, S2} -> {stop, stream_dead, S2}
     end;
 handle_cast(connection_closed, S) ->
     {stop, connection_closed, S};
@@ -285,6 +306,13 @@ handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = 
     {stop, router_gone, S};
 handle_info({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
+handle_info(Msg, #state{pending_actions = Actions, early = Early} = S) when
+    Actions =/= undefined
+->
+    %% Not finalized yet: nothing may be written to the stream before
+    %% the 2xx, so keep the message for `finalize'. The bind socket's
+    %% `{active, N}' window bounds how many pile up.
+    {noreply, S#state{early = [Msg | Early]}};
 handle_info(Msg, S) ->
     %% Hand all other messages (notably {udp, ...} from the bind
     %% handler's gen_udp socket) through the handler's handle_info/2.

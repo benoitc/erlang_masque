@@ -52,7 +52,10 @@
     h2_udp_bind_close_ends_connection/1,
     h3_udp_bind_parked_session_closes_connection/1,
     h2_udp_bind_parked_session_closes_connection/1,
-    h3_tcp_data_before_finalize_is_kept/1
+    h3_tcp_data_before_finalize_is_kept/1,
+    h3_udp_output_before_finalize_is_kept/1,
+    h3_ip_output_before_finalize_is_kept/1,
+    h3_udp_bind_output_before_finalize_is_kept/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -97,7 +100,10 @@ all() ->
         h2_udp_bind_close_ends_connection,
         h3_udp_bind_parked_session_closes_connection,
         h2_udp_bind_parked_session_closes_connection,
-        h3_tcp_data_before_finalize_is_kept
+        h3_tcp_data_before_finalize_is_kept,
+        h3_udp_output_before_finalize_is_kept,
+        h3_ip_output_before_finalize_is_kept,
+        h3_udp_bind_output_before_finalize_is_kept
     ].
 
 init_per_suite(Config) ->
@@ -176,6 +182,17 @@ extra_opts(Case) when
     #{handler => masque_weird_reject_handler};
 extra_opts(h3_tcp_data_before_finalize_is_kept) ->
     #{tcp_handler => masque_report_tcp_handler, handler_opts => #{early_data => <<"early">>}};
+extra_opts(h3_udp_output_before_finalize_is_kept) ->
+    #{handler_opts => #{early_data => <<"early">>}};
+extra_opts(h3_ip_output_before_finalize_is_kept) ->
+    #{handler_opts => #{early_routes => [early_route()], early_packet => early_ip_packet()}};
+extra_opts(h3_udp_bind_output_before_finalize_is_kept) ->
+    B = bind_opts(),
+    HOpts = maps:get(handler_opts, B),
+    B#{
+        bind_handler => masque_crash_bind_handler,
+        handler_opts => HOpts#{early_assign => {{127, 0, 0, 1}, 9}}
+    };
 extra_opts(h2_failed_session_releases_tunnel_slot) ->
     #{handler => masque_stop_init_handler, max_tunnels_per_connection => 1};
 extra_opts(_Case) ->
@@ -648,6 +665,63 @@ h3_tcp_data_before_finalize_is_kept(Config) ->
     <<"then echo">> = recv_tcp(Sess, <<>>),
     ok = masque:close(Sess),
     exit(EchoPid, kill).
+
+%% A datagram the handler emits before the router finalizes the
+%% stream is sent after the 2xx.
+h3_udp_output_before_finalize_is_kept(Config) ->
+    Sess = connect(Config, h3),
+    receive
+        {masque_data, Sess, <<"early">>} -> ok
+    after 5000 -> ct:fail(no_early_datagram)
+    end,
+    ok = masque:close(Sess).
+
+%% A ROUTE_ADVERTISEMENT and an IP packet the handler emits before
+%% the router finalizes the stream reach the client, in order.
+h3_ip_output_before_finalize_is_kept(Config) ->
+    Port = maps:get(port, ?config(h3, Config)),
+    {ok, Sess} = masque:connect(
+        iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+        {'*', '*'},
+        #{protocol => ip, transports => [h3], verify => verify_none}
+    ),
+    Route = early_route(),
+    Pkt = early_ip_packet(),
+    receive
+        {masque_route_advertisement, Sess, [Route]} -> ok
+    after 5000 -> ct:fail(no_early_routes)
+    end,
+    receive
+        {masque_ip_packet, Sess, Pkt} -> ok
+    after 5000 -> ct:fail(no_early_packet)
+    end,
+    ok = masque:close(Sess).
+
+%% A COMPRESSION_ASSIGN the handler emits before the router finalizes
+%% the stream reaches the client.
+h3_udp_bind_output_before_finalize_is_kept(Config) ->
+    Sess = bind_connect(Config, h3),
+    receive
+        {masque_compression_assigned, Sess, _Id, {{127, 0, 0, 1}, 9}} -> ok
+    after 5000 -> ct:fail(no_early_assign)
+    end,
+    ok = masque:close(Sess).
+
+early_route() ->
+    #ip_route{
+        version = 4,
+        start_addr = {192, 0, 2, 0},
+        end_addr = {192, 0, 2, 255},
+        ip_protocol = 0
+    }.
+
+early_ip_packet() ->
+    Udp = <<1000:16, 2000:16, 12:16, 0:16, "ping">>,
+    Len = 20 + byte_size(Udp),
+    Hdr0 = <<16#45, 0, Len:16, 0:16, 0:16, 64, 17, 0:16, 192, 0, 2, 1, 192, 0, 2, 2>>,
+    Sum = masque_ip_packet:checksum(Hdr0),
+    <<Pre:10/binary, 0:16, Post/binary>> = Hdr0,
+    <<Pre/binary, Sum:16, Post/binary, Udp/binary>>.
 
 tcp_send_capsule_not_supported(Config) ->
     {EchoPid, EchoPort} = start_tcp_echo(),

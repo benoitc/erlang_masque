@@ -38,11 +38,11 @@
     cap_buf = <<>> :: binary(),
     max_cap :: pos_integer(),
     pending_actions :: [term()] | undefined,
-    %% Handler actions produced before the 200 is sent and the stream
-    %% is claimed (e.g. an upstream ROUTE_ADVERTISEMENT forwarded by a
-    %% chain handler whose init/2 raced ahead of finalize). Held in
-    %% order and flushed once the stream is open.
-    pending_out = [] :: [term()],
+    %% H3 path: handler messages (e.g. an upstream ROUTE_ADVERTISEMENT
+    %% forwarded by a chain handler, TUN packets) and injected packets
+    %% that arrived before finalize, newest first. Replayed once the
+    %% 2xx is sent.
+    early = [] :: [term()],
     %% Request IDs received from the client (from ADDRESS_REQUEST) but
     %% not yet answered by this server session.
     peer_pending = #{} :: #{pos_integer() => true},
@@ -174,34 +174,45 @@ claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
 %% Calls / casts
 %%====================================================================
 
-handle_call(
-    finalize,
-    _From,
-    #state{pending_actions = Actions, pending_out = Out} = S
-) when
-    Actions =/= undefined
-->
+%% H3 path: send the 2xx, claim the stream, run the handler's init
+%% actions, then replay the messages that arrived meanwhile.
+finalize(#state{pending_actions = Actions} = S) ->
     case send_response(S, 200, response_headers()) of
         ok ->
             case claim_stream(S) of
-                Ok when Ok =:= ok; element(1, Ok) =:= ok ->
-                    %% Stream is now open: run the handler's init actions,
-                    %% then flush any actions buffered before finalize.
-                    {reply, ok,
-                        run_init_actions(
-                            Actions ++ Out,
-                            S#state{
-                                pending_actions = undefined,
-                                pending_out = [],
-                                start_time =
-                                    erlang:monotonic_time(millisecond)
-                            }
-                        )};
                 {error, _} ->
-                    {reply, {error, stream_dead}, S}
+                    {error, S};
+                _ ->
+                    S1 = run_init_actions(
+                        Actions,
+                        S#state{
+                            pending_actions = undefined,
+                            start_time = erlang:monotonic_time(millisecond)
+                        }
+                    ),
+                    replay_early(lists:reverse(S1#state.early), S1#state{early = []})
             end;
         {error, _} ->
-            {reply, {error, stream_dead}, S}
+            {error, S}
+    end.
+
+replay_early([], S) ->
+    {ok, S};
+replay_early([{'$gen_cast', Msg} | Rest], S) ->
+    replay_next(handle_cast(Msg, S), Rest);
+replay_early([Msg | Rest], S) ->
+    replay_next(handle_info(Msg, S), Rest).
+
+replay_next({noreply, S}, Rest) -> replay_early(Rest, S);
+replay_next({stop, Reason, S}, _Rest) -> {stop, Reason, S}.
+
+handle_call(finalize, _From, #state{pending_actions = Actions} = S) when
+    Actions =/= undefined
+->
+    case finalize(S) of
+        {ok, S2} -> {reply, ok, S2};
+        {stop, Reason, S2} -> {stop, Reason, ok, S2};
+        {error, S2} -> {reply, {error, stream_dead}, S2}
     end;
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
@@ -209,15 +220,28 @@ handle_call(_Req, _From, S) ->
 %% Asynchronous finalize from the router: run the same steps as the
 %% `finalize' call and report back; the session stops if the stream
 %% could not be opened.
-handle_cast({finalize, Router}, S) ->
-    {reply, Result, S2} = handle_call(finalize, undefined, S),
-    Router ! {masque_finalized, S#state.stream_id, self(), Result},
+handle_cast({finalize, Router}, #state{pending_actions = Actions} = S) when
+    Actions =/= undefined
+->
+    Result = finalize(S),
+    Reply =
+        case Result of
+            {error, _} -> {error, stream_dead};
+            _ -> ok
+        end,
+    Router ! {masque_finalized, S#state.stream_id, self(), Reply},
     case Result of
-        ok -> {noreply, S2};
-        _ -> {stop, stream_dead, S2}
+        {ok, S2} -> {noreply, S2};
+        {stop, Reason, S2} -> {stop, Reason, S2};
+        {error, S2} -> {stop, stream_dead, S2}
     end;
 handle_cast(connection_closed, S) ->
     {stop, connection_closed, S};
+handle_cast({inject_packet, Pkt} = Msg, #state{pending_actions = Actions, early = Early} = S) when
+    is_binary(Pkt), Actions =/= undefined
+->
+    %% Not finalized yet: hold the packet until the 2xx is sent.
+    {noreply, S#state{early = [{'$gen_cast', Msg} | Early]}};
 handle_cast({inject_packet, Pkt}, S) when is_binary(Pkt) ->
     %% Out-of-band packet injection from a process other than the
     %% session itself (e.g. a TUN device owner). Re-uses the same
@@ -273,6 +297,12 @@ handle_info({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
 handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
     {stop, router_gone, S};
+handle_info(Msg, #state{pending_actions = Actions, early = Early} = S) when
+    Actions =/= undefined
+->
+    %% Not finalized yet: nothing may be written to the stream before
+    %% the 2xx, so keep the message for `finalize'.
+    {noreply, S#state{early = [Msg | Early]}};
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
@@ -532,20 +562,6 @@ exported(Mod, Fun, Arity) ->
     _ = code:ensure_loaded(Mod),
     erlang:function_exported(Mod, Fun, Arity).
 
-%% Before finalize (pending_actions =/= undefined) the 200 has not been
-%% sent and the stream is not claimed, so any outbound capsule would be
-%% dropped. Hold these actions and let finalize flush them in order once
-%% the stream is open.
-apply_actions_noreply(
-    Actions,
-    #state{
-        pending_actions = Pending,
-        pending_out = Out
-    } = State
-) when
-    Pending =/= undefined
-->
-    {noreply, State#state{pending_out = Out ++ Actions}};
 apply_actions_noreply(Actions, State) ->
     case do_actions(Actions, State) of
         {ok, S2} -> {noreply, S2};

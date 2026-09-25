@@ -4,10 +4,13 @@
 %%% `report_to' in the handler opts, so a suite can monitor the
 %%% server-side session process. Packets, capsules and TCP bytes are
 %%% echoed, except capsule type `16#ff00', which closes the session.
+%%% With `early_data => Bin' the session also queues a message, before
+%%% the stream is finalized, that makes the handler send `Bin' as a
+%%% datagram.
 -module(masque_report_handler).
 -behaviour(masque_handler).
 
--export([accept/1, init/2, handle_packet/2, handle_capsule/3, handle_data/2]).
+-export([accept/1, init/2, handle_packet/2, handle_capsule/3, handle_data/2, handle_info/2]).
 
 accept(_Req) ->
     accept.
@@ -15,6 +18,10 @@ accept(_Req) ->
 init(_Req, Opts) ->
     case maps:find(report_to, Opts) of
         {ok, Pid} -> Pid ! {masque_session, self()};
+        error -> ok
+    end,
+    case maps:find(early_data, Opts) of
+        {ok, Bin} -> self() ! {masque_test_early_data, Bin};
         error -> ok
     end,
     {ok, Opts}.
@@ -29,3 +36,8 @@ handle_capsule(Type, Value, State) ->
 
 handle_data(Data, State) ->
     {ok, State, [{send_data, Data}]}.
+
+handle_info({masque_test_early_data, Bin}, State) ->
+    {ok, State, [{send, Bin}]};
+handle_info(_Msg, State) ->
+    {ok, State}.
