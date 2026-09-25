@@ -43,12 +43,15 @@
     | malformed_varint
     | bad_ip_version
     | bad_prefix_length
+    | non_canonical_prefix
     | empty_address_request
     | duplicate_request_id
     | zero_request_id_in_request
     | unordered_routes
     | overlapping_routes
-    | proto_zero_overlap.
+    | route_range_reversed
+    | proto_zero_overlap
+    | {unknown_capsule_type, non_neg_integer()}.
 
 -export_type([
     address_entry/0,
@@ -444,24 +447,35 @@ check_version_zero_overlap(Rs) ->
         fun(#ip_route{ip_protocol = P}) -> P =:= 0 end, Rs
     ),
     case Zeros of
-        [] -> ok;
-        _ -> check_zero_vs_nonzero(Zeros, NonZeros)
+        [] ->
+            ok;
+        _ ->
+            check_zero_vs_nonzero(
+                lists:keysort(#ip_route.start_addr, Zeros),
+                lists:keysort(#ip_route.start_addr, NonZeros)
+            )
     end.
 
+%% Sweep both lists by start address. The protocol-0 ranges are
+%% disjoint (checked above), so once a zero range ends before the
+%% current nonzero range starts it cannot overlap any later one, and
+%% only the first remaining zero range can overlap the current one.
+check_zero_vs_nonzero([], _NonZeros) ->
+    ok;
 check_zero_vs_nonzero(_Zeros, []) ->
     ok;
-check_zero_vs_nonzero(Zeros, [NZ | Rest]) ->
-    case lists:any(fun(Z) -> ranges_overlap(Z, NZ) end, Zeros) of
-        true -> {error, proto_zero_overlap};
-        false -> check_zero_vs_nonzero(Zeros, Rest)
-    end.
-
-ranges_overlap(
-    #ip_route{start_addr = S1, end_addr = E1},
-    #ip_route{start_addr = S2, end_addr = E2}
-) ->
-    %% Inclusive ranges overlap iff max(S) =< min(E).
-    max(S1, S2) =< min(E1, E2).
+check_zero_vs_nonzero(
+    [#ip_route{end_addr = ZE} | Zs],
+    [#ip_route{start_addr = NS} | _] = NonZeros
+) when ZE < NS ->
+    check_zero_vs_nonzero(Zs, NonZeros);
+check_zero_vs_nonzero(
+    [#ip_route{start_addr = ZS} | _] = Zeros,
+    [#ip_route{end_addr = NE} | NZs]
+) when ZS > NE ->
+    check_zero_vs_nonzero(Zeros, NZs);
+check_zero_vs_nonzero(_Zeros, _NonZeros) ->
+    {error, proto_zero_overlap}.
 
 %% RFC 9484 §4.6: ADDRESS_ASSIGN/REQUEST prefixes must be canonical
 %% (host bits zero).

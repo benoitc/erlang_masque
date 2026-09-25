@@ -98,14 +98,53 @@ open_uncompressed_singleton_test() ->
         masque_compression_table:open_uncompressed(T1)
     ).
 
-%% Post-close prohibition (draft-11) is a session-level invariant
-%% across the proxy's peer + own tables, not a single-table rule.
-%% The session enforces it by reading the peer table's
-%% `uncompressed' state and refusing to call `own:open_compressed'
-%% once the client's uncompressed context has been closed. The
-%% session-level test for this lives in the bind compliance suite
-%% under `test/masque_udp_bind_compliance_SUITE.erl' (added in a
-%% later PR).
+%% Post-close prohibition (draft-11): after the client closed its
+%% uncompressed context the proxy opens no new compressed contexts.
+open_compressed_after_uncompressed_close_rejected_test() ->
+    T0 = masque_compression_table:new_own(proxy, #{}),
+    {ok, _, T1} =
+        masque_compression_table:open_compressed(T0, {4, {10, 0, 0, 1}, 1234}),
+    T2 = masque_compression_table:mark_uncompressed_closed(T1),
+    ?assertEqual(
+        {error, uncompressed_closed},
+        masque_compression_table:open_compressed(T2, {4, {10, 0, 0, 2}, 1234})
+    ).
+
+%% Cross-side conflict on the proxy: the client assigns a tuple the
+%% proxy already opened; the proxy's own context is the one to close.
+install_conflict_on_proxy_closes_own_id_test() ->
+    Own0 = masque_compression_table:new_own(proxy, #{}),
+    {ok, #compression_entry{context_id = OwnId}, Own1} =
+        masque_compression_table:open_compressed(Own0, {4, {10, 0, 0, 1}, 1234}),
+    Peer = masque_compression_table:new_peer(proxy, #{}),
+    A = #compression_assign{context_id = 2, ip_version = 4, address = {10, 0, 0, 1}, port = 1234},
+    {ok, {conflict, close_proxy_id, OwnId}, Peer1} =
+        masque_compression_table:install(Peer, A, Own1),
+    ?assertMatch({ok, _}, masque_compression_table:lookup_by_id(Peer1, 2)).
+
+%% Same conflict seen from the client: the proxy's incoming context is
+%% the one to close.
+install_conflict_on_client_names_proxy_id_test() ->
+    Own0 = masque_compression_table:new_own(client, #{}),
+    {ok, _, Own1} =
+        masque_compression_table:open_compressed(Own0, {4, {10, 0, 0, 1}, 1234}),
+    Peer = masque_compression_table:new_peer(client, #{}),
+    A = #compression_assign{context_id = 3, ip_version = 4, address = {10, 0, 0, 1}, port = 1234},
+    ?assertMatch(
+        {ok, {conflict, close_proxy_id, 3}, _},
+        masque_compression_table:install(Peer, A, Own1)
+    ).
+
+install_without_conflict_test() ->
+    Own = masque_compression_table:new_own(proxy, #{}),
+    Peer = masque_compression_table:new_peer(proxy, #{}),
+    A = #compression_assign{context_id = 2, ip_version = 4, address = {10, 0, 0, 1}, port = 1234},
+    ?assertMatch({ok, _}, masque_compression_table:install(Peer, A, Own)).
+
+install_unknown_ip_version_rejected_test() ->
+    Peer = masque_compression_table:new_peer(proxy, #{}),
+    A = #compression_assign{context_id = 2, ip_version = 5, address = undefined, port = undefined},
+    ?assertEqual({error, bad_ip_version}, masque_compression_table:install(Peer, A)).
 
 %%====================================================================
 %% install: parity, duplicates, conflict resolution

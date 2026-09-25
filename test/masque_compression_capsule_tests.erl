@@ -226,3 +226,9 @@ assign_large_context_id_test() ->
             masque_compression_capsule:encode_assign(R)
         )
     ).
+
+decode_body_unknown_type_test() ->
+    ?assertEqual(
+        {error, unknown_capsule_type},
+        masque_compression_capsule:decode_body(16#01, <<1>>)
+    ).

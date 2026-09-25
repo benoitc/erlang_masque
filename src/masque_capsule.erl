@@ -7,13 +7,18 @@
 %%% natively.
 %%%
 %%% RFC 9297 section 3.3 requires unknown capsule types to be
-%%% silently ignored by the receiver, so the default set below is
-%%% intentionally empty - RFC 9298 does not define any mandatory
-%%% capsules. Extension RFCs (compressed datagrams, QUIC-aware
-%%% proxying) can be added here as the library grows.
+%%% silently ignored by the receiver. The known set is the capsules
+%%% this library implements: DATAGRAM (RFC 9297), the CONNECT-IP
+%%% capsules (RFC 9484) and the Connect-UDP-Bind compression capsules.
 -module(masque_capsule).
 
 -export([encode/2, decode/1, known/1]).
+
+-include("masque_ip.hrl").
+-include("masque_udp_bind.hrl").
+
+%% RFC 9297 section 3.5: DATAGRAM capsule.
+-define(CAPSULE_DATAGRAM, 16#00).
 
 -export_type([type/0, value/0]).
 
@@ -37,7 +42,11 @@ decode(Bin) ->
 %% and `false' for extension / unknown types (which must be
 %% silently ignored per RFC 9297 section 3.3).
 -spec known(type()) -> boolean().
-known(_Type) ->
-    %% RFC 9298 defines no mandatory capsule types. Override by editing
-    %% this clause when adding extension support.
-    false.
+known(?CAPSULE_DATAGRAM) -> true;
+known(?MASQUE_CAPSULE_ADDRESS_ASSIGN) -> true;
+known(?MASQUE_CAPSULE_ADDRESS_REQUEST) -> true;
+known(?MASQUE_CAPSULE_ROUTE_ADVERTISEMENT) -> true;
+known(?MASQUE_CAPSULE_COMPRESSION_ASSIGN) -> true;
+known(?MASQUE_CAPSULE_COMPRESSION_ACK) -> true;
+known(?MASQUE_CAPSULE_COMPRESSION_CLOSE) -> true;
+known(_Type) -> false.

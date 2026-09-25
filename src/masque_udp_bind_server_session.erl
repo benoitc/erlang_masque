@@ -88,8 +88,6 @@
     %% Monitor on the router (h3 only).
     router_ref :: reference() | undefined,
     max_pending :: non_neg_integer(),
-    %% Set once the client's uncompressed context has been closed.
-    uncompressed_closed = false :: boolean(),
     start_time :: integer() | undefined
 }).
 
@@ -490,12 +488,26 @@ dispatch_capsule(Type, Value, S) ->
     %% silently drop per RFC 9297.
     dispatch(handle_capsule, [Type, Value], S).
 
-handle_peer_assign(Assign, S) ->
-    case masque_compression_table:install(S#state.peer_table, Assign) of
+handle_peer_assign(Assign, #state{own_table = OT} = S) ->
+    case masque_compression_table:install(S#state.peer_table, Assign, OT) of
         {ok, T2} ->
             ack_peer_assign(
                 Assign#compression_assign.context_id,
                 S#state{peer_table = T2}
+            );
+        {ok, {conflict, close_proxy_id, OwnId}, T2} ->
+            %% The client assigned a tuple we already opened: keep
+            %% theirs, close ours.
+            {ok, OT2} = masque_compression_table:install_close(
+                OT, #compression_close{context_id = OwnId}
+            ),
+            S2 = S#state{peer_table = T2, own_table = OT2},
+            {noreply, S3} = ack_peer_assign(Assign#compression_assign.context_id, S2),
+            send_capsule_bytes(
+                iolist_to_binary(
+                    masque_compression_capsule:encode(#compression_close{context_id = OwnId})
+                ),
+                S3
             );
         {error, _} ->
             reset_and_stop(malformed_capsule, S)
@@ -526,12 +538,15 @@ handle_peer_close(Close, #state{own_table = OT, peer_table = PT} = S) ->
         {error, unknown_context} ->
             Closed = is_uncompressed(PT, Close#compression_close.context_id),
             case masque_compression_table:install_close(PT, Close) of
-                {ok, PT2} ->
+                {ok, PT2} when Closed ->
+                    %% Post-close prohibition: no new compressed
+                    %% contexts from now on.
                     {noreply, S#state{
                         peer_table = PT2,
-                        uncompressed_closed =
-                            S#state.uncompressed_closed orelse Closed
+                        own_table = masque_compression_table:mark_uncompressed_closed(OT)
                     }};
+                {ok, PT2} ->
+                    {noreply, S#state{peer_table = PT2}};
                 {error, _} ->
                     reset_and_stop(malformed_capsule, S)
             end
@@ -717,9 +732,6 @@ send_datagram(Ctx, Inner, #state{transport = h2} = S) ->
 %% Open an own-table mapping for a peer and announce it. Dropped when
 %% `max_pending' assigns already wait for a response, or after the
 %% client closed its uncompressed context (post-close prohibition).
-open_compression(_IP, _Port, #state{uncompressed_closed = true} = S) ->
-    masque_metrics:bind_drop_inc(uncompressed_closed),
-    S;
 open_compression(IP, Port, #state{own_table = OT} = S) ->
     case pending_responses(OT) >= S#state.max_pending of
         true ->
@@ -733,6 +745,9 @@ open_compression(IP, Port, #state{own_table = OT} = S) ->
             of
                 {ok, Entry, OT2} ->
                     send_compression_assign(Entry, S#state{own_table = OT2});
+                {error, uncompressed_closed} ->
+                    masque_metrics:bind_drop_inc(uncompressed_closed),
+                    S;
                 {error, _} ->
                     masque_metrics:bind_drop_inc(other),
                     S
