@@ -326,7 +326,7 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
                 end,
             Req1 = add_peer_info(Conn, Req0),
             Req2 = Req1#{handler_opts => HandlerOpts},
-            case resolve_target(Protocol, Req2, Resolver) of
+            case masque_ip:resolve_target(Protocol, Req2, Resolver) of
                 {ok, Req3} ->
                     case accept_request(HandlerMod, Req3) of
                         accept ->
@@ -355,28 +355,6 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
                     Fun(Conn, StreamId, Method, Path, Headers)
             end
     end.
-
-%% RFC 9484 §4.7.1: hostname targets MUST be resolved before the 2xx
-%% response. The resolved address list is attached to `req()` so the
-%% handler's `accept/1' can apply SSRF policy on the real addresses
-%% and the session's `init/2' gets them ready to emit in the first
-%% ROUTE_ADVERTISEMENT.
-resolve_target(ip, #{ip_target := Target} = Req, Resolver) when
-    is_binary(Target)
-->
-    %% Binary ip_target is a hostname (IPs parse into tuples).
-    case Resolver(Target) of
-        {ok, Addrs} -> {ok, Req#{resolved_addresses => Addrs}};
-        {error, _} -> {error, resolution_failed}
-    end;
-resolve_target(ip, #{ip_target := {_, _, _, _} = A} = Req, _Resolver) ->
-    {ok, Req#{resolved_addresses => [A]}};
-resolve_target(ip, #{ip_target := {_, _, _, _, _, _, _, _} = A} = Req, _Resolver) ->
-    {ok, Req#{resolved_addresses => [A]}};
-resolve_target(ip, Req, _Resolver) ->
-    {ok, Req#{resolved_addresses => []}};
-resolve_target(_, Req, _Resolver) ->
-    {ok, Req}.
 
 spawn_session(Conn, StreamId, undefined, _Proto, _Handler, _HOpts, _Req) ->
     reject(Conn, StreamId, resolution_failed);

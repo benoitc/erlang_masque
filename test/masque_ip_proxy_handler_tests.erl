@@ -386,3 +386,139 @@ terminate_releases_assignments_test() ->
     %% (a release through a no-op registry doesn't bump). The test
     %% does not require the registry to be active.
     ?assert(masque_metrics:ip_released_count() >= Before).
+
+%%====================================================================
+%% Target scoping
+%%====================================================================
+
+accept_req(Target, Resolved, HOpts) ->
+    #{ip_target => Target, resolved_addresses => Resolved, handler_opts => HOpts}.
+
+accept_wildcard_needs_allow_private_test() ->
+    ?assertEqual(
+        {reject, forbidden},
+        masque_ip_proxy_handler:accept(accept_req('*', [], #{}))
+    ),
+    ?assertEqual(
+        accept,
+        masque_ip_proxy_handler:accept(accept_req('*', [], #{allow_private => true}))
+    ).
+
+accept_private_prefix_rejected_test() ->
+    ?assertEqual(
+        {reject, forbidden},
+        masque_ip_proxy_handler:accept(accept_req({4, {10, 0, 0, 0}, 8}, [], #{}))
+    ),
+    ?assertEqual(
+        {reject, forbidden},
+        masque_ip_proxy_handler:accept(accept_req({4, {0, 0, 0, 0}, 0}, [], #{}))
+    ),
+    ?assertEqual(
+        {reject, forbidden},
+        masque_ip_proxy_handler:accept(accept_req({6, {16#FD00, 0, 0, 0, 0, 0, 0, 0}, 8}, [], #{}))
+    ),
+    ?assertEqual(
+        accept,
+        masque_ip_proxy_handler:accept(accept_req({4, {8, 8, 8, 0}, 24}, [], #{}))
+    ).
+
+accept_hostname_checks_resolved_test() ->
+    ?assertEqual(
+        {reject, forbidden},
+        masque_ip_proxy_handler:accept(accept_req(<<"internal">>, [{127, 0, 0, 1}], #{}))
+    ),
+    ?assertEqual(
+        accept,
+        masque_ip_proxy_handler:accept(accept_req(<<"example.com">>, [{93, 184, 216, 34}], #{}))
+    ).
+
+%% forward_fun that reports the packets it sees.
+forward_probe() ->
+    Self = self(),
+    fun(Pkt, St) ->
+        Self ! {forwarded, Pkt},
+        {forward, St}
+    end.
+
+assert_forwarded(Pkt) ->
+    receive
+        {forwarded, Pkt} -> ok
+    after 100 -> ct:fail("packet not forwarded")
+    end.
+
+assert_not_forwarded() ->
+    receive
+        {forwarded, _} -> ct:fail("packet forwarded")
+    after 50 -> ok
+    end.
+
+%% Assign 10.0.0.0/30 through the allocator.
+assigned_state(Req, Opts) ->
+    S0 = init_with(Req, Opts#{
+        address_pool => {4, {10, 0, 0, 0}, 24},
+        min_assignable_prefix => #{4 => 30}
+    }),
+    Reqs = [
+        #ip_prefix_request{
+            request_id = 1,
+            version = 4,
+            address = {0, 0, 0, 0},
+            prefix_len = 30
+        }
+    ],
+    {ok, S1, [{assign, [#ip_assignment{address = {10, 0, 0, 0}, prefix_len = 30}]}]} =
+        masque_ip_proxy_handler:handle_address_request(Reqs, S0),
+    S1.
+
+hostname_off_route_dropped_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    Req = #{
+        ip_target => <<"example.com">>,
+        ip_ipproto => '*',
+        resolved_addresses => [{93, 184, 216, 34}]
+    },
+    S = assigned_state(Req, #{forward_fun => forward_probe()}),
+    Before = masque_metrics:ip_drop_count(scope_target),
+    Off = v4_packet(10, 0, 0, 1, 8, 8, 8, 8, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Off, S),
+    assert_not_forwarded(),
+    ?assertEqual(Before + 1, masque_metrics:ip_drop_count(scope_target)),
+    On = v4_packet(10, 0, 0, 1, 93, 184, 216, 34, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(On, S),
+    assert_forwarded(On).
+
+prefix_target_private_destination_dropped_test() ->
+    drain(),
+    %% 8.0.0.0/5 starts and ends public but covers 10.0.0.0/8.
+    Req = #{ip_target => {4, {8, 0, 0, 0}, 5}, ip_ipproto => '*'},
+    S = assigned_state(Req, #{forward_fun => forward_probe()}),
+    Priv = v4_packet(10, 0, 0, 1, 10, 1, 1, 1, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Priv, S),
+    assert_not_forwarded(),
+    Pub = v4_packet(10, 0, 0, 1, 8, 8, 8, 8, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Pub, S),
+    assert_forwarded(Pub).
+
+unassigned_source_dropped_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    Req = #{ip_target => {8, 8, 8, 8}, ip_ipproto => '*'},
+    S = init_with(Req, #{forward_fun => forward_probe()}),
+    Before = masque_metrics:ip_drop_count(bcp38),
+    Pkt = v4_packet(10, 0, 0, 1, 8, 8, 8, 8, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    assert_not_forwarded(),
+    ?assertEqual(Before + 1, masque_metrics:ip_drop_count(bcp38)).
+
+prefix_assigned_source_passes_test() ->
+    drain(),
+    Req = #{ip_target => {8, 8, 8, 8}, ip_ipproto => '*'},
+    S = assigned_state(Req, #{forward_fun => forward_probe()}),
+    %% 10.0.0.2 is inside the assigned 10.0.0.0/30.
+    In = v4_packet(10, 0, 0, 2, 8, 8, 8, 8, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(In, S),
+    assert_forwarded(In),
+    Out = v4_packet(10, 0, 0, 4, 8, 8, 8, 8, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Out, S),
+    assert_not_forwarded().

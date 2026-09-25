@@ -42,6 +42,8 @@
     pools = [] :: [#ip_route{}],
     %% Already-assigned addresses (tagged with the IP version).
     assigned = [] :: [ip_assignment_tuple()],
+    %% Routes advertised at init. A hostname target is scoped to them.
+    routes = [] :: [#ip_route{}],
     %% Negotiated URI scope: target / ipproto from the request line.
     %% `'*'' on either axis means "any" and skips the per-packet check.
     target = '*' :: masque_uri_ip:ip_target(),
@@ -58,15 +60,35 @@
 
 accept(Req) ->
     Opts = maps:get(handler_opts, Req, #{}),
-    Allow = maps:get(allow_private, Opts, false),
-    Addrs = maps:get(resolved_addresses, Req, []),
-    case
-        Allow orelse Addrs =:= [] orelse
-            lists:all(fun masque_ip:is_public/1, Addrs)
-    of
+    case maps:get(allow_private, Opts, false) orelse target_is_public(Req) of
         true -> accept;
         false -> {reject, forbidden}
     end.
+
+%% `*' can reach anything, so it needs `allow_private'. A prefix must
+%% start and end on public addresses (the data plane also drops
+%% non-public destinations inside it). Hostnames and literals are
+%% checked on their resolved addresses.
+target_is_public(Req) ->
+    case maps:get(ip_target, Req, '*') of
+        '*' ->
+            false;
+        {V, Net, Pfx} when V =:= 4; V =:= 6 ->
+            {First, Last} = prefix_bounds(V, Net, Pfx),
+            masque_ip:is_public(First) andalso masque_ip:is_public(Last);
+        {_, _, _, _} = A ->
+            masque_ip:is_public(A);
+        {_, _, _, _, _, _, _, _} = A ->
+            masque_ip:is_public(A);
+        _Host ->
+            lists:all(
+                fun masque_ip:is_public/1,
+                maps:get(resolved_addresses, Req, [])
+            )
+    end.
+
+prefix_bounds(4, Net, Pfx) -> prefix_range_v4(Net, Pfx);
+prefix_bounds(6, Net, Pfx) -> prefix_range_v6(Net, Pfx).
 
 %%====================================================================
 %% init — publish the initial ROUTE_ADVERTISEMENT
@@ -84,6 +106,7 @@ init(Req, Opts) ->
         opts = Opts,
         resolved = Resolved,
         pools = Pools,
+        routes = Routes,
         target = Target,
         ipproto = IPProto
     },
@@ -380,16 +403,35 @@ handle_ip_packet(Packet, #state{opts = Opts} = S) ->
 %% filtering or fall outside the negotiated `target' / `ipproto'
 %% scope. Returns the first failing axis so the drop counter and the
 %% lifecycle hook can attribute the cause.
-accept_inbound(Packet, #state{target = Target, ipproto = IPProto} = S) ->
+accept_inbound(
+    Packet,
+    #state{target = Target, ipproto = IPProto, routes = Routes} = S
+) ->
     case src_filter_passes(Packet, S) of
         false ->
             {drop, bcp38};
         true ->
-            case masque_ip_packet:scope_check(Packet, Target, IPProto) of
-                ok -> ok;
+            case masque_ip_packet:scope_check(Packet, Target, IPProto, Routes) of
+                ok -> dst_filter(Packet, S);
                 {error, Reason} -> {drop, Reason}
             end
     end.
+
+%% A prefix target may cover private space the accept/1 bounds check
+%% cannot see; drop non-public destinations unless `allow_private'.
+dst_filter(Packet, #state{target = {V, _, _}, opts = Opts}) when V =:= 4; V =:= 6 ->
+    case maps:get(allow_private, Opts, false) of
+        true ->
+            ok;
+        false ->
+            {ok, _, Dst} = masque_ip_packet:destination(Packet),
+            case masque_ip:is_public(Dst) of
+                true -> ok;
+                false -> {drop, scope_target}
+            end
+    end;
+dst_filter(_Packet, _S) ->
+    ok.
 
 forward(Packet, #state{opts = Opts} = S) ->
     case maps:find(forward_fun, Opts) of
@@ -468,43 +510,29 @@ invoke_lifecycle(_Carrier, Event, Detail, Opts) ->
     end.
 
 %% BCP-38-style source check: reject packets whose source address
-%% doesn't match one the proxy actually assigned to this client.
-%% (`allow_private' skips the check, matching the accept/1 gate.)
+%% is not inside a prefix the proxy assigned to this client. With
+%% nothing assigned, only `allow_private' lets packets through.
 src_filter_passes(_Packet, #state{opts = Opts, assigned = []}) ->
-    maps:get(allow_private, Opts, true);
-src_filter_passes(<<4:4, _/bitstring>> = Packet, #state{assigned = Assigned}) ->
-    case Packet of
-        <<_:12/binary, SA:8, SB:8, SC:8, SD:8, _/binary>> ->
-            lists:any(
-                fun
-                    ({4, {A, B, C, D}, _}) ->
-                        {A, B, C, D} =:= {SA, SB, SC, SD};
-                    (_) ->
-                        false
-                end,
-                Assigned
-            );
-        _ ->
-            false
-    end;
-src_filter_passes(<<6:4, _/bitstring>> = Packet, #state{assigned = Assigned}) ->
-    case Packet of
-        <<_:8/binary, SA:16, SB:16, SC:16, SD:16, SE:16, SF:16, SG:16, SH:16, _/binary>> ->
-            lists:any(
-                fun
-                    ({6, {A, B, C, D, E, F, G, H}, _}) ->
-                        {A, B, C, D, E, F, G, H} =:=
-                            {SA, SB, SC, SD, SE, SF, SG, SH};
-                    (_) ->
-                        false
-                end,
-                Assigned
-            );
-        _ ->
-            false
-    end;
+    maps:get(allow_private, Opts, false);
+src_filter_passes(<<4:4, _:92, Src:32, _/bitstring>>, #state{assigned = Assigned}) ->
+    in_assigned(4, Src, Assigned);
+src_filter_passes(<<6:4, _:60, Src:128, _/bitstring>>, #state{assigned = Assigned}) ->
+    in_assigned(6, Src, Assigned);
 src_filter_passes(_, _) ->
     false.
+
+in_assigned(V, Src, Assigned) ->
+    Max = max_prefix(V),
+    lists:any(
+        fun
+            ({V0, A, Pfx}) when V0 =:= V ->
+                Shift = Max - Pfx,
+                (Src bsr Shift) =:= (addr_to_int(V, A) bsr Shift);
+            (_) ->
+                false
+        end,
+        Assigned
+    ).
 
 %%====================================================================
 %% Peer-initiated control-plane (bidirectional per §8.2)

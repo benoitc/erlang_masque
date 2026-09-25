@@ -239,7 +239,7 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
                     udp_bind -> BindHandler
                 end,
             Req1 = Req0#{handler_opts => HandlerOpts},
-            case resolve_target(Protocol, Req1, Resolver) of
+            case masque_ip:resolve_target(Protocol, Req1, Resolver) of
                 {ok, Req} ->
                     MaxT = maps:get(max_tunnels, Dispatch, 0),
                     case accept_request(HandlerMod, Req) of
@@ -292,23 +292,6 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
                     Fun(Conn, StreamId, Method, Path, Headers)
             end
     end.
-
-%% RFC 9484 §4.7.1 — hostname targets resolved before accept/1
-resolve_target(ip, #{ip_target := Target} = Req, Resolver) when
-    is_binary(Target)
-->
-    case Resolver(Target) of
-        {ok, Addrs} -> {ok, Req#{resolved_addresses => Addrs}};
-        {error, _} -> {error, resolution_failed}
-    end;
-resolve_target(ip, #{ip_target := {_, _, _, _} = A} = Req, _Resolver) ->
-    {ok, Req#{resolved_addresses => [A]}};
-resolve_target(ip, #{ip_target := {_, _, _, _, _, _, _, _} = A} = Req, _Resolver) ->
-    {ok, Req#{resolved_addresses => [A]}};
-resolve_target(ip, Req, _Resolver) ->
-    {ok, Req#{resolved_addresses => []}};
-resolve_target(_, Req, _Resolver) ->
-    {ok, Req}.
 
 spawn_session(Conn, StreamId, Protocol, Handler, HOpts, Req) ->
     Args = #{

@@ -208,21 +208,27 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
                     tcp -> TcpHandler;
                     udp_bind -> BindHandler
                 end,
-            Req = Req0#{handler_opts => HandlerOpts},
-            case accept_request(HandlerMod, Req) of
-                accept ->
-                    spawn_session(
-                        Conn,
-                        StreamId,
-                        Protocol,
-                        HandlerMod,
-                        HandlerOpts,
-                        Req
-                    );
-                {reject, Reason} ->
-                    reject(Conn, StreamId, Reason);
-                {reject, Reason, Extra} when is_list(Extra) ->
-                    reject(Conn, StreamId, Reason, Extra)
+            Req1 = Req0#{handler_opts => HandlerOpts},
+            Resolver = maps:get(resolver, Dispatch, fun default_resolver/1),
+            case masque_ip:resolve_target(Protocol, Req1, Resolver) of
+                {ok, Req} ->
+                    case accept_request(HandlerMod, Req) of
+                        accept ->
+                            spawn_session(
+                                Conn,
+                                StreamId,
+                                Protocol,
+                                HandlerMod,
+                                HandlerOpts,
+                                Req
+                            );
+                        {reject, Reason} ->
+                            reject(Conn, StreamId, Reason);
+                        {reject, Reason, Extra} when is_list(Extra) ->
+                            reject(Conn, StreamId, Reason, Extra)
+                    end;
+                {error, Reason} ->
+                    reject(Conn, StreamId, Reason)
             end;
         {error, Reason} ->
             reject(Conn, StreamId, Reason)

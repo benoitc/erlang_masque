@@ -90,6 +90,7 @@ init_per_testcase(Case, Config) ->
         key => maps:get(key, Ctx),
         ip_handler => EgressHandler,
         handler_opts => #{
+            allow_private => true,
             address_pool => #ip_route{
                 version = 4,
                 start_addr = {10, 77, 0, 1},

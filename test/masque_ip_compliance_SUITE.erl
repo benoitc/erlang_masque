@@ -117,6 +117,8 @@ case_opts(_, Ctx) ->
 base_opts(Ctx) ->
     #{
         port => 0,
+        %% Tests tunnel to `*' and private 10/8 and 127/8 addresses.
+        allow_private => true,
         cert => maps:get(cert, Ctx),
         key => maps:get(key, Ctx)
     }.

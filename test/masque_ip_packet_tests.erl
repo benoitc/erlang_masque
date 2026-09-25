@@ -1,6 +1,7 @@
 -module(masque_ip_packet_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include("masque_ip.hrl").
 
 %%====================================================================
 %% destination/1
@@ -144,6 +145,27 @@ scope_passes_v6_with_hbh_test() ->
         masque_ip_packet:scope_passes(
             Pkt, {16#2001, 16#DB8, 0, 0, 0, 0, 0, 1}, 17
         )
+    ).
+
+%% Hostname targets are scoped to the advertised routes.
+scope_check_hostname_test() ->
+    Pkt = ipv4_packet(17, {10, 0, 0, 1}, {93, 184, 216, 34}, <<>>),
+    Route = #ip_route{
+        version = 4,
+        start_addr = {93, 184, 216, 34},
+        end_addr = {93, 184, 216, 34},
+        ip_protocol = 0
+    },
+    ?assertEqual(ok, masque_ip_packet:scope_check(Pkt, <<"example.com">>, '*', [Route])),
+    Off = ipv4_packet(17, {10, 0, 0, 1}, {93, 184, 216, 35}, <<>>),
+    ?assertEqual(
+        {error, scope_target},
+        masque_ip_packet:scope_check(Off, <<"example.com">>, '*', [Route])
+    ),
+    %% Without routes a hostname target matches nothing.
+    ?assertEqual(
+        {error, scope_target},
+        masque_ip_packet:scope_check(Pkt, <<"example.com">>, '*')
     ).
 
 %%====================================================================

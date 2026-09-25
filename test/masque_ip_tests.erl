@@ -111,3 +111,50 @@ teredo_test() ->
 %% IPv6 discard
 discard_test() ->
     ?assertNot(masque_ip:is_public({16#100, 0, 0, 0, 0, 0, 0, 1})).
+
+%% IPv6 ranges that embed or stand for non-global space
+ipv4_compatible_test() ->
+    ?assertNot(masque_ip:is_public({0, 0, 0, 0, 0, 0, 16#7F00, 1})),
+    ?assertNot(masque_ip:is_public({0, 0, 0, 0, 0, 0, 16#0A00, 1})).
+
+six_to_four_test() ->
+    ?assertNot(masque_ip:is_public({16#2002, 16#7F00, 1, 0, 0, 0, 0, 1})).
+
+nat64_local_use_test() ->
+    ?assertNot(masque_ip:is_public({16#64, 16#FF9B, 1, 0, 0, 0, 0, 1})).
+
+site_local_test() ->
+    ?assertNot(masque_ip:is_public({16#FEC0, 0, 0, 0, 0, 0, 0, 1})),
+    ?assertNot(masque_ip:is_public({16#FEFF, 0, 0, 0, 0, 0, 0, 1})).
+
+doc_3fff_test() ->
+    ?assertNot(masque_ip:is_public({16#3FFF, 0, 0, 0, 0, 0, 0, 1})),
+    ?assertNot(masque_ip:is_public({16#3FFF, 16#0FFF, 0, 0, 0, 0, 0, 1})),
+    ?assert(masque_ip:is_public({16#3FFF, 16#1000, 0, 0, 0, 0, 0, 1})).
+
+srv6_sid_test() ->
+    ?assertNot(masque_ip:is_public({16#5F00, 0, 0, 0, 0, 0, 0, 1})).
+
+%% resolve_target/3 is shared by the h3, h2 and h1 listeners.
+resolve_target_test() ->
+    Resolver = fun
+        (<<"ok.example">>) -> {ok, [{8, 8, 8, 8}]};
+        (_) -> {error, nxdomain}
+    end,
+    ?assertEqual(
+        {ok, #{ip_target => <<"ok.example">>, resolved_addresses => [{8, 8, 8, 8}]}},
+        masque_ip:resolve_target(ip, #{ip_target => <<"ok.example">>}, Resolver)
+    ),
+    ?assertEqual(
+        {error, resolution_failed},
+        masque_ip:resolve_target(ip, #{ip_target => <<"bad.example">>}, Resolver)
+    ),
+    ?assertEqual(
+        {ok, #{ip_target => {1, 2, 3, 4}, resolved_addresses => [{1, 2, 3, 4}]}},
+        masque_ip:resolve_target(ip, #{ip_target => {1, 2, 3, 4}}, Resolver)
+    ),
+    ?assertEqual(
+        {ok, #{ip_target => '*', resolved_addresses => []}},
+        masque_ip:resolve_target(ip, #{ip_target => '*'}, Resolver)
+    ),
+    ?assertEqual({ok, #{}}, masque_ip:resolve_target(udp, #{}, Resolver)).

@@ -16,8 +16,11 @@
     destination/1,
     upper_protocol/1,
     scope_passes/3,
-    scope_check/3
+    scope_check/3,
+    scope_check/4
 ]).
+
+-include("masque_ip.hrl").
 
 -type version() :: 4 | 6.
 -type address() :: inet:ip4_address() | inet:ip6_address().
@@ -67,7 +70,8 @@ scope_passes(Packet, Target, IPProto) ->
     end.
 
 %% @doc Reasonful variant of `scope_passes/3' for telemetry. Returns
-%% the first failing axis instead of a boolean.
+%% the first failing axis instead of a boolean. A hostname target has
+%% no routes here and never matches; use `scope_check/4'.
 -spec scope_check(
     binary(),
     masque_uri_ip:ip_target(),
@@ -75,9 +79,22 @@ scope_passes(Packet, Target, IPProto) ->
 ) ->
     ok | {error, malformed | scope_target | scope_ipproto}.
 scope_check(Packet, Target, IPProto) ->
+    scope_check(Packet, Target, IPProto, []).
+
+%% @doc Like `scope_check/3', but a hostname target matches when the
+%% destination falls inside one of `Routes' (the routes advertised for
+%% the resolved addresses).
+-spec scope_check(
+    binary(),
+    masque_uri_ip:ip_target(),
+    masque_uri_ip:ip_ipproto(),
+    [#ip_route{}]
+) ->
+    ok | {error, malformed | scope_target | scope_ipproto}.
+scope_check(Packet, Target, IPProto, Routes) ->
     case destination(Packet) of
         {ok, V, Dst} ->
-            case target_matches(V, Dst, Target) of
+            case target_matches(V, Dst, Target, Routes) of
                 true ->
                     case ipproto_matches(Packet, IPProto) of
                         true -> ok;
@@ -94,23 +111,34 @@ scope_check(Packet, Target, IPProto) ->
 %% Internal
 %%====================================================================
 
-target_matches(_V, _Dst, '*') ->
+target_matches(_V, _Dst, '*', _Routes) ->
     true;
-target_matches(4, Dst, {_, _, _, _} = Want) ->
+target_matches(4, Dst, {_, _, _, _} = Want, _Routes) ->
     Dst =:= Want;
-target_matches(6, Dst, {_, _, _, _, _, _, _, _} = Want) ->
+target_matches(6, Dst, {_, _, _, _, _, _, _, _} = Want, _Routes) ->
     Dst =:= Want;
-target_matches(4, Dst, {4, Net, Pfx}) ->
+target_matches(4, Dst, {4, Net, Pfx}, _Routes) ->
     in_v4_prefix(Dst, Net, Pfx);
-target_matches(6, Dst, {6, Net, Pfx}) ->
+target_matches(6, Dst, {6, Net, Pfx}, _Routes) ->
     in_v6_prefix(Dst, Net, Pfx);
-target_matches(_V, _Dst, Bin) when is_binary(Bin) ->
+target_matches(V, Dst, Bin, Routes) when is_binary(Bin) ->
     %% Hostname target: resolution happens at handshake time and the
-    %% resolved addresses become routes, so packets are scoped via
-    %% the route table rather than here.
-    true;
-target_matches(_, _, _) ->
+    %% resolved addresses become routes, so the destination must fall
+    %% inside one of them.
+    in_routes(V, Dst, Routes);
+target_matches(_, _, _, _) ->
     false.
+
+in_routes(V, Dst, Routes) ->
+    lists:any(
+        fun
+            (#ip_route{version = RV, start_addr = S, end_addr = E}) when RV =:= V ->
+                S =< Dst andalso Dst =< E;
+            (_) ->
+                false
+        end,
+        Routes
+    ).
 
 in_v4_prefix({A, B, C, D}, {NA, NB, NC, ND}, Pfx) when Pfx =< 32 ->
     Mask = bnot ((1 bsl (32 - Pfx)) - 1) band 16#FFFFFFFF,

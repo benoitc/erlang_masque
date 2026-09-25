@@ -6,7 +6,7 @@
 %%% resolution to reject tunnels targeting internal networks.
 -module(masque_ip).
 
--export([is_public/1, reject_requests/1, inject_packet/2]).
+-export([is_public/1, reject_requests/1, inject_packet/2, resolve_target/3]).
 
 -include("masque_ip.hrl").
 
@@ -44,6 +44,34 @@ inject_packet(SessionPid, Packet) when
     is_binary(Packet)
 ->
     gen_server:cast(SessionPid, {inject_packet, Packet}).
+
+%% @doc Attach `resolved_addresses' to a CONNECT-IP request.
+%%
+%% RFC 9484 sec 4.7.1: hostname targets MUST be resolved before the
+%% 2xx response. The resolved address list is attached to the request
+%% so the handler's `accept/1' can apply SSRF policy on the real
+%% addresses and `init/2' can advertise them as routes. Literal IP
+%% targets resolve to themselves; prefix and `*' targets get an empty
+%% list. Other protocols pass through unchanged. Shared by the h3, h2
+%% and h1 listeners.
+-spec resolve_target(atom(), map(), fun((binary()) -> {ok, [inet:ip_address()]} | {error, term()})) ->
+    {ok, map()} | {error, resolution_failed}.
+resolve_target(ip, #{ip_target := Target} = Req, Resolver) when
+    is_binary(Target)
+->
+    %% Binary ip_target is a hostname (IPs parse into tuples).
+    case Resolver(Target) of
+        {ok, Addrs} -> {ok, Req#{resolved_addresses => Addrs}};
+        {error, _} -> {error, resolution_failed}
+    end;
+resolve_target(ip, #{ip_target := {_, _, _, _} = A} = Req, _Resolver) ->
+    {ok, Req#{resolved_addresses => [A]}};
+resolve_target(ip, #{ip_target := {_, _, _, _, _, _, _, _} = A} = Req, _Resolver) ->
+    {ok, Req#{resolved_addresses => [A]}};
+resolve_target(ip, Req, _Resolver) ->
+    {ok, Req#{resolved_addresses => []}};
+resolve_target(_, Req, _Resolver) ->
+    {ok, Req}.
 
 -spec is_public(inet:ip_address()) -> boolean().
 
@@ -99,10 +127,13 @@ is_public({0, 0, 0, 0, 0, 0, 0, 0}) ->
 %% ::1 loopback
 is_public({0, 0, 0, 0, 0, 0, 0, 1}) ->
     false;
+%% ::/96 IPv4-compatible (deprecated)
+is_public({0, 0, 0, 0, 0, 0, _, _}) ->
+    false;
 %% ::ffff:0:0/96 mapped v4
 is_public({0, 0, 0, 0, 0, 16#FFFF, _, _}) ->
     false;
-%% 64:ff9b::/96 NAT64
+%% 64:ff9b::/96 NAT64 and 64:ff9b:1::/48 local-use NAT64
 is_public({16#64, 16#FF9B, _, _, _, _, _, _}) ->
     false;
 %% discard 100::/64
@@ -114,6 +145,14 @@ is_public({16#2001, 0, _, _, _, _, _, _}) ->
 %% documentation
 is_public({16#2001, 16#DB8, _, _, _, _, _, _}) ->
     false;
+%% 6to4 2002::/16
+is_public({16#2002, _, _, _, _, _, _, _}) ->
+    false;
+%% documentation 3fff::/20
+is_public({16#3FFF, B, _, _, _, _, _, _}) when B =< 16#0FFF -> false;
+%% SRv6 SIDs 5f00::/16
+is_public({16#5F00, _, _, _, _, _, _, _}) ->
+    false;
 is_public({A, _, _, _, _, _, _, _}) when
     A >= 16#FC00,
     %% ULA fc00::/7
@@ -122,8 +161,8 @@ is_public({A, _, _, _, _, _, _, _}) when
     false;
 is_public({A, _, _, _, _, _, _, _}) when
     A >= 16#FE80,
-    %% link-local fe80::/10
-    A =< 16#FEBF
+    %% link-local fe80::/10 and site-local fec0::/10
+    A =< 16#FEFF
 ->
     false;
 %% multicast ff00::/8
