@@ -253,3 +253,50 @@ cleanup(Pid) ->
     %% leak between tests.
     _ = exit(Pid, shutdown),
     ok.
+
+%%====================================================================
+%% Loop detection
+%%====================================================================
+
+loop_req(Headers) ->
+    #{
+        method => <<"CONNECT">>,
+        path => <<"/">>,
+        authority => <<"proxy">>,
+        scheme => <<"https">>,
+        protocol => udp,
+        target_host => <<"192.0.2.1">>,
+        target_port => 53,
+        headers => Headers
+    }.
+
+accept_without_via_test() ->
+    ?assertEqual(accept, ?M:accept(loop_req([]))).
+
+accept_foreign_via_test() ->
+    Headers = [{<<"via">>, <<"1.1 other-proxy, 2 edge (comment)">>}],
+    ?assertEqual(accept, ?M:accept(loop_req(Headers))).
+
+reject_own_via_test() ->
+    Own = <<"1.1 ", (?M:node_token())/binary>>,
+    Headers = [{<<"via">>, <<"1.1 other-proxy, ", Own/binary>>}],
+    ?assertEqual({reject, loop_detected}, ?M:accept(loop_req(Headers))).
+
+reject_own_via_any_case_test() ->
+    Headers = [{<<"Via">>, <<"3 ", (?M:node_token())/binary>>}],
+    ?assertEqual({reject, loop_detected}, ?M:accept(loop_req(Headers))).
+
+node_token_is_stable_test() ->
+    ?assertEqual(?M:node_token(), ?M:node_token()),
+    ?assertEqual(?M:node_token(), ?M:init_node_token()).
+
+listener_token_scopes_loop_test() ->
+    Token = ?M:new_token(),
+    Req = (loop_req([{<<"via">>, <<"1.1 ", Token/binary>>}]))#{
+        handler_opts => #{via_token => Token}
+    },
+    ?assertEqual({reject, loop_detected}, ?M:accept(Req)),
+    Other = (loop_req([{<<"via">>, <<"1.1 ", (?M:new_token())/binary>>}]))#{
+        handler_opts => #{via_token => Token}
+    },
+    ?assertEqual(accept, ?M:accept(Other)).

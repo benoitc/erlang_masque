@@ -40,6 +40,16 @@
 %%%   <li>`allow => fun(target()) -> boolean()' - optional policy
 %%%       gate, same as `masque_udp_proxy_handler'.</li>
 %%% </ul>
+%%%
+%%% Loop detection: every upstream request carries a `via' header
+%%% (RFC 9110 section 7.6.3) listing the hops seen so far plus this
+%%% listener's pseudonym, a random token created when the chain
+%%% listener starts (`via_token' in `handler_opts'; the per-node
+%%% {@link node_token/0} when unset). A request whose `via' already
+%%% names this listener is rejected with `loop_detected' (508,
+%%% Proxy-Status `proxy_loop_detected'), so a chain that points back
+%%% at itself fails instead of recursing, while two chain listeners
+%%% on the same node can still be chained together.
 -module(masque_chain_handler).
 -behaviour(masque_handler).
 
@@ -54,6 +64,7 @@
     terminate/2
 ]).
 -export([handle_ip_packet/2, handle_address_request/2]).
+-export([node_token/0, init_node_token/0, new_token/0]).
 
 -ifdef(TEST).
 %% Test-only: construct a state record without running init/2 / opening
@@ -61,7 +72,10 @@
 -export([test_state/2]).
 -endif.
 
+-include("masque.hrl").
 -include("masque_ip.hrl").
+
+-define(TOKEN_KEY, {?MODULE, node_token}).
 
 -record(state, {
     upstream :: pid(),
@@ -84,14 +98,20 @@ test_state(Upstream, Protocol) when
 %%====================================================================
 
 -spec accept(masque_handler:req()) -> masque_handler:accept_result().
-accept(#{protocol := ip, ip_target := Target, ip_ipproto := IPProto} = Req) ->
+accept(Req) ->
+    case is_loop(token(maps:get(handler_opts, Req, #{})), maps:get(headers, Req, [])) of
+        true -> {reject, loop_detected};
+        false -> accept_target(Req)
+    end.
+
+accept_target(#{protocol := ip, ip_target := Target, ip_ipproto := IPProto} = Req) ->
     Opts = maps:get(handler_opts, Req, #{}),
     AllowFun = maps:get(allow, Opts, fun(_) -> true end),
     case AllowFun({Target, IPProto}) of
         true -> accept;
         false -> {reject, forbidden}
     end;
-accept(#{target_host := Host, target_port := Port} = Req) ->
+accept_target(#{target_host := Host, target_port := Port} = Req) ->
     Opts = maps:get(handler_opts, Req, #{}),
     AllowFun = maps:get(allow, Opts, fun(_) -> true end),
     case AllowFun({Host, Port}) of
@@ -105,45 +125,109 @@ init(
         protocol := ip,
         ip_target := Target,
         ip_ipproto := IPProto
-    } = _Req,
+    } = Req,
     Opts
 ) ->
     UpstreamURI = maps:get(upstream_proxy, Opts),
-    UpstreamOpts = maps:get(upstream_opts, Opts, #{}),
-    Timeout = maps:get(upstream_timeout, Opts, 5000),
-    ConnOpts = UpstreamOpts#{
-        timeout => Timeout,
-        owner => self(),
-        protocol => ip
-    },
+    ConnOpts = upstream_connect_opts(Req, Opts, ip),
     case masque:connect(UpstreamURI, {Target, IPProto}, ConnOpts) of
         {ok, Sess} ->
             {ok, #state{upstream = Sess, protocol = ip}};
         {error, Reason} ->
-            {stop, {resolution_failed, {upstream, Reason}}}
+            {stop, upstream_error(Reason)}
     end;
 init(
     #{
         target_host := Host,
         target_port := Port,
         protocol := Proto
-    } = _Req,
+    } = Req,
     Opts
 ) ->
     UpstreamURI = maps:get(upstream_proxy, Opts),
-    UpstreamOpts = maps:get(upstream_opts, Opts, #{}),
-    Timeout = maps:get(upstream_timeout, Opts, 5000),
-    ConnOpts = UpstreamOpts#{
-        timeout => Timeout,
-        owner => self(),
-        protocol => Proto
-    },
+    ConnOpts = upstream_connect_opts(Req, Opts, Proto),
     case masque:connect(UpstreamURI, {Host, Port}, ConnOpts) of
         {ok, Sess} ->
             {ok, #state{upstream = Sess, protocol = Proto}};
         {error, Reason} ->
-            {stop, {resolution_failed, {upstream, Reason}}}
+            {stop, upstream_error(Reason)}
     end.
+
+%% @doc This node's `via' pseudonym. Created by `masque_app' at start;
+%% created on first use when the application is not running.
+-spec node_token() -> binary().
+node_token() ->
+    case persistent_term:get(?TOKEN_KEY, undefined) of
+        undefined -> init_node_token();
+        Token -> Token
+    end.
+
+%% @doc Create this node's `via' pseudonym unless it already exists.
+-spec init_node_token() -> binary().
+init_node_token() ->
+    case persistent_term:get(?TOKEN_KEY, undefined) of
+        undefined ->
+            Token = new_token(),
+            persistent_term:put(?TOKEN_KEY, Token),
+            Token;
+        Token ->
+            Token
+    end.
+
+%% @doc A fresh random `via' pseudonym. The chain listeners create one
+%% per listener and pass it as `via_token' in `handler_opts'.
+-spec new_token() -> binary().
+new_token() ->
+    Hex = binary:encode_hex(crypto:strong_rand_bytes(8), lowercase),
+    <<"masque-", Hex/binary>>.
+
+token(#{via_token := Token}) when is_binary(Token) -> Token;
+token(_) -> node_token().
+
+upstream_connect_opts(Req, Opts, Proto) ->
+    UpstreamOpts = maps:get(upstream_opts, Opts, #{}),
+    Extra = [
+        {K, V}
+     || {K, V} <- maps:get(request_headers, UpstreamOpts, []),
+        string:lowercase(K) =/= <<"via">>
+    ],
+    Via = {<<"via">>, via_value(token(Opts), maps:get(headers, Req, []))},
+    UpstreamOpts#{
+        timeout => maps:get(upstream_timeout, Opts, 5000),
+        owner => self(),
+        protocol => Proto,
+        request_headers => Extra ++ [Via]
+    }.
+
+%% The upstream leg keeps the hops already listed and appends this
+%% listener, so a loop through several proxies is caught too.
+via_value(Token, Headers) ->
+    Own = <<"1.1 ", Token/binary>>,
+    case via_values(Headers) of
+        [] -> Own;
+        Prev -> iolist_to_binary(lists:join(<<", ">>, Prev ++ [Own]))
+    end.
+
+via_values(Headers) ->
+    [V || {K, V} <- Headers, is_binary(K), string:lowercase(K) =:= <<"via">>].
+
+is_loop(Token, Headers) ->
+    Hops = lists:append([binary:split(V, <<",">>, [global]) || V <- via_values(Headers)]),
+    lists:any(fun(Hop) -> received_by(Hop) =:= Token end, Hops).
+
+%% `Via' entry: received-protocol RWS received-by [RWS comment].
+received_by(Hop) ->
+    case string:lexemes(Hop, " \t") of
+        [_Proto, By | _] -> By;
+        _ -> undefined
+    end.
+
+upstream_error({handshake_rejected, ?MASQUE_STATUS_LOOP_DETECTED}) ->
+    {reject, loop_detected};
+upstream_error({handshake_rejected, ?MASQUE_STATUS_LOOP_DETECTED, _}) ->
+    {reject, loop_detected};
+upstream_error(Reason) ->
+    {resolution_failed, {upstream, Reason}}.
 
 -spec handle_packet(binary(), #state{}) -> {ok, #state{}}.
 handle_packet(Data, #state{upstream = Sess} = State) ->

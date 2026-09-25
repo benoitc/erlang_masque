@@ -689,7 +689,14 @@ start_chain_listener_h1(Name, Opts) ->
     start_listener_h1(Name, chain_all(Opts)).
 
 chain_all(Opts) ->
+    HOpts =
+        case maps:get(handler_opts, Opts, #{}) of
+            #{via_token := _} = H -> H;
+            H when is_map(H) -> H#{via_token => masque_chain_handler:new_token()};
+            H -> H
+        end,
     Opts#{
+        handler_opts => HOpts,
         handler => masque_chain_handler,
         tcp_handler => masque_chain_handler,
         ip_handler => masque_chain_handler

@@ -531,6 +531,8 @@ proxy_status_error(bad_path) -> <<"http_protocol_error">>;
 proxy_status_error(bad_port) -> <<"http_protocol_error">>;
 proxy_status_error(bad_host) -> <<"http_protocol_error">>;
 proxy_status_error(resolution_failed) -> <<"dns_error">>;
+proxy_status_error(upstream_timeout) -> <<"connection_timeout">>;
 proxy_status_error(forbidden) -> <<"destination_ip_prohibited">>;
+proxy_status_error(loop_detected) -> <<"proxy_loop_detected">>;
 proxy_status_error(overload) -> <<"proxy_internal_error">>;
 proxy_status_error(_) -> <<"proxy_internal_error">>.
