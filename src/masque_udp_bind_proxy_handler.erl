@@ -19,7 +19,10 @@
 %%%   <li>`bind_port :: inet:port_number()' - default `0'
 %%%       (kernel-assigned ephemeral).</li>
 %%%   <li>`bind_socket_opts :: [gen_udp:option()]' - merged on top of
-%%%       `[binary, {active, true}]'.</li>
+%%%       `[binary, {active, N}]'.</li>
+%%%   <li>`active_n :: pos_integer()' - datagrams the socket delivers
+%%%       before it pauses until the session has relayed them. Default
+%%%       `32'.</li>
 %%%   <li>`public_addresses :: [{ip_address(), port()}]' -
 %%%       list emitted on `Proxy-Public-Address'. Required if the
 %%%       socket is bound to a wildcard address; otherwise sockname
@@ -46,8 +49,11 @@
 
 -include("masque_udp_bind.hrl").
 
+-define(DEFAULT_ACTIVE_N, 32).
+
 -record(state, {
     socket :: gen_udp:socket(),
+    active_n = ?DEFAULT_ACTIVE_N :: pos_integer(),
     public_addresses :: [{inet:ip_address(), inet:port_number()}],
     advertised_families :: [4 | 6],
     peer_filter_fun :: fun(
@@ -76,9 +82,10 @@
 init(_Req, Opts) ->
     BindAddr = maps:get(bind_address, Opts, any),
     BindPort = maps:get(bind_port, Opts, 0),
+    ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
     SocketOpts = [
         binary,
-        {active, true},
+        {active, ActiveN},
         {ip, BindAddr}
         | maps:get(bind_socket_opts, Opts, [])
     ],
@@ -89,6 +96,7 @@ init(_Req, Opts) ->
                     Families = families(Addresses),
                     State = #state{
                         socket = Socket,
+                        active_n = ActiveN,
                         public_addresses = Addresses,
                         advertised_families = Families,
                         peer_filter_fun =
@@ -174,8 +182,9 @@ handle_info(
         true ->
             {ok, S, [{send_bind_packet, {FromIP, FromPort}, Bytes}]}
     end;
-handle_info({udp_passive, Socket}, #state{socket = Socket} = S) ->
-    _ = inet:setopts(Socket, [{active, true}]),
+handle_info({udp_passive, Socket}, #state{socket = Socket, active_n = N} = S) ->
+    %% Every datagram delivered before this message has been relayed.
+    _ = inet:setopts(Socket, [{active, N}]),
     {ok, S};
 handle_info({udp_error, Socket, Reason}, #state{socket = Socket} = S) ->
     {stop, {bind_socket_error, Reason}, S};

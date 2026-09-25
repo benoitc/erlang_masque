@@ -11,6 +11,12 @@
 %%%   <li>Target FIN: `{tcp_closed, Socket}' closes the tunnel.</li>
 %%% </ul>
 %%%
+%%% The socket runs in `{active, N}' mode (`active_n', default 16).
+%%% After N messages it pauses; the `tcp_passive' notice is handled
+%%% only once the session has written every earlier chunk to the
+%%% tunnel, so a slow client stalls reads from the target instead of
+%%% growing the session mailbox.
+%%%
 %%% Accepts the same policy hooks as the UDP proxy (`allow', `resolver',
 %%% `family'), plus `connect_timeout' (default 5000 ms).
 -module(masque_tcp_proxy_handler).
@@ -25,8 +31,11 @@
     terminate/2
 ]).
 
+-define(DEFAULT_ACTIVE_N, 16).
+
 -record(state, {
     socket :: gen_tcp:socket(),
+    active_n = ?DEFAULT_ACTIVE_N :: pos_integer(),
     eof_timer :: reference() | undefined
 }).
 
@@ -49,6 +58,7 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
     Family = pick_family(maps:get(family, Opts, auto), Host),
     ConnTimeout = maps:get(connect_timeout, Opts, 5000),
     AllowPrivate = maps:get(allow_private, Opts, false),
+    ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
     case resolve(ResolverFun, Host) of
         {ok, IP} ->
             case AllowPrivate orelse masque_ip:is_public(IP) of
@@ -57,7 +67,7 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
                 true ->
                     TcpOpts = [
                         binary,
-                        {active, true},
+                        {active, ActiveN},
                         %% Report a target RST as `{tcp_error, _,
                         %% econnreset}' so the tunnel is reset rather
                         %% than closed cleanly.
@@ -67,7 +77,7 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
                     ],
                     case gen_tcp:connect(IP, Port, TcpOpts, ConnTimeout) of
                         {ok, Socket} ->
-                            {ok, #state{socket = Socket}};
+                            {ok, #state{socket = Socket, active_n = ActiveN}};
                         {error, Reason} ->
                             {stop, {resolution_failed, {tcp_connect, Reason}}}
                     end
@@ -97,6 +107,11 @@ handle_eof(#state{socket = S} = State) ->
     {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
 handle_info({tcp, Socket, Bytes}, #state{socket = Socket} = State) ->
     {ok, State, [{send_data, Bytes}]};
+handle_info({tcp_passive, Socket}, #state{socket = Socket, active_n = N} = State) ->
+    %% The session stops on a failed tunnel write, so reaching this
+    %% clause means every earlier chunk was handed to the tunnel.
+    _ = inet:setopts(Socket, [{active, N}]),
+    {ok, State};
 handle_info(
     {tcp_closed, Socket},
     #state{

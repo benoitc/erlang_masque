@@ -21,6 +21,10 @@
 
 %% RFC 9114 sec 8.1: H3_CONNECT_ERROR.
 -define(H3_CONNECT_ERROR, 16#10f).
+%% How long a tunnel write may wait for the transport to drain before
+%% the tunnel is reset.
+-define(SEND_TIMEOUT, 30000).
+-define(SEND_RETRY_MS, 5).
 
 -record(state, {
     conn :: pid(),
@@ -327,16 +331,43 @@ run_init_actions(Actions, S) ->
 do_actions([], S) ->
     {ok, S};
 do_actions([{send_data, Bytes} | Rest], S) ->
-    _ = transport_send_data(S, Bytes, false),
-    do_actions(Rest, S);
+    do_actions([{send_data, Bytes, false} | Rest], S);
 do_actions([{send_data, Bytes, Fin} | Rest], S) ->
-    _ = transport_send_data(S, Bytes, Fin),
-    do_actions(Rest, S);
+    %% A tunnel write either lands or stops the session: handlers
+    %% (e.g. the TCP proxy's `{active, N}' re-arm) rely on every
+    %% earlier write having succeeded.
+    case tunnel_send(S, Bytes, Fin) of
+        ok -> do_actions(Rest, S);
+        {error, Reason} -> {stop, {tunnel_send_failed, Reason}, S}
+    end;
 do_actions([close_session | _Rest], S) ->
     _ = transport_send_data(S, <<>>, true),
     {stop, normal, S};
 do_actions([_Unknown | Rest], S) ->
     do_actions(Rest, S).
+
+%% Blocking tunnel write. h2 waits for flow-control window; quic_h3
+%% reports a full send queue, so retry until it drains or the send
+%% timeout passes.
+tunnel_send(#state{transport = h2, conn = C, stream_id = Sid}, Bytes, Fin) ->
+    h2:send_data(C, Sid, Bytes, Fin, #{block => ?SEND_TIMEOUT});
+tunnel_send(S, Bytes, Fin) ->
+    Deadline = erlang:monotonic_time(millisecond) + ?SEND_TIMEOUT,
+    tunnel_send_h3(S, Bytes, Fin, Deadline).
+
+tunnel_send_h3(S, Bytes, Fin, Deadline) ->
+    case transport_send_data(S, Bytes, Fin) of
+        {error, send_queue_full} ->
+            case erlang:monotonic_time(millisecond) < Deadline of
+                true ->
+                    timer:sleep(?SEND_RETRY_MS),
+                    tunnel_send_h3(S, Bytes, Fin, Deadline);
+                false ->
+                    {error, send_timeout}
+            end;
+        Other ->
+            Other
+    end.
 
 transport_send_data(#state{transport = h3, conn = C, stream_id = Sid}, Bytes, Fin) ->
     quic_h3:send_data(C, Sid, Bytes, Fin);
