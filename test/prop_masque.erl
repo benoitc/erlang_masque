@@ -66,13 +66,19 @@ non_neg_integer_upto(Bits) ->
     ?LET(N, proper_types:integer(0, (1 bsl Bits) - 1), N).
 
 %% A reg-name `masque_uri' accepts: dot-joined labels, each label a run
-%% of letters / digits / hyphen with no leading or trailing hyphen.
+%% of letters / digits / hyphen with no leading or trailing hyphen, and
+%% a last label that does not look numeric (`127.1' is not a name).
 hostname() ->
     ?LET(
-        Labels,
-        non_empty(list(label())),
-        list_to_binary(lists:join(".", Labels))
+        {Labels, Last},
+        {list(label()), last_label()},
+        list_to_binary(lists:join(".", Labels ++ [Last]))
     ).
+
+last_label() ->
+    ?LET({First, Rest}, {oneof([integer($a, $z), integer($A, $Z)]), list(alnum_char())}, [
+        First | Rest
+    ]).
 
 label() ->
     oneof([

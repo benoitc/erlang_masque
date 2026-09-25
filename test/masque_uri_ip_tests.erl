@@ -353,3 +353,30 @@ build_query_path(N) ->
         <<"/masque?">>,
         lists:join(<<"&">>, Pairs)
     ]).
+
+%%====================================================================
+%% Strict template, target and ipproto parsing
+%%====================================================================
+
+template_rejects_unknown_variable_test() ->
+    ?assertEqual(
+        {error, bad_template},
+        masque_uri_ip:parse_server_template(<<"/masque/{target_host}/{ipproto}/">>)
+    ).
+
+parse_target_rejects_zone_id_test() ->
+    ?assertEqual({error, bad_target}, masque_uri_ip:parse_target(<<"fe80::1%eth0">>)).
+
+parse_target_rejects_non_dotted_quad_test() ->
+    [
+        ?assertEqual({error, bad_target}, masque_uri_ip:parse_target(T))
+     || T <- [<<"1">>, <<"127.1">>, <<"0x7f.0.0.1">>, <<"010.0.0.1">>, <<"127.1/8">>]
+    ].
+
+parse_ipproto_strict_digits_test() ->
+    [
+        ?assertEqual({error, bad_ipproto}, masque_uri_ip:parse_ipproto(P))
+     || P <- [<<"06">>, <<"+6">>, <<"-0">>, <<" 6">>, <<"256">>]
+    ],
+    ?assertEqual({ok, 0}, masque_uri_ip:parse_ipproto(<<"0">>)),
+    ?assertEqual({ok, 17}, masque_uri_ip:parse_ipproto(<<"17">>)).

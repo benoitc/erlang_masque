@@ -162,3 +162,57 @@ roundtrip_test_() ->
         end)
      || {H, P} <- Cases
     ].
+
+%%====================================================================
+%% Strict template, host and port parsing
+%%====================================================================
+
+template_rejects_adjacent_vars_test() ->
+    ?assertEqual(
+        {error, bad_template},
+        masque_uri_template:parse_pattern(<<"/x/{target_host}{target_port}/">>)
+    ).
+
+template_rejects_var_before_query_test() ->
+    ?assertEqual(
+        {error, bad_template},
+        masque_uri_template:parse_pattern(<<"/x/{target_host}{?target_port}">>)
+    ).
+
+template_rejects_query_not_last_test() ->
+    ?assertEqual(
+        {error, bad_template},
+        masque_uri_template:parse_pattern(<<"/x{?target_host}/y">>)
+    ).
+
+query_template_requires_exact_path_test() ->
+    {ok, T} = masque_uri_template:parse_pattern(<<"/masque{?target_host,target_port}">>),
+    ?assertMatch(
+        {ok, #{target_host := <<"a">>, target_port := <<"1">>}},
+        masque_uri_template:match(T, <<"/masque?target_host=a&target_port=1">>)
+    ),
+    ?assertEqual(
+        {error, no_match},
+        masque_uri_template:match(T, <<"/masque/extra?target_host=a&target_port=1">>)
+    ).
+
+valid_host_rejects_zone_id_test() ->
+    ?assertNot(masque_uri:valid_host(<<"fe80::1%eth0">>)),
+    ?assert(masque_uri:valid_host(<<"fe80::1">>)).
+
+valid_host_rejects_non_dotted_quad_test() ->
+    [
+        ?assertNot(masque_uri:valid_host(H))
+     || H <- [<<"1">>, <<"127.1">>, <<"0x7f.0.0.1">>, <<"010.0.0.1">>, <<"1.2.3.04">>]
+    ],
+    ?assert(masque_uri:valid_host(<<"127.0.0.1">>)),
+    ?assert(masque_uri:valid_host(<<"host1.example">>)).
+
+match_rejects_non_canonical_port_test() ->
+    [
+        ?assertEqual(
+            {error, bad_port},
+            masque_uri:match(?TPL, <<"/.well-known/masque/udp/192.0.2.6/", P/binary, "/">>)
+        )
+     || P <- [<<"0443">>, <<"%2B443">>, <<"-1">>, <<"0">>]
+    ].

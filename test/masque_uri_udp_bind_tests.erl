@@ -299,3 +299,25 @@ ppa_roundtrip_v6_test() ->
             [{<<"proxy-public-address">>, Bin}]
         )
     ).
+
+%%====================================================================
+%% Strict matching
+%%====================================================================
+
+match_template_without_target_vars_test() ->
+    ?assertEqual(
+        {error, bad_template},
+        masque_uri_udp_bind:match(<<"/bind/{target_host}/">>, <<"/bind/%2A/">>)
+    ).
+
+match_does_not_double_decode_wildcard_test() ->
+    ?assertEqual(
+        {error, bad_host},
+        masque_uri_udp_bind:match(?TPL, <<"/.well-known/masque/udp/%252A/%252A/">>)
+    ).
+
+match_rejects_non_canonical_port_test() ->
+    ?assertEqual(
+        {error, bad_port},
+        masque_uri_udp_bind:match(?TPL, <<"/.well-known/masque/udp/192.0.2.6/0443/">>)
+    ).

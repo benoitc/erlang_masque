@@ -68,17 +68,15 @@ parse_server_template(Bin) ->
         {error, _} -> {error, bad_template}
     end.
 
-%% The parsed template must reference `target' and `ipproto' (RFC
-%% 9484 §3). We accept them either as two path vars or inside a
-%% single `{?target,ipproto}` query segment.
+%% RFC 9484 §3: the template MAY contain `target' and `ipproto' (a
+%% missing one means "any"), and no other variable. A variable the
+%% engine cannot fill (e.g. a CONNECT-UDP `target_host') would widen
+%% the scope to the wildcard on a server and fail expansion on a
+%% client, so reject it here.
 ensure_vars(T) ->
-    case masque_uri_template:match(T, <<"__probe__">>) of
-        _ ->
-            %% The probe call doesn't validate; we rely on the
-            %% engine to expand-check below. Simpler: just return
-            %% the template — full validation happens at
-            %% expand/match time where vars are actually used.
-            {ok, T}
+    case masque_uri_template:var_names(T) -- [target, ipproto] of
+        [] -> {ok, T};
+        _ -> {error, bad_template}
     end.
 
 %%====================================================================
@@ -237,11 +235,9 @@ parse_target(Bin) when is_binary(Bin) ->
 parse_ipproto(<<"*">>) ->
     {ok, '*'};
 parse_ipproto(Bin) when is_binary(Bin) ->
-    try binary_to_integer(Bin) of
-        N when is_integer(N), N >= 0, N =< 255 -> {ok, N};
-        _ -> {error, bad_ipproto}
-    catch
-        _:_ -> {error, bad_ipproto}
+    case masque_uri:parse_uint(Bin, 255) of
+        {ok, N} -> {ok, N};
+        error -> {error, bad_ipproto}
     end.
 
 %% @doc Render a typed target back to its wire-form binary.
@@ -269,18 +265,16 @@ format_ipproto(N) when is_integer(N), N >= 0, N =< 255 ->
 %%====================================================================
 
 parse_ip(Bin) when is_binary(Bin) ->
-    case inet:parse_address(binary_to_list(Bin)) of
+    case masque_uri:parse_ip_literal(Bin) of
         {ok, {_, _, _, _} = IP} -> {ok, {4, IP}};
         {ok, {_, _, _, _, _, _, _, _} = IP} -> {ok, {6, IP}};
-        {error, _} -> {error, bad_ip}
+        error -> {error, bad_ip}
     end.
 
 parse_prefix(Bin) ->
-    try binary_to_integer(Bin) of
-        N when is_integer(N), N >= 0, N =< 128 -> {ok, N};
-        _ -> {error, bad_prefix}
-    catch
-        _:_ -> {error, bad_prefix}
+    case masque_uri:parse_uint(Bin, 128) of
+        {ok, N} -> {ok, N};
+        error -> {error, bad_prefix}
     end.
 
 inet_addr_bin(IP) -> list_to_binary(inet:ntoa(IP)).
