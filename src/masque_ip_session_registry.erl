@@ -25,7 +25,7 @@
 -behaviour(gen_server).
 
 -export([start_link/0]).
--export([register/5, release/3, release_pid/1, lookup/1, all/0]).
+-export([register/5, release/3, release/4, release_pid/1, lookup/1, all/0]).
 
 -export([
     init/1,
@@ -49,8 +49,7 @@ start_link() ->
 
 %% @doc Register a host address or prefix as served by `SessionPid'.
 %% Returns `{error, conflict}' if the proposed range overlaps any
-%% existing registration; otherwise `ok'. Idempotent for an exact
-%% repeat by the same pid.
+%% existing registration, including an exact repeat; otherwise `ok'.
 -spec register(
     4 | 6,
     inet:ip4_address() | inet:ip6_address(),
@@ -74,17 +73,29 @@ register(V, Addr, Pfx, Pid, ContextId) when
             )
     end.
 
-%% @doc Release a previously-registered range. No-op if the range was
-%% not registered.
+%% @doc Release a range registered by the calling process. Same as
+%% `release(V, Addr, Pfx, self())'.
 -spec release(
     4 | 6,
     inet:ip4_address() | inet:ip6_address(),
     non_neg_integer()
 ) -> ok.
 release(V, Addr, Pfx) when V =:= 4; V =:= 6 ->
+    release(V, Addr, Pfx, self()).
+
+%% @doc Release a range registered by `Pid'. No-op if the range was
+%% not registered or belongs to another pid, so a session can never
+%% drop an entry another session now owns.
+-spec release(
+    4 | 6,
+    inet:ip4_address() | inet:ip6_address(),
+    non_neg_integer(),
+    pid()
+) -> ok.
+release(V, Addr, Pfx, Pid) when (V =:= 4 orelse V =:= 6), is_pid(Pid) ->
     case whereis(?MODULE) of
         undefined -> ok;
-        _Server -> gen_server:call(?MODULE, {release, V, Addr, Pfx})
+        _Server -> gen_server:call(?MODULE, {release, V, Addr, Pfx, Pid})
     end.
 
 %% @doc Release every range owned by `Pid'. Used by the registry's
@@ -163,12 +174,12 @@ handle_call({register, V, Addr, Pfx, Pid, Ctx}, _From, S) ->
                     {reply, {error, conflict}, S}
             end
     end;
-handle_call({release, V, Addr, Pfx}, _From, S) ->
+handle_call({release, V, Addr, Pfx, Pid}, _From, S) ->
     case to_int(V, Addr) of
         error ->
             {reply, ok, S};
         Start ->
-            S2 = release_key({V, Start}, Pfx, S),
+            S2 = release_key({V, Start}, Pfx, Pid, S),
             {reply, ok, S2}
     end;
 handle_call({release_pid, Pid}, _From, S) ->
@@ -234,9 +245,8 @@ range_end(Start, 6, Pfx) when Pfx >= 0, Pfx =< 128 ->
     Start bor ((1 bsl (128 - Pfx)) - 1).
 
 %% Check whether a proposed range conflicts with any existing entry.
-%% Returns `ok', `{idempotent, MRef}' (exact same key already there
-%% pointing at... anything; we currently treat any exact-key match as
-%% conflict to keep the contract strict), or `conflict'.
+%% Returns `ok' or `conflict'. An exact-key match is a conflict too,
+%% whoever owns it, to keep the contract strict.
 overlap_check(V, Start, End) ->
     Key = {V, Start},
     case ets:lookup(?TABLE, Key) of
@@ -281,9 +291,9 @@ lookup_int(V, Int) ->
             not_found
     end.
 
-release_key({V, Start} = Key, Pfx, #state{monitors = Mons} = S) ->
+release_key({V, Start} = Key, Pfx, Pid, #state{monitors = Mons} = S) ->
     case ets:lookup(?TABLE, Key) of
-        [{Key, _End, Pfx, _Pid, _Ctx, MRef}] ->
+        [{Key, _End, Pfx, Pid, _Ctx, MRef}] ->
             true = ets:delete(?TABLE, Key),
             masque_metrics:ip_release_inc(),
             Mons1 =
