@@ -605,6 +605,59 @@ oversize_v4_yields_frag_needed_test() ->
     %% ICMP type 3 code 4, next-hop MTU in the low 16 bits.
     ?assertMatch(<<4:4, _:68, 1, _:80, 3, 4, _:16, 0:16, 576:16, _/binary>>, Icmp).
 
+icmp_v4_packet(TTL, Type, Size) ->
+    Payload = <<Type, 0, (binary:copy(<<0>>, Size - 22))/binary>>,
+    Hdr0 = <<16#45, 0, Size:16, 0:16, 0:16, TTL, 1, 0:16, 10, 0, 0, 1, 8, 8, 8, 8>>,
+    Csum = masque_ip_packet:checksum(Hdr0),
+    <<16#45, 0, Size:16, 0:16, 0:16, TTL, 1, Csum:16, 10, 0, 0, 1, 8, 8, 8, 8, Payload/binary>>.
+
+icmp_v6_packet(HopLimit, Type, Size) ->
+    Plen = Size - 40,
+    <<6:4, 0:8, 0:20, Plen:16, 58, HopLimit, 16#2001:16, 16#DB8:16, 0:80, 1:16, 16#2606:16,
+        16#4700:16, 0:80, 1:16, Type, 0, (binary:copy(<<0>>, Plen - 2))/binary>>.
+
+%% RFC 1122 §3.2.2: no ICMP error in reply to an ICMP error; the drop
+%% is still counted.
+icmp_v4_error_gets_no_time_exceeded_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    S = router_state(#{}),
+    Before = masque_metrics:ip_drop_count(ttl_zero),
+    [
+        ?assertMatch({ok, _}, masque_ip_proxy_handler:handle_ip_packet(icmp_v4_packet(1, T, 60), S))
+     || T <- [3, 4, 5, 11, 12]
+    ],
+    assert_not_forwarded(),
+    ?assertEqual(Before + 5, masque_metrics:ip_drop_count(ttl_zero)),
+    %% An echo request is not an error message and still gets one.
+    ?assertMatch(
+        {ok, _, [{send_ip_packet, _}]},
+        masque_ip_proxy_handler:handle_ip_packet(icmp_v4_packet(1, 8, 60), S)
+    ).
+
+%% RFC 4443 §2.4 (e): same rule for ICMPv6 error messages (type < 128).
+icmp_v6_error_gets_no_time_exceeded_test() ->
+    drain(),
+    S = router_state(#{}),
+    [
+        ?assertMatch({ok, _}, masque_ip_proxy_handler:handle_ip_packet(icmp_v6_packet(1, T, 80), S))
+     || T <- [1, 2, 3, 4]
+    ],
+    assert_not_forwarded(),
+    ?assertMatch(
+        {ok, _, [{send_ip_packet, _}]},
+        masque_ip_proxy_handler:handle_ip_packet(icmp_v6_packet(1, 128, 80), S)
+    ).
+
+icmp_v6_error_gets_no_packet_too_big_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    S = router_state(#{mtu => 1280}),
+    Before = masque_metrics:ip_drop_count(mtu_exceeded),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(icmp_v6_packet(64, 2, 1300), S),
+    assert_not_forwarded(),
+    ?assertEqual(Before + 1, masque_metrics:ip_drop_count(mtu_exceeded)).
+
 peer_capsules_recorded_test() ->
     drain(),
     Self = self(),

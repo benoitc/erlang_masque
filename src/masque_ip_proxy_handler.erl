@@ -421,7 +421,8 @@ handle_ip_packet(Packet, #state{opts = Opts} = S) ->
 
 %% Router duties before handing the packet on: decrement the TTL /
 %% Hop Limit and check the egress MTU. Failures drop the packet and
-%% answer the client with the matching ICMP error.
+%% answer the client with the matching ICMP error, unless the packet
+%% is itself an ICMP error (RFC 1122 §3.2.2, RFC 4443 §2.4 (e)).
 route(Packet, #state{opts = Opts} = S) ->
     case masque_ip_packet:decrement_ttl(Packet) of
         {ok, Fwd} ->
@@ -429,16 +430,25 @@ route(Packet, #state{opts = Opts} = S) ->
             case byte_size(Fwd) > Mtu of
                 true ->
                     emit_drop(mtu_exceeded, drop_detail(Packet), Opts),
-                    {ok, S, [{send_ip_packet, too_big(Packet, Mtu)}]};
+                    icmp_reply(Packet, fun() -> too_big(Packet, Mtu) end, S);
                 false ->
                     forward(Fwd, S)
             end;
         {error, ttl_zero} ->
             emit_drop(ttl_zero, drop_detail(Packet), Opts),
-            {ok, S, [{send_ip_packet, time_exceeded(Packet)}]};
+            icmp_reply(Packet, fun() -> time_exceeded(Packet) end, S);
         {error, malformed} ->
             emit_drop(malformed, drop_detail(Packet), Opts),
             {ok, S}
+    end.
+
+%% The drop itself is already counted (`ttl_zero' / `mtu_exceeded').
+icmp_reply(Packet, Build, S) ->
+    case masque_icmp:is_error(Packet) of
+        true ->
+            {ok, S};
+        false ->
+            {ok, S, [{send_ip_packet, Build()}]}
     end.
 
 too_big(<<4:4, _/bitstring>> = Packet, Mtu) ->

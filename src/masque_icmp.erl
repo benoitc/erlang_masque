@@ -26,6 +26,7 @@
 ]).
 
 -export([apply_action/3]).
+-export([is_error/1]).
 
 %% Limits.
 -define(V4_INVOKING_CAP, 548).
@@ -38,6 +39,26 @@
 %%====================================================================
 %% API
 %%====================================================================
+
+%% @doc True when `Packet' is an ICMP error message: ICMPv4 types 3,
+%% 4, 5, 11 and 12, or an ICMPv6 type below 128. RFC 1122 §3.2.2 and
+%% RFC 4443 §2.4 (e) forbid answering those with another ICMP error.
+-spec is_error(binary()) -> boolean().
+is_error(Packet) ->
+    case masque_ip_packet:upper_layer(Packet) of
+        {ok, 1, <<Type:8, _/binary>>} ->
+            %% A non-initial fragment does not start with the ICMP
+            %% header; its type byte is not meaningful.
+            first_fragment(Packet) andalso lists:member(Type, [3, 4, 5, 11, 12]);
+        {ok, 58, <<Type:8, _/binary>>} ->
+            <<6:4, _/bitstring>> = Packet,
+            Type < 128;
+        _ ->
+            false
+    end.
+
+first_fragment(<<4:4, _:4, _:8, _:16, _:16, _:3, Offset:13, _/binary>>) -> Offset =:= 0;
+first_fragment(_) -> true.
 
 %% @doc Build a Destination Unreachable ICMP packet.
 %% Code maps to the RFC type/code tables.

@@ -15,6 +15,7 @@
 -export([
     destination/1,
     upper_protocol/1,
+    upper_layer/1,
     scope_passes/3,
     scope_check/3,
     scope_check/4,
@@ -49,13 +50,25 @@ destination(_) ->
 %% headers (Hop-by-Hop 0, Routing 43, Fragment 44, Destination 60,
 %% AH 51) to find the first non-extension Next Header.
 -spec upper_protocol(binary()) -> {ok, proto()} | {error, term()}.
-upper_protocol(<<4:4, IHL:4, _Rest:64, Proto:8, _/binary>> = Pkt) when
+upper_protocol(Pkt) ->
+    case upper_layer(Pkt) of
+        {ok, Proto, _Payload} -> {ok, Proto};
+        {error, _} = Err -> Err
+    end.
+
+%% @doc Like {@link upper_protocol/1}, and also return the bytes after
+%% the IP header (and IPv6 extension headers). For a non-initial IPv4
+%% fragment these are not the start of the upper-layer header.
+-spec upper_layer(binary()) -> {ok, proto(), binary()} | {error, malformed}.
+upper_layer(<<4:4, IHL:4, _Rest:64, Proto:8, _/binary>> = Pkt) when
     IHL >= 5, byte_size(Pkt) >= IHL * 4
 ->
-    {ok, Proto};
-upper_protocol(<<6:4, _:4, _:8, _:16, _:16, NextHdr:8, _:8, _Src:128, _Dst:128, Rest/binary>>) ->
+    HdrLen = IHL * 4,
+    <<_:HdrLen/binary, Payload/binary>> = Pkt,
+    {ok, Proto, Payload};
+upper_layer(<<6:4, _:4, _:8, _:16, _:16, NextHdr:8, _:8, _Src:128, _Dst:128, Rest/binary>>) ->
     walk_v6_ext(NextHdr, Rest);
-upper_protocol(_) ->
+upper_layer(_) ->
     {error, malformed}.
 
 %% @doc Combined `target' / `ipproto' scope check used by the
@@ -236,8 +249,8 @@ walk_v6_ext(51, <<NH:8, ExtLen:8, _:6/binary, Rest/binary>>) ->
         false ->
             {error, malformed}
     end;
-walk_v6_ext(NH, _Rest) ->
-    {ok, NH}.
+walk_v6_ext(NH, Rest) ->
+    {ok, NH, Rest}.
 
 consume_ext(NH, ExtLen, Rest, Cont) ->
     Skip = ExtLen * 8,
