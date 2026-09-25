@@ -230,6 +230,16 @@ handle_call(finalize, _From, #state{pending_actions = Actions} = State) when
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
+%% Asynchronous finalize from the router: run the same steps as the
+%% `finalize' call and report back; the session stops if the stream
+%% could not be opened.
+handle_cast({finalize, Router}, S) ->
+    {reply, Result, S2} = handle_call(finalize, undefined, S),
+    Router ! {masque_finalized, S#state.stream_id, self(), Result},
+    case Result of
+        ok -> {noreply, S2};
+        _ -> {stop, stream_dead, S2}
+    end;
 handle_cast(connection_closed, S) ->
     {stop, connection_closed, S};
 handle_cast(_Msg, S) ->

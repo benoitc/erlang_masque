@@ -19,6 +19,9 @@
 
 -include("masque.hrl").
 
+%% RFC 9114 sec 8.1: H3_CONNECT_ERROR.
+-define(H3_CONNECT_ERROR, 16#10f).
+
 -record(state, {
     conn :: pid(),
     stream_id :: non_neg_integer(),
@@ -27,7 +30,9 @@
     h_state :: term(),
     req :: map(),
     %% Actions from handler init, applied after finalize (H3 path)
-    pending_actions :: [term()] | undefined
+    pending_actions :: [term()] | undefined,
+    %% Monitor on the router (H3 path).
+    router_ref :: reference() | undefined
 }).
 
 %%====================================================================
@@ -54,10 +59,10 @@ init(
 ) ->
     process_flag(trap_exit, true),
     %% Monitor router (H3 path) so we stop if it dies.
-    _ =
+    RouterRef =
         case maps:find(router, Args) of
             {ok, Router} -> erlang:monitor(process, Router);
-            error -> ok
+            error -> undefined
         end,
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, Actions} ->
@@ -67,7 +72,8 @@ init(
                 transport = Transport,
                 handler = Handler,
                 h_state = HState,
-                req = Req
+                req = Req,
+                router_ref = RouterRef
             },
             case maps:is_key(router, Args) of
                 true ->
@@ -142,6 +148,16 @@ handle_call(
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
+%% Asynchronous finalize from the router: run the same steps as the
+%% `finalize' call and report back; the session stops if the stream
+%% could not be opened.
+handle_cast({finalize, Router}, S) ->
+    {reply, Result, S2} = handle_call(finalize, undefined, S),
+    Router ! {masque_finalized, S#state.stream_id, self(), Result},
+    case Result of
+        ok -> {noreply, S2};
+        _ -> {stop, stream_dead, S2}
+    end;
 handle_cast(connection_closed, S) ->
     {stop, connection_closed, S};
 handle_cast(_Msg, S) ->
@@ -182,7 +198,7 @@ handle_info({h2, _Conn, {closed, _Reason}}, S) ->
     {stop, peer_closed, S};
 handle_info({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
-handle_info({'DOWN', _MRef, process, _Pid, _Reason}, S) ->
+handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
     %% Router died - clean up
     {stop, router_gone, S};
 handle_info(Msg, S) ->
@@ -214,7 +230,7 @@ terminate(
     maybe_release_h2_tunnel(Transport, Conn),
     _ =
         (try
-            transport_send_data(S, <<>>, true)
+            end_stream(Reason, S)
         catch
             _:_ -> ok
         end),
@@ -223,6 +239,21 @@ terminate(
 
 maybe_release_h2_tunnel(h2, Conn) -> masque_h2_server:release_tunnel(Conn);
 maybe_release_h2_tunnel(_, _) -> ok.
+
+%% A clean end (ours or the target's FIN) closes the stream with FIN.
+%% Anything else (target reset or error, handler crash) resets it
+%% with CONNECT_ERROR so the client does not mistake it for a clean
+%% close (RFC 9114 sec 4.4, RFC 9113 sec 8.5).
+end_stream(Reason, S) when
+    Reason =:= normal;
+    Reason =:= target_closed;
+    Reason =:= eof_timeout
+->
+    transport_send_data(S, <<>>, true);
+end_stream(_Reason, #state{transport = h3, conn = C, stream_id = Sid}) ->
+    quic_h3:cancel(C, Sid, ?H3_CONNECT_ERROR);
+end_stream(_Reason, #state{transport = h2, conn = C, stream_id = Sid}) ->
+    h2:cancel(C, Sid, connect_error).
 
 code_change(_OldVsn, S, _Extra) ->
     {ok, S}.

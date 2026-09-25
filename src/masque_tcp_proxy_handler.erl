@@ -58,6 +58,10 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
                     TcpOpts = [
                         binary,
                         {active, true},
+                        %% Report a target RST as `{tcp_error, _,
+                        %% econnreset}' so the tunnel is reset rather
+                        %% than closed cleanly.
+                        {show_econnreset, true},
                         Family
                         | maps:get(socket_opts, Opts, [])
                     ],

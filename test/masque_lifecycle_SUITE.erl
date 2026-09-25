@@ -36,7 +36,12 @@
     h2_udp_bind_round_trip/1,
     h3_bind_handler_crash_resets_stream/1,
     h2_bind_handler_crash_resets_stream/1,
-    bind_message_before_finalize/1
+    bind_message_before_finalize/1,
+    h3_unknown_reject_reason_gets_response/1,
+    h2_unknown_reject_reason_gets_response/1,
+    h2_failed_session_releases_tunnel_slot/1,
+    h3_tcp_target_reset_resets_tunnel/1,
+    h2_tcp_target_reset_resets_tunnel/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -65,7 +70,12 @@ all() ->
         h2_udp_bind_round_trip,
         h3_bind_handler_crash_resets_stream,
         h2_bind_handler_crash_resets_stream,
-        bind_message_before_finalize
+        bind_message_before_finalize,
+        h3_unknown_reject_reason_gets_response,
+        h2_unknown_reject_reason_gets_response,
+        h2_failed_session_releases_tunnel_slot,
+        h3_tcp_target_reset_resets_tunnel,
+        h2_tcp_target_reset_resets_tunnel
     ].
 
 init_per_suite(Config) ->
@@ -133,6 +143,13 @@ extra_opts(Case) when
     Case =:= h2_bind_handler_crash_resets_stream
 ->
     (bind_opts())#{bind_handler => masque_crash_bind_handler};
+extra_opts(Case) when
+    Case =:= h3_unknown_reject_reason_gets_response;
+    Case =:= h2_unknown_reject_reason_gets_response
+->
+    #{handler => masque_weird_reject_handler};
+extra_opts(h2_failed_session_releases_tunnel_slot) ->
+    #{handler => masque_stop_init_handler, max_tunnels_per_connection => 1};
 extra_opts(_Case) ->
     #{}.
 
@@ -390,8 +407,103 @@ bind_message_before_finalize(_Config) ->
     end.
 
 %%====================================================================
+%% Request handling
+%%====================================================================
+
+h3_unknown_reject_reason_gets_response(Config) ->
+    {ok, Conn} = masque_test_helpers:h3_client_connect(
+        maps:get(port, ?config(h3, Config)), #{}
+    ),
+    {ok, Sid} = quic_h3:request(Conn, udp_headers(), #{end_stream => false}),
+    {ok, 502, _} = masque_test_helpers:h3_await_response(Sid, 5000),
+    quic_h3:close(Conn).
+
+h2_unknown_reject_reason_gets_response(Config) ->
+    {Conn, Sid} = h2_request_udp(Config),
+    receive
+        {h2, Conn, {response, Sid, 502, _}} -> ok
+    after 5000 -> ct:fail(no_h2_response)
+    end,
+    h2:close(Conn).
+
+%% With one tunnel allowed per connection, a session that fails to
+%% start must give its slot back; the counter row goes away with the
+%% connection.
+h2_failed_session_releases_tunnel_slot(Config) ->
+    Rows = ets:info(masque_h2_tunnel_counts, size),
+    {ok, Conn} = h2_connect(Config),
+    [
+        begin
+            {ok, Sid} = h2:request(
+                Conn, udp_headers(), #{protocol => <<"connect-udp">>}
+            ),
+            receive
+                {h2, Conn, {response, Sid, 502, _}} -> ok;
+                {h2, Conn, {response, Sid, Other, _}} -> ct:fail({status, N, Other})
+            after 5000 -> ct:fail({no_response, N})
+            end
+        end
+     || N <- [1, 2, 3]
+    ],
+    ok = h2:close(Conn),
+    ok = wait_until(fun() -> ets:info(masque_h2_tunnel_counts, size) =:= Rows end, 50).
+
+h3_tcp_target_reset_resets_tunnel(Config) ->
+    tcp_target_reset_resets_tunnel(Config, h3).
+
+h2_tcp_target_reset_resets_tunnel(Config) ->
+    tcp_target_reset_resets_tunnel(Config, h2).
+
+tcp_target_reset_resets_tunnel(Config, Transport) ->
+    {ok, LSock} = gen_tcp:listen(0, [binary, {active, false}, {ip, {127, 0, 0, 1}}]),
+    {ok, TPort} = inet:port(LSock),
+    Target = spawn(fun() ->
+        {ok, Sock} = gen_tcp:accept(LSock, 10000),
+        {ok, _} = gen_tcp:recv(Sock, 0, 10000),
+        ok = inet:setopts(Sock, [{linger, {true, 0}}]),
+        gen_tcp:close(Sock)
+    end),
+    ok = gen_tcp:controlling_process(LSock, Target),
+    Port = maps:get(port, ?config(Transport, Config)),
+    {ok, Sess} = masque:connect(
+        iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+        {<<"127.0.0.1">>, TPort},
+        #{verify => verify_none, transports => [Transport], protocol => tcp}
+    ),
+    ok = masque:send(Sess, <<"x">>),
+    receive
+        {masque_closed, Sess, peer_reset} -> ok;
+        {masque_closed, Sess, Other} -> ct:fail({closed_with, Other})
+    after 5000 -> ct:fail(no_reset)
+    end,
+    gen_tcp:close(LSock).
+
+%%====================================================================
 %% Helpers
 %%====================================================================
+
+h2_connect(Config) ->
+    h2:connect(
+        "localhost",
+        maps:get(port, ?config(h2, Config)),
+        #{transport => ssl, verify => verify_none, sync => true}
+    ).
+
+h2_request_udp(Config) ->
+    {ok, Conn} = h2_connect(Config),
+    {ok, Sid} = h2:request(Conn, udp_headers(), #{protocol => <<"connect-udp">>}),
+    {Conn, Sid}.
+
+wait_until(_Fun, 0) ->
+    ct:fail(condition_not_met);
+wait_until(Fun, N) ->
+    case Fun() of
+        true ->
+            ok;
+        false ->
+            timer:sleep(100),
+            wait_until(Fun, N - 1)
+    end.
 
 bind_connect(Config, Transport) ->
     Port = maps:get(port, ?config(Transport, Config)),

@@ -294,28 +294,46 @@ validate_get(Path, Headers, UdpTemplate, IpTemplate, AcceptBind) ->
         undefined ->
             {error, bad_host};
         _ ->
-            Upgrade = header(<<"upgrade">>, Headers),
-            Capsule = header(<<"capsule-protocol">>, Headers),
-            UpgradeLc = lowercase_bin(Upgrade),
-            case {UpgradeLc, Capsule} of
-                {?MASQUE_CONNECT_UDP_PROTOCOL, <<"?1">>} when
-                    AcceptBind
-                ->
-                    match_udp_or_bind_path(Path, Headers, UdpTemplate);
-                {?MASQUE_CONNECT_UDP_PROTOCOL, <<"?1">>} ->
-                    match_path(Path, Headers, UdpTemplate);
-                {?MASQUE_CONNECT_IP_PROTOCOL, <<"?1">>} ->
-                    match_ip_path(Path, Headers, IpTemplate);
-                {Upgrade1, _} when
-                    Upgrade1 =:= ?MASQUE_CONNECT_UDP_PROTOCOL;
-                    Upgrade1 =:= ?MASQUE_CONNECT_IP_PROTOCOL
-                ->
-                    {error, bad_protocol};
-                {undefined, _} ->
-                    {error, bad_protocol};
-                _ ->
+            case has_upgrade_token(header(<<"connection">>, Headers)) of
+                true ->
+                    validate_upgrade(
+                        Path, Headers, UdpTemplate, IpTemplate, AcceptBind
+                    );
+                false ->
+                    %% RFC 9298 sec 3.2 / RFC 9110 sec 7.8: an upgrade
+                    %% request carries `Connection: Upgrade'.
                     {error, bad_protocol}
             end
+    end.
+
+has_upgrade_token(undefined) ->
+    false;
+has_upgrade_token(Value) ->
+    Tokens = binary:split(lowercase_bin(Value), <<",">>, [global]),
+    lists:member(<<"upgrade">>, [string:trim(T) || T <- Tokens]).
+
+validate_upgrade(Path, Headers, UdpTemplate, IpTemplate, AcceptBind) ->
+    Upgrade = header(<<"upgrade">>, Headers),
+    Capsule = header(<<"capsule-protocol">>, Headers),
+    UpgradeLc = lowercase_bin(Upgrade),
+    case {UpgradeLc, Capsule} of
+        {?MASQUE_CONNECT_UDP_PROTOCOL, <<"?1">>} when
+            AcceptBind
+        ->
+            match_udp_or_bind_path(Path, Headers, UdpTemplate);
+        {?MASQUE_CONNECT_UDP_PROTOCOL, <<"?1">>} ->
+            match_path(Path, Headers, UdpTemplate);
+        {?MASQUE_CONNECT_IP_PROTOCOL, <<"?1">>} ->
+            match_ip_path(Path, Headers, IpTemplate);
+        {Upgrade1, _} when
+            Upgrade1 =:= ?MASQUE_CONNECT_UDP_PROTOCOL;
+            Upgrade1 =:= ?MASQUE_CONNECT_IP_PROTOCOL
+        ->
+            {error, bad_protocol};
+        {undefined, _} ->
+            {error, bad_protocol};
+        _ ->
+            {error, bad_protocol}
     end.
 
 %% When the listener has bind enabled, the bind matcher is tried

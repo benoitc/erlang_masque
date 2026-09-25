@@ -33,6 +33,7 @@
     cap_fin_seen = false :: boolean(),
     %% Actions from handler init, applied after finalize
     pending_actions :: [term()] | undefined,
+    router_ref :: reference(),
     start_time :: integer() | undefined
 }).
 
@@ -58,7 +59,7 @@ init(#{
 }) ->
     process_flag(trap_exit, true),
     %% Monitor router so we stop if it dies during or after init.
-    erlang:monitor(process, Router),
+    RouterRef = erlang:monitor(process, Router),
     %% RFC 9298 §3: a 2xx response means the tunnel is set up and the
     %% proxy is ready to forward UDP. So the user's `init/2' (which
     %% for the built-in proxy opens the gen_udp socket and validates
@@ -82,7 +83,8 @@ init(#{
                 h_state = HState,
                 req = Req,
                 max_cap = MaxCap,
-                pending_actions = Actions
+                pending_actions = Actions,
+                router_ref = RouterRef
             },
             {ok, State};
         {stop, Reason} ->
@@ -147,6 +149,16 @@ handle_call(
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
+%% Asynchronous finalize from the router: run the same steps as the
+%% `finalize' call and report back; the session stops if the stream
+%% could not be opened.
+handle_cast({finalize, Router}, S) ->
+    {reply, Result, S2} = handle_call(finalize, undefined, S),
+    Router ! {masque_finalized, S#state.stream_id, self(), Result},
+    case Result of
+        ok -> {noreply, S2};
+        _ -> {stop, stream_dead, S2}
+    end;
 handle_cast(connection_closed, S) ->
     {stop, connection_closed, S};
 handle_cast(_Msg, S) ->
@@ -195,7 +207,7 @@ handle_info(
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
-handle_info({'DOWN', _MRef, process, _Pid, _Reason}, S) ->
+handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
     %% Router died - clean up
     {stop, router_gone, S};
 handle_info(Msg, S) ->

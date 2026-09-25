@@ -24,6 +24,9 @@
 -include("masque.hrl").
 -include("masque_ip.hrl").
 
+%% Most ADDRESS_REQUEST entries left unanswered at once.
+-define(MAX_PEER_PENDING, 64).
+
 -record(state, {
     conn :: pid(),
     stream_id :: non_neg_integer(),
@@ -43,6 +46,8 @@
     %% Request IDs received from the client (from ADDRESS_REQUEST) but
     %% not yet answered by this server session.
     peer_pending = #{} :: #{pos_integer() => true},
+    %% Monitor on the router (H3 path).
+    router_ref :: reference() | undefined,
     start_time :: integer() | undefined
 }).
 
@@ -70,9 +75,9 @@ init(
 ) ->
     process_flag(trap_exit, true),
     Router = maps:get(router, Args, undefined),
-    _ =
+    RouterRef =
         case Router of
-            undefined -> ok;
+            undefined -> undefined;
             _ -> erlang:monitor(process, Router)
         end,
     MaxCap = maps:get(
@@ -86,6 +91,7 @@ init(
                 conn = Conn,
                 stream_id = StreamId,
                 router = Router,
+                router_ref = RouterRef,
                 transport = Transport,
                 handler = Handler,
                 h_state = HState,
@@ -200,6 +206,16 @@ handle_call(
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
+%% Asynchronous finalize from the router: run the same steps as the
+%% `finalize' call and report back; the session stops if the stream
+%% could not be opened.
+handle_cast({finalize, Router}, S) ->
+    {reply, Result, S2} = handle_call(finalize, undefined, S),
+    Router ! {masque_finalized, S#state.stream_id, self(), Result},
+    case Result of
+        ok -> {noreply, S2};
+        _ -> {stop, stream_dead, S2}
+    end;
 handle_cast(connection_closed, S) ->
     {stop, connection_closed, S};
 handle_cast({inject_packet, Pkt}, S) when is_binary(Pkt) ->
@@ -255,7 +271,7 @@ handle_info(flush_cap_buf, S) ->
     {noreply, S};
 handle_info({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
-handle_info({'DOWN', _MRef, process, _Pid, _Reason}, S) ->
+handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
     {stop, router_gone, S};
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
@@ -400,7 +416,12 @@ dispatch_capsule(
     #state{peer_pending = Pend} = S
 ) ->
     case masque_ip_capsule:decode_address_request(Body) of
-        {ok, Entries} ->
+        {ok, Entries0} ->
+            %% Bound the unanswered requests a client can pile up:
+            %% entries past the limit are rejected right away.
+            Room = max(0, ?MAX_PEER_PENDING - map_size(Pend)),
+            {Entries, Extra} = lists:split(min(Room, length(Entries0)), Entries0),
+            _ = reject_now(Extra, S),
             Pend1 = lists:foldl(
                 fun(#ip_prefix_request{request_id = Id}, Acc) ->
                     Acc#{Id => true}
@@ -408,11 +429,16 @@ dispatch_capsule(
                 Pend,
                 Entries
             ),
-            dispatch(
-                handle_address_request,
-                [Entries],
-                S#state{peer_pending = Pend1}
-            );
+            case Entries of
+                [] ->
+                    {noreply, S};
+                _ ->
+                    dispatch(
+                        handle_address_request,
+                        [Entries],
+                        S#state{peer_pending = Pend1}
+                    )
+            end;
         {error, _} ->
             reset_and_stop(malformed_capsule, S)
     end;
@@ -594,6 +620,19 @@ send_assign(Entries, #state{peer_pending = Pend} = S) ->
         {error, _} = Err ->
             Err
     end.
+
+%% Answer requests with the RFC 9484 sec 4.7.1 "no address" entry
+%% without involving the handler.
+reject_now([], _S) ->
+    ok;
+reject_now(Requests, S) ->
+    Body = masque_ip_capsule:encode_address_assign(
+        masque_ip:reject_requests(Requests)
+    ),
+    Cap = iolist_to_binary(
+        masque_capsule:encode(?MASQUE_CAPSULE_ADDRESS_ASSIGN, Body)
+    ),
+    transport_send_data(S, Cap, false).
 
 consume_pending([], Pend) ->
     {ok, Pend};

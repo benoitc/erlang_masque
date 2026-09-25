@@ -393,6 +393,9 @@ spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req) ->
     },
     try masque_server_connection:start_session(Router, Args) of
         {ok, _Pid} -> ok;
+        %% The session already answered (or the stream is gone): a
+        %% reject here would follow a 2xx.
+        {error, stream_dead} -> ok;
         {error, Reason} -> reject(Conn, StreamId, map_init_error(Reason))
     catch
         exit:{timeout, _} ->
