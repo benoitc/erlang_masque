@@ -66,7 +66,9 @@
     idle_timeout_ms => non_neg_integer() | infinity,
     %% Upper bound on concurrent streams. Defaults: h2 reads the peer
     %% SETTINGS, h3 leaves it dynamic (ask the transport).
-    max_streams => pos_integer() | dynamic
+    max_streams => pos_integer() | dynamic,
+    %% Registry to notify of capacity changes (set by the pool).
+    pool => pid()
 }.
 
 -export_type([start_args/0]).
@@ -85,7 +87,10 @@
     refs :: #{non_neg_integer() => #ref{}},
     max_streams :: pos_integer() | dynamic,
     idle_ms :: non_neg_integer() | infinity,
-    idle_ref :: undefined | reference()
+    idle_ref :: undefined | reference(),
+    %% Registry told about capacity changes (self-dialed owners only).
+    pool :: pid() | undefined,
+    full = false :: boolean()
 }).
 
 %%====================================================================
@@ -105,8 +110,10 @@ start_link(Args) ->
 %% the public API does not expose a `controlling_process/2'
 %% equivalent). On success it sends `{dial_result, Tag, {ok, Self}}'
 %% to `RegistryPid' and then enters the normal gen_server loop. On
-%% failure it sends `{dial_result, Tag, {error, Reason}}' and exits
-%% normally.
+%% failure, including a dial that raises, it sends `{dial_result,
+%% Tag, {error, Reason}}' and exits normally. While running it sends
+%% `{owner_capacity, Self, Full}' to `RegistryPid' whenever it
+%% reaches or leaves its stream limit.
 %%
 %% `Opts' must contain `transport' (h2 | quic_h3), `host', `port',
 %% and any transport-specific `connect_opts'. The optional
@@ -172,7 +179,8 @@ init(#{transport := Transport, conn := Conn} = Args) ->
         refs = #{},
         max_streams = MaxStreams,
         idle_ms = IdleMs,
-        idle_ref = undefined
+        idle_ref = undefined,
+        pool = maps:get(pool, Args, undefined)
     },
     %% No refs yet; start the idle timer so a conn nobody ever uses
     %% does not sit open forever.
@@ -191,7 +199,8 @@ handle_call(
                 {ok, StreamId} ->
                     case register_stream(StreamId, SessionPid, S) of
                         {ok, S1} ->
-                            {reply, {ok, StreamId, S#state.conn}, cancel_idle(S1)};
+                            S2 = report_capacity(cancel_idle(S1)),
+                            {reply, {ok, StreamId, S#state.conn}, S2};
                         {error, _} = Err ->
                             _ = cancel_transport_stream(S, StreamId),
                             {reply, Err, S}
@@ -333,6 +342,19 @@ code_change(_OldVsn, S, _Extra) ->
 at_capacity(_N, dynamic) -> false;
 at_capacity(N, Max) when is_integer(Max) -> N >= Max.
 
+%% Tell the registry when this owner reaches or leaves its stream
+%% limit so checkout can skip it.
+report_capacity(#state{pool = undefined} = S) ->
+    S;
+report_capacity(#state{pool = Pool, refs = Refs, max_streams = MS, full = Was} = S) ->
+    case at_capacity(maps:size(Refs), MS) of
+        Was ->
+            S;
+        Full ->
+            Pool ! {owner_capacity, self(), Full},
+            S#state{full = Full}
+    end.
+
 resolve_max_streams(h2, Mod, Conn, default) ->
     try Mod:get_peer_settings(Conn) of
         Map when is_map(Map) ->
@@ -413,7 +435,7 @@ drop_stream(StreamId, #state{refs = Refs} = S) ->
             _ = erlang:demonitor(MRef, [flush]),
             _ = unset_stream_handler(S, StreamId),
             _ = cancel_transport_stream(S, StreamId),
-            maybe_arm_idle(S#state{refs = Refs1});
+            report_capacity(maybe_arm_idle(S#state{refs = Refs1}));
         error ->
             S
     end.
@@ -499,21 +521,35 @@ maybe_arm_idle(S) ->
 
 init_for_pool(RegistryPid, Tag, Opts) ->
     process_flag(trap_exit, true),
-    Transport = maps:get(transport, Opts),
-    Mod = maps:get(transport_mod, Opts, Transport),
-    case do_dial(Transport, Mod, Opts) of
-        {ok, Conn} ->
-            Args = Opts#{
-                conn => Conn,
-                transport => Transport,
-                transport_mod => Mod,
-                fingerprint => Tag
-            },
-            {ok, State} = init(Args),
+    case safe_dial(RegistryPid, Tag, Opts) of
+        {ok, State} ->
             RegistryPid ! {dial_result, Tag, {ok, self()}},
             gen_server:enter_loop(?MODULE, [], State);
         {error, Reason} ->
             RegistryPid ! {dial_result, Tag, {error, Reason}}
+    end.
+
+%% Dial and build the initial state. Any exception becomes
+%% `{error, _}' so the registry always gets a `dial_result'.
+safe_dial(RegistryPid, Tag, Opts) ->
+    try
+        Transport = maps:get(transport, Opts),
+        Mod = maps:get(transport_mod, Opts, Transport),
+        case do_dial(Transport, Mod, Opts) of
+            {ok, Conn} ->
+                Args = Opts#{
+                    conn => Conn,
+                    transport => Transport,
+                    transport_mod => Mod,
+                    fingerprint => Tag,
+                    pool => RegistryPid
+                },
+                {ok, _State} = init(Args);
+            {error, _} = Err ->
+                Err
+        end
+    catch
+        Class:Reason -> {error, {dial_crashed, {Class, Reason}}}
     end.
 
 do_dial(h2, Mod, Opts) ->
