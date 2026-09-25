@@ -76,10 +76,8 @@ info_unprompted_address_assign_is_forwarded_test() ->
     cleanup(Pid).
 
 info_prompted_address_assign_is_dropped_test() ->
-    %% Non-zero request_id would break the client's pending-id map if
-    %% forwarded as-is (upstream's id space != client's id space).
-    %% Dropping is the conservative choice until the full id-mapping
-    %% flow lands (the deferred follow-up noted in the handler doc).
+    %% A prompted entry for a request the chain never forwarded has
+    %% no client request id to map to, so it is dropped.
     {S, Pid} = state(ip),
     Assign = #ip_assignment{
         request_id = 42,
@@ -109,6 +107,59 @@ info_mixed_address_assign_forwards_unprompted_only_test() ->
     {ok, _, Actions} = ?M:handle_info(Msg, S),
     ?assertEqual([{assign, [Unprompted]}], Actions),
     cleanup(Pid).
+
+%%====================================================================
+%% ADDRESS_REQUEST forwarding
+%%====================================================================
+
+address_request_forwarded_and_answer_mapped_test() ->
+    Self = self(),
+    Pid = erlang:spawn(fun() -> id_mock(Self, [7, 8]) end),
+    S0 = masque_chain_handler:test_state(Pid, ip),
+    Reqs = [
+        #ip_prefix_request{request_id = 1, version = 4, address = {0, 0, 0, 0}, prefix_len = 32},
+        #ip_prefix_request{request_id = 2, version = 4, address = {0, 0, 0, 0}, prefix_len = 32}
+    ],
+    {ok, S1} = ?M:handle_address_request(Reqs, S0),
+    assert_captured(
+        {request_addresses, [{4, {0, 0, 0, 0}, 32}, {4, {0, 0, 0, 0}, 32}]}
+    ),
+    %% Upstream answers id 8 first, then id 7; both map back.
+    A8 = #ip_assignment{request_id = 8, version = 4, address = {10, 0, 0, 2}, prefix_len = 32},
+    {ok, S2, [{assign, [B]}]} =
+        ?M:handle_info({masque_address_assign, Pid, [A8]}, S1),
+    ?assertEqual(A8#ip_assignment{request_id = 2}, B),
+    A7 = #ip_assignment{request_id = 7, version = 4, address = {10, 0, 0, 1}, prefix_len = 32},
+    {ok, S3, [{assign, [C]}]} =
+        ?M:handle_info({masque_address_assign, Pid, [A7]}, S2),
+    ?assertEqual(A7#ip_assignment{request_id = 1}, C),
+    %% A repeat answer for an id already relayed is dropped.
+    ?assertMatch({ok, _}, ?M:handle_info({masque_address_assign, Pid, [A7]}, S3)),
+    cleanup(Pid).
+
+address_request_upstream_error_rejects_test() ->
+    %% The default mock answers `ok', not `{ok, Ids}'.
+    {S, Pid} = state(ip),
+    Reqs = [
+        #ip_prefix_request{request_id = 3, version = 4, address = {0, 0, 0, 0}, prefix_len = 32}
+    ],
+    {ok, _, [{assign, [R]}]} = ?M:handle_address_request(Reqs, S),
+    ?assertMatch(
+        #ip_assignment{request_id = 3, address = {0, 0, 0, 0}, prefix_len = 32}, R
+    ),
+    cleanup(Pid).
+
+id_mock(TestPid, Ids) ->
+    receive
+        {'$gen_call', From, Payload} ->
+            TestPid ! {captured, Payload},
+            gen_statem:reply(From, {ok, Ids}),
+            id_mock(TestPid, Ids);
+        stop ->
+            ok;
+        _ ->
+            id_mock(TestPid, Ids)
+    end.
 
 info_udp_data_from_upstream_emits_send_action_test() ->
     {S, Pid} = state(udp),

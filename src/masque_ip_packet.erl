@@ -17,7 +17,9 @@
     upper_protocol/1,
     scope_passes/3,
     scope_check/3,
-    scope_check/4
+    scope_check/4,
+    decrement_ttl/1,
+    checksum/1
 ]).
 
 -include("masque_ip.hrl").
@@ -106,6 +108,51 @@ scope_check(Packet, Target, IPProto, Routes) ->
         {error, _} ->
             {error, malformed}
     end.
+
+%% @doc Decrement the IPv4 TTL or IPv6 Hop Limit of a packet the
+%% proxy is about to forward (RFC 9484: the proxy acts as an IP
+%% router). The IPv4 header checksum is recomputed. Returns
+%% `{error, ttl_zero}' when the packet must not be forwarded because
+%% the TTL / Hop Limit would reach zero.
+-spec decrement_ttl(binary()) -> {ok, binary()} | {error, ttl_zero | malformed}.
+decrement_ttl(<<4:4, IHL:4, Mid:7/binary, TTL:8, Proto:8, _Csum:16, Rest/binary>> = Pkt) when
+    IHL >= 5, byte_size(Pkt) >= IHL * 4
+->
+    case TTL =< 1 of
+        true ->
+            {error, ttl_zero};
+        false ->
+            OptLen = IHL * 4 - 12,
+            <<HdrRest:OptLen/binary, Payload/binary>> = Rest,
+            Hdr0 = <<4:4, IHL:4, Mid/binary, (TTL - 1):8, Proto:8, 0:16, HdrRest/binary>>,
+            Csum = checksum(Hdr0),
+            {ok,
+                <<4:4, IHL:4, Mid/binary, (TTL - 1):8, Proto:8, Csum:16, HdrRest/binary,
+                    Payload/binary>>}
+    end;
+decrement_ttl(<<6:4, Low:4, Head:6/binary, HopLimit:8, Rest/binary>> = Pkt) when
+    byte_size(Pkt) >= 40
+->
+    case HopLimit =< 1 of
+        true -> {error, ttl_zero};
+        false -> {ok, <<6:4, Low:4, Head/binary, (HopLimit - 1):8, Rest/binary>>}
+    end;
+decrement_ttl(_) ->
+    {error, malformed}.
+
+%% @doc Standard 16-bit one's-complement Internet checksum (RFC 1071).
+-spec checksum(binary()) -> 0..16#FFFF.
+checksum(Bin) ->
+    finish_csum(sum_words(Bin, 0)).
+
+sum_words(<<A:16, Rest/binary>>, Acc) -> sum_words(Rest, Acc + A);
+sum_words(<<A:8>>, Acc) -> Acc + (A bsl 8);
+sum_words(<<>>, Acc) -> Acc.
+
+finish_csum(Sum) ->
+    S = (Sum band 16#FFFF) + (Sum bsr 16),
+    S2 = (S band 16#FFFF) + (S bsr 16),
+    (bnot S2) band 16#FFFF.
 
 %%====================================================================
 %% Internal

@@ -9,8 +9,15 @@
 %%%       populated by the listener's DNS step.</li>
 %%%   <li>BCP-38 source-address filtering on inbound packets: the
 %%%       source must fall inside a prefix assigned to this client.</li>
+%%%   <li>Act as a router for accepted packets: decrement the TTL /
+%%%       Hop Limit (ICMP Time Exceeded when it runs out) and enforce
+%%%       the `mtu' option (default 1500; ICMPv6 Packet Too Big or
+%%%       ICMPv4 Fragmentation Needed when exceeded).</li>
 %%%   <li>Hand each accepted IP packet to the user-supplied
 %%%       `forward_fun' (default: drop).</li>
+%%%   <li>Record the addresses and routes the client assigns or
+%%%       advertises to the proxy (reported through `lifecycle_fun'
+%%%       as `peer_address_assigned' / `peer_routes_advertised').</li>
 %%% </ul>
 %%%
 %%% Assigned prefixes are registered in `masque_ip_session_registry',
@@ -38,6 +45,8 @@
 
 -include("masque_ip.hrl").
 
+-define(DEFAULT_MTU, 1500).
+
 -record(state, {
     opts :: map(),
     resolved = [] :: [inet:ip_address()],
@@ -47,6 +56,10 @@
     assigned = [] :: [ip_assignment_tuple()],
     %% Routes advertised at init. A hostname target is scoped to them.
     routes = [] :: [#ip_route{}],
+    %% Addresses and routes the client assigned / advertised to us
+    %% (RFC 9484 sec 4.7: both directions are allowed).
+    peer_assigned = [] :: [#ip_assignment{}],
+    peer_routes = [] :: [#ip_route{}],
     %% Negotiated URI scope: target / ipproto from the request line.
     %% `'*'' on either axis means "any" and skips the per-packet check.
     target = '*' :: masque_uri_ip:ip_target(),
@@ -400,11 +413,43 @@ max_prefix(6) -> 128.
 handle_ip_packet(Packet, #state{opts = Opts} = S) ->
     case accept_inbound(Packet, S) of
         ok ->
-            forward(Packet, S);
+            route(Packet, S);
         {drop, Reason} ->
             emit_drop(Reason, drop_detail(Packet), Opts),
             {ok, S}
     end.
+
+%% Router duties before handing the packet on: decrement the TTL /
+%% Hop Limit and check the egress MTU. Failures drop the packet and
+%% answer the client with the matching ICMP error.
+route(Packet, #state{opts = Opts} = S) ->
+    case masque_ip_packet:decrement_ttl(Packet) of
+        {ok, Fwd} ->
+            Mtu = maps:get(mtu, Opts, ?DEFAULT_MTU),
+            case byte_size(Fwd) > Mtu of
+                true ->
+                    emit_drop(mtu_exceeded, drop_detail(Packet), Opts),
+                    {ok, S, [{send_ip_packet, too_big(Packet, Mtu)}]};
+                false ->
+                    forward(Fwd, S)
+            end;
+        {error, ttl_zero} ->
+            emit_drop(ttl_zero, drop_detail(Packet), Opts),
+            {ok, S, [{send_ip_packet, time_exceeded(Packet)}]};
+        {error, malformed} ->
+            emit_drop(malformed, drop_detail(Packet), Opts),
+            {ok, S}
+    end.
+
+too_big(<<4:4, _/bitstring>> = Packet, Mtu) ->
+    masque_icmp:frag_needed(Mtu, Packet);
+too_big(Packet, Mtu) ->
+    masque_icmp:packet_too_big(Mtu, Packet).
+
+time_exceeded(<<4:4, _/bitstring>> = Packet) ->
+    masque_icmp:time_exceeded(v4, Packet);
+time_exceeded(Packet) ->
+    masque_icmp:time_exceeded(v6, Packet).
 
 %% RFC 9484 §5: the proxy MUST drop packets that fail BCP-38 source
 %% filtering or fall outside the negotiated `target' / `ipproto'
@@ -545,9 +590,19 @@ in_assigned(V, Src, Assigned) ->
 %% Peer-initiated control-plane (bidirectional per §8.2)
 %%====================================================================
 
-handle_address_assign(_Entries, S) -> {ok, S}.
+%% The client assigned addresses to the proxy. Keep the latest entry
+%% per request id and report it.
+handle_address_assign(Entries, #state{peer_assigned = Prev, opts = Opts} = S) ->
+    Ids = [Id || #ip_assignment{request_id = Id} <- Entries],
+    Kept = [E || #ip_assignment{request_id = Id} = E <- Prev, not lists:member(Id, Ids)],
+    invoke_lifecycle(Opts, peer_address_assigned, #{entries => Entries}, Opts),
+    {ok, S#state{peer_assigned = Kept ++ Entries}}.
 
-handle_route_advertisement(_Entries, S) -> {ok, S}.
+%% Each ROUTE_ADVERTISEMENT carries the peer's full route set
+%% (RFC 9484 sec 4.7.3), so it replaces the previous one.
+handle_route_advertisement(Routes, #state{opts = Opts} = S) ->
+    invoke_lifecycle(Opts, peer_routes_advertised, #{routes => Routes}, Opts),
+    {ok, S#state{peer_routes = Routes}}.
 
 terminate(_Reason, #state{assigned = Assigned, opts = Opts}) ->
     [release_one(Entry, Opts) || Entry <- Assigned],

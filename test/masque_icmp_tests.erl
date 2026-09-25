@@ -117,6 +117,16 @@ apply_action_packet_too_big_test() ->
     Via = masque_icmp:apply_action(packet_too_big, 1500, Invoking),
     ?assertEqual(Direct, Via).
 
+v4_frag_needed_test() ->
+    Invoking = sample_v4_packet(),
+    Pkt = masque_icmp:frag_needed(1400, Invoking),
+    <<Header:20/binary, Icmp/binary>> = Pkt,
+    ?assertEqual(0, verify_checksum(Header)),
+    ?assertEqual(0, verify_checksum(Icmp)),
+    %% Type 3 code 4, unused 16 bits, next-hop MTU (RFC 1191 sec 4).
+    ?assertMatch(<<3:8, 4:8, _:16, 0:16, 1400:16, _/binary>>, Icmp),
+    ?assertEqual(Pkt, masque_icmp:apply_action(frag_needed, 1400, Invoking)).
+
 %%====================================================================
 %% Internal
 %%====================================================================

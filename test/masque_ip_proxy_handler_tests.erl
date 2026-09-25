@@ -440,9 +440,11 @@ forward_probe() ->
         {forward, St}
     end.
 
+%% The handler forwards the packet with its TTL decremented.
 assert_forwarded(Pkt) ->
+    {ok, Fwd} = masque_ip_packet:decrement_ttl(Pkt),
     receive
-        {forwarded, Pkt} -> ok
+        {forwarded, Fwd} -> ok
     after 100 -> ct:fail("packet not forwarded")
     end.
 
@@ -522,3 +524,108 @@ prefix_assigned_source_passes_test() ->
     Out = v4_packet(10, 0, 0, 4, 8, 8, 8, 8, 17),
     {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Out, S),
     assert_not_forwarded().
+
+%%====================================================================
+%% Router duties: TTL and MTU
+%%====================================================================
+
+router_state(Opts) ->
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    init_with(Req, Opts#{allow_private => true, forward_fun => forward_probe()}).
+
+v4_packet_ttl(TTL, Size) ->
+    Payload = binary:copy(<<0>>, Size - 20),
+    Hdr0 = <<16#45, 0, Size:16, 0:16, 2#010:3, 0:13, TTL, 17, 0:16, 10, 0, 0, 1, 8, 8, 8, 8>>,
+    Csum = masque_ip_packet:checksum(Hdr0),
+    <<16#45, 0, Size:16, 0:16, 2#010:3, 0:13, TTL, 17, Csum:16, 10, 0, 0, 1, 8, 8, 8, 8,
+        Payload/binary>>.
+
+v6_packet_hl(HopLimit, Size) ->
+    Plen = Size - 40,
+    <<6:4, 0:8, 0:20, Plen:16, 17, HopLimit, 16#2001:16, 16#DB8:16, 0:80, 1:16, 16#2606:16,
+        16#4700:16, 0:80, 1:16, (binary:copy(<<0>>, Plen))/binary>>.
+
+ttl_decremented_on_forward_test() ->
+    drain(),
+    S = router_state(#{}),
+    Pkt = v4_packet_ttl(64, 40),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    receive
+        {forwarded, <<_:8/binary, 63, _:8, Csum:16, _/binary>> = Fwd} ->
+            <<Hdr:20/binary, _/binary>> = Fwd,
+            %% A valid header sums to zero.
+            ?assertEqual(0, masque_ip_packet:checksum(Hdr)),
+            ?assertNotEqual(0, Csum)
+    after 100 -> ct:fail("packet not forwarded")
+    end.
+
+ttl_one_yields_time_exceeded_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    S = router_state(#{}),
+    Before = masque_metrics:ip_drop_count(ttl_zero),
+    Pkt = v4_packet_ttl(1, 40),
+    {ok, _, [{send_ip_packet, Icmp}]} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    assert_not_forwarded(),
+    %% IPv4 + ICMP type 11 code 0.
+    ?assertMatch(<<4:4, _:68, 1, _:80, 11, 0, _/binary>>, Icmp),
+    ?assertEqual(Before + 1, masque_metrics:ip_drop_count(ttl_zero)).
+
+hop_limit_one_yields_time_exceeded_test() ->
+    drain(),
+    S = router_state(#{}),
+    Pkt = v6_packet_hl(1, 60),
+    {ok, _, [{send_ip_packet, Icmp}]} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    assert_not_forwarded(),
+    %% IPv6 next header 58 (ICMPv6), type 3 code 0.
+    ?assertMatch(<<6:4, _:44, 58, _:8, _:256, 3, 0, _/binary>>, Icmp).
+
+oversize_v6_yields_packet_too_big_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    S = router_state(#{mtu => 1280}),
+    Before = masque_metrics:ip_drop_count(mtu_exceeded),
+    Pkt = v6_packet_hl(64, 1300),
+    {ok, _, [{send_ip_packet, Icmp}]} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    assert_not_forwarded(),
+    %% ICMPv6 type 2 code 0 carrying the MTU.
+    ?assertMatch(<<6:4, _:44, 58, _:8, _:256, 2, 0, _:16, 1280:32, _/binary>>, Icmp),
+    ?assertEqual(Before + 1, masque_metrics:ip_drop_count(mtu_exceeded)),
+    %% At the MTU it goes through.
+    Fits = v6_packet_hl(64, 1280),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Fits, S),
+    assert_forwarded(Fits).
+
+oversize_v4_yields_frag_needed_test() ->
+    drain(),
+    S = router_state(#{mtu => 576}),
+    Pkt = v4_packet_ttl(64, 600),
+    {ok, _, [{send_ip_packet, Icmp}]} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    assert_not_forwarded(),
+    %% ICMP type 3 code 4, next-hop MTU in the low 16 bits.
+    ?assertMatch(<<4:4, _:68, 1, _:80, 3, 4, _:16, 0:16, 576:16, _/binary>>, Icmp).
+
+peer_capsules_recorded_test() ->
+    drain(),
+    Self = self(),
+    Hook = fun(E, D) -> Self ! {hook, E, D} end,
+    S0 = router_state(#{lifecycle_fun => Hook}),
+    Route = #ip_route{
+        version = 4,
+        start_addr = {192, 0, 2, 0},
+        end_addr = {192, 0, 2, 255},
+        ip_protocol = 0
+    },
+    {ok, _} = masque_ip_proxy_handler:handle_route_advertisement([Route], S0),
+    receive
+        {hook, peer_routes_advertised, #{routes := [Route]}} -> ok
+    after 100 -> ct:fail("no peer_routes_advertised")
+    end,
+    Assign = #ip_assignment{
+        request_id = 0, version = 4, address = {192, 0, 2, 1}, prefix_len = 32
+    },
+    {ok, _} = masque_ip_proxy_handler:handle_address_assign([Assign], S0),
+    receive
+        {hook, peer_address_assigned, #{entries := [Assign]}} -> ok
+    after 100 -> ct:fail("no peer_address_assigned")
+    end.
