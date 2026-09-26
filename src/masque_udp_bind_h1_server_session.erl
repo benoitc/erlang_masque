@@ -38,8 +38,11 @@
     max_cap :: pos_integer(),
     start_time :: integer() | undefined,
     idle_ms :: non_neg_integer() | infinity,
-    idle_ref :: reference() | undefined
+    idle_ref :: reference() | undefined,
+    max_pending :: non_neg_integer()
 }).
+
+-define(DEFAULT_MAX_PENDING_RESPONSES, 16).
 
 %%====================================================================
 %% API
@@ -105,7 +108,12 @@ init(#{
                         cap_buf = Buffer,
                         max_cap = MaxCap,
                         start_time = erlang:monotonic_time(millisecond),
-                        idle_ms = IdleMs
+                        idle_ms = IdleMs,
+                        max_pending = maps:get(
+                            max_pending_compression_responses,
+                            HOpts,
+                            ?DEFAULT_MAX_PENDING_RESPONSES
+                        )
                     }),
                     masque_metrics:tunnel_opened(
                         #{protocol => udp_bind, transport => h1}
@@ -253,13 +261,13 @@ handle_inbound_datagram(Payload, S) ->
     case masque_datagram:decode(Payload) of
         {ok, {0, Inner}} -> handle_context_zero(Inner, S);
         {ok, {Ctx, Inner}} when Ctx > 0 -> handle_known_context(Ctx, Inner, S);
-        {error, _} -> {noreply, S}
+        {error, _} -> drop(malformed, S)
     end.
 
 handle_context_zero(Inner, #state{bind_scope = scoped} = S) ->
     dispatch(handle_packet, [Inner], S);
 handle_context_zero(_Inner, S) ->
-    {noreply, S}.
+    drop(context_zero, S).
 
 handle_known_context(Ctx, Inner, S) ->
     case masque_compression_table:lookup_by_id(S#state.peer_table, Ctx) of
@@ -268,20 +276,24 @@ handle_known_context(Ctx, Inner, S) ->
                 {ok, {_V, IP, Port}, Pkt} ->
                     handle_bind_to_peer({IP, Port}, Pkt, S);
                 {error, _} ->
-                    {noreply, S}
+                    drop(malformed, S)
             end;
         {ok, #compression_entry{ip_version = V, address = A, port = P}} when
             V =:= 4; V =:= 6
         ->
             handle_bind_to_peer({A, P}, Inner, S);
         not_found ->
-            {noreply, S}
+            drop(unknown_context, S)
     end.
 
+drop(Reason, S) ->
+    masque_metrics:bind_drop_inc(Reason),
+    {noreply, S}.
+
 handle_bind_to_peer(Peer, Pkt, #state{handler = H, h_state = HS} = S) ->
-    case erlang:function_exported(H, handle_bind_packet, 3) of
+    case exported(H, handle_bind_packet, 3) of
         true ->
-            case H:handle_bind_packet(Peer, Pkt, HS) of
+            case safe_apply(H, handle_bind_packet, [Peer, Pkt, HS]) of
                 {ok, HS2} ->
                     {noreply, S#state{h_state = HS2}};
                 {ok, HS2, Actions} ->
@@ -289,28 +301,35 @@ handle_bind_to_peer(Peer, Pkt, #state{handler = H, h_state = HS} = S) ->
                         Actions,
                         S#state{h_state = HS2}
                     );
-                {drop, _R, HS2} ->
+                {drop, R, HS2} ->
+                    masque_metrics:bind_drop_inc(R),
                     {noreply, S#state{h_state = HS2}};
                 {stop, R, HS2} ->
-                    {stop, R, S#state{h_state = HS2}}
+                    {stop, R, S#state{h_state = HS2}};
+                {stop, R} ->
+                    {stop, R, S};
+                _ ->
+                    {noreply, S}
             end;
         false ->
             {noreply, S}
     end.
 
-handle_peer_assign(Assign, S) ->
-    case masque_compression_table:install(S#state.peer_table, Assign) of
+handle_peer_assign(Assign, #state{own_table = OT} = S) ->
+    Id = Assign#compression_assign.context_id,
+    case masque_compression_table:install(S#state.peer_table, Assign, OT) of
         {ok, T2} ->
-            Bytes = iolist_to_binary(
-                masque_compression_capsule:encode(
-                    #compression_ack{
-                        context_id =
-                            Assign#compression_assign.context_id
-                    }
-                )
-            ),
-            send_bytes(Bytes, S#state{peer_table = T2}),
+            send_capsule(#compression_ack{context_id = Id}, S),
             {noreply, S#state{peer_table = T2}};
+        {ok, {conflict, close_proxy_id, OwnId}, T2} ->
+            %% The client assigned a tuple we already opened: keep
+            %% theirs, close ours.
+            {ok, OT2} = masque_compression_table:install_close(
+                OT, #compression_close{context_id = OwnId}
+            ),
+            send_capsule(#compression_ack{context_id = Id}, S),
+            send_capsule(#compression_close{context_id = OwnId}, S),
+            {noreply, S#state{peer_table = T2, own_table = OT2}};
         {error, _} ->
             {stop, malformed_capsule, S}
     end.
@@ -326,10 +345,26 @@ handle_peer_close(Close, #state{own_table = OT, peer_table = PT} = S) ->
         {ok, OT2} ->
             {noreply, S#state{own_table = OT2}};
         {error, unknown_context} ->
+            Closed = is_uncompressed(PT, Close#compression_close.context_id),
             case masque_compression_table:install_close(PT, Close) of
-                {ok, PT2} -> {noreply, S#state{peer_table = PT2}};
-                {error, _} -> {stop, malformed_capsule, S}
+                {ok, PT2} when Closed ->
+                    %% Post-close prohibition: no new compressed
+                    %% contexts from now on.
+                    {noreply, S#state{
+                        peer_table = PT2,
+                        own_table = masque_compression_table:mark_uncompressed_closed(OT)
+                    }};
+                {ok, PT2} ->
+                    {noreply, S#state{peer_table = PT2}};
+                {error, _} ->
+                    {stop, malformed_capsule, S}
             end
+    end.
+
+is_uncompressed(Table, Id) ->
+    case masque_compression_table:lookup_by_id(Table, Id) of
+        {ok, #compression_entry{ip_version = 0}} -> true;
+        _ -> false
     end.
 
 %%====================================================================
@@ -346,34 +381,16 @@ do_actions([], S) ->
     {ok, S};
 do_actions([{send_bind_packet, Peer, Bytes} | Rest], S) ->
     do_actions(Rest, send_bind_payload(Peer, Bytes, S));
+do_actions([{compression_assign, {IP, Port}} | Rest], S) ->
+    do_actions(Rest, open_compression(IP, Port, S));
 do_actions([{compression_assign, Entry} | Rest], S) ->
-    Bytes = iolist_to_binary(
-        masque_compression_capsule:encode(
-            #compression_assign{
-                context_id = Entry#compression_entry.context_id,
-                ip_version = Entry#compression_entry.ip_version,
-                address = Entry#compression_entry.address,
-                port = Entry#compression_entry.port
-            }
-        )
-    ),
-    send_bytes(Bytes, S),
+    send_compression_assign(Entry, S),
     do_actions(Rest, S);
 do_actions([{compression_ack, Id} | Rest], S) ->
-    Bytes = iolist_to_binary(
-        masque_compression_capsule:encode(
-            #compression_ack{context_id = Id}
-        )
-    ),
-    send_bytes(Bytes, S),
+    send_capsule(#compression_ack{context_id = Id}, S),
     do_actions(Rest, S);
 do_actions([{compression_close, Id} | Rest], S) ->
-    Bytes = iolist_to_binary(
-        masque_compression_capsule:encode(
-            #compression_close{context_id = Id}
-        )
-    ),
-    send_bytes(Bytes, S),
+    send_capsule(#compression_close{context_id = Id}, S),
     do_actions(Rest, S);
 do_actions([{send_capsule, Type, Value} | Rest], S) ->
     Bytes = iolist_to_binary(masque_capsule:encode(Type, Value)),
@@ -385,6 +402,53 @@ do_actions([{close_session, _, _} | _], S) ->
     {stop, normal, S};
 do_actions([_Other | Rest], S) ->
     do_actions(Rest, S).
+
+%% Open an own-table mapping for a peer and announce it. Dropped when
+%% `max_pending' assigns already wait for a response, or after the
+%% client closed its uncompressed context (post-close prohibition).
+open_compression(IP, Port, #state{own_table = OT} = S) ->
+    case pending_responses(OT) >= S#state.max_pending of
+        true ->
+            masque_metrics:bind_drop_inc(pending_limit),
+            S;
+        false ->
+            case
+                masque_compression_table:open_compressed(
+                    OT, {family_of(IP), IP, Port}
+                )
+            of
+                {ok, Entry, OT2} ->
+                    send_compression_assign(Entry, S),
+                    S#state{own_table = OT2};
+                {error, uncompressed_closed} ->
+                    masque_metrics:bind_drop_inc(uncompressed_closed),
+                    S;
+                {error, _} ->
+                    masque_metrics:bind_drop_inc(other),
+                    S
+            end
+    end.
+
+pending_responses(Table) ->
+    length([
+        E
+     || #compression_entry{state = pending_ack} = E <-
+            masque_compression_table:entries(Table)
+    ]).
+
+send_compression_assign(Entry, S) ->
+    send_capsule(
+        #compression_assign{
+            context_id = Entry#compression_entry.context_id,
+            ip_version = Entry#compression_entry.ip_version,
+            address = Entry#compression_entry.address,
+            port = Entry#compression_entry.port
+        },
+        S
+    ).
+
+send_capsule(Capsule, S) ->
+    send_bytes(iolist_to_binary(masque_compression_capsule:encode(Capsule)), S).
 
 %%====================================================================
 %% Outbound datagram emit
@@ -500,9 +564,9 @@ send_bytes(Bytes, #state{transport = gen_tcp, socket = Sock}) ->
 %%====================================================================
 
 init_handler(Handler, Req, HOpts) ->
-    case erlang:function_exported(Handler, init, 2) of
+    case exported(Handler, init, 2) of
         true ->
-            case Handler:init(Req, HOpts) of
+            case safe_apply(Handler, init, [Req, HOpts]) of
                 {ok, HState} -> {ok, HState, []};
                 {ok, HState, Actions} -> {ok, HState, Actions};
                 {stop, Reason} -> {stop, Reason};
@@ -513,9 +577,9 @@ init_handler(Handler, Req, HOpts) ->
     end.
 
 dispatch(CB, Extra, #state{handler = H, h_state = HS} = S) ->
-    case erlang:function_exported(H, CB, length(Extra) + 1) of
+    case exported(H, CB, length(Extra) + 1) of
         true ->
-            case apply(H, CB, Extra ++ [HS]) of
+            case safe_apply(H, CB, Extra ++ [HS]) of
                 {ok, HS2} ->
                     {noreply, S#state{h_state = HS2}};
                 {ok, HS2, Actions} ->
@@ -524,11 +588,30 @@ dispatch(CB, Extra, #state{handler = H, h_state = HS} = S) ->
                     );
                 {stop, R, HS2} ->
                     {stop, R, S#state{h_state = HS2}};
+                {stop, R} ->
+                    {stop, R, S};
                 _ ->
                     {noreply, S}
             end;
         false ->
             {noreply, S}
+    end.
+
+%% `erlang:function_exported/3' is `false' for a module not loaded yet.
+exported(Mod, Fun, Arity) ->
+    _ = code:ensure_loaded(Mod),
+    erlang:function_exported(Mod, Fun, Arity).
+
+safe_apply(M, F, A) ->
+    try
+        apply(M, F, A)
+    catch
+        Class:Reason:Stack ->
+            logger:error(
+                "masque udp-bind-h1 handler ~p:~p/~p failed: ~p:~p~n~p",
+                [M, F, length(A), Class, Reason, Stack]
+            ),
+            {stop, {handler_crash, Reason}}
     end.
 
 try_callback(Mod, Fun, Args) ->

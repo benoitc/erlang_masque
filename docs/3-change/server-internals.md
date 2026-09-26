@@ -183,7 +183,7 @@ What the server session does when each event happens. "Reset" means the stream i
 | Connection close | router stops and casts `connection_closed`; a dead router is seen through the session's monitor as `router_gone`; no stream writes | `h2` tells every stream handler `{closed, R}`; stop `peer_closed` | `ssl_closed`: udp, ip, udp-bind stop `peer_closed`; tcp runs `handle_eof/1` first |
 | GOAWAY from the client | ignored by the router; tunnels keep running | delivered to the handler's `handle_info/2` (built-in handlers ignore it) | n/a |
 | Handler crash in `init/2` | worker returns `{handler_crash, R}`, 502 | 502 | 502 |
-| Handler crash in a later callback | logged, stop `{handler_crash, R}`, reset (`H3_INTERNAL_ERROR` for ip) | same, `internal_error` for ip | udp, tcp, ip: logged, stop `{handler_crash, R}`, socket closed; udp-bind: the session process crashes, the socket closes |
+| Handler crash in a later callback | logged, stop `{handler_crash, R}`, reset (`H3_INTERNAL_ERROR` for ip) | same, `internal_error` for ip | logged, stop `{handler_crash, R}`, socket closed |
 | Target error (handler returns `{stop, Reason, S}`) | udp: reset `H3_MESSAGE_ERROR`; tcp: `target_closed` or `eof_timeout` end with FIN, anything else resets with `H3_CONNECT_ERROR`; ip: FIN; udp-bind: reset `H3_INTERNAL_ERROR` | same shape with `protocol_error`, `connect_error`, FIN, `internal_error` | the socket is closed |
 | `close_session` action | stop `normal`, FIN (tcp skips it if a FIN was already sent) | same | the socket is closed |
 | Capsule buffer overflow | reset | reset | stop, socket closed |
@@ -206,10 +206,10 @@ The pipeline and the session layers are the same pattern implemented per module:
 
 - **Option lifting.** Shared: all three listeners copy `masque_server:handler_opt_keys/0` into `handler_opts`. Add a new listener-level handler option there.
 - **Request map.** Only h3 adds `peer` and `peer_cert`.
-- **Handler crash handling.** The udp-bind h1 session does not catch a crash in a callback; every other session stops with `{handler_crash, R}` (see the teardown matrix).
+- **Handler crash handling.** Every session stops with `{handler_crash, R}` (see the teardown matrix); each has its own copy of `safe_apply/3`.
 - **Error stops.** udp resets with `H3_MESSAGE_ERROR`, tcp with `H3_CONNECT_ERROR`, udp-bind with `H3_INTERNAL_ERROR`, and ip ends with a FIN.
 - **Metrics.** `tunnel_opened` is emitted by `masque_server_session` (udp h3) and both udp-bind sessions only. `tunnel_closed` is also emitted by the ip (h3) and ip-h1 and tcp-h1 sessions, so `masque.tunnels.active` goes negative for those; the h2 udp session emits neither (Q7).
-- **udp-bind h1.** `masque_udp_bind_h1_server_session` has no cross-side conflict check, no post-close prohibition, no pending-assign limit, and does not accept the `{compression_assign, {IP, Port}}` form; see [udp-bind internals](udp-bind-internals.md).
+- **udp-bind h1.** `masque_udp_bind_h1_server_session` repeats the compression rules of the h3/h2 session; see [udp-bind internals](udp-bind-internals.md).
 - **Dead API.** `masque_server_connection:register_session/3`, `lookup_session/2`, `start_link/1` and the sessions' synchronous `handle_call(finalize, ...)` are not used by the current code path.
 
 If you plan a refactor, the natural cut is one listener pipeline with a small callback per transport, and the handler runtime moved next to `masque_handler`.

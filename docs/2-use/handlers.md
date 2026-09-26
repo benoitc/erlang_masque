@@ -121,7 +121,6 @@ Handler exceptions are caught and logged (see [operations](operations.md#logs)),
 
 - In `init/2`: the tunnel is refused with 502 on every transport.
 - In an event callback: the tunnel ends with `{handler_crash, Reason}`. On h3 and h2 the stream is reset; on h1 the socket is closed. `terminate/2` still runs.
-- In an event callback of a udp-bind session on h1: the exception is not caught and the session process exits.
 - In `accept/1`: not caught by `masque`. Return `{reject, _}` instead of raising.
 - In `terminate/2`: ignored.
 

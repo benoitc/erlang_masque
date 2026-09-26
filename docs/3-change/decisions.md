@@ -187,7 +187,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q14.** Should draining send GOAWAY, and should the server react to a client GOAWAY? Today it does neither.
 - **Q15.** Settled as a defect: a peer reset of a pending h3 stream now answers the listener with `stream_dead` (see [server internals](server-internals.md)).
 - **Q16.** In a scoped udp-bind, context 0 goes to `handle_packet/2`, which the default bind handler does not export, so that traffic is dropped. Intended?
-- **Q17.** Should the h1 udp-bind server session enforce the same rules as the h3/h2 one (cross-side conflict, post-close rule, pending limit, crash handling, the `{compression_assign, {IP, Port}}` action)?
+- **Q17.** Settled: the h1 udp-bind server session enforces the same rules as the h3/h2 one (see [udp-bind internals](udp-bind-internals.md#the-h1-session)).
 - **Q18.** h3 pooled owners default to `dynamic` capacity and never report full, so the pool never opens a second h3 connection per fingerprint unless `max_streams` is set. Intended?
 - **Q19.** The `masque_ip_proxy_handler` moduledoc says the allocator is round-robin; the code is first-fit. Which is intended?
 - **Q20.** h1 idle timers are re-armed by inbound bytes only, so a tunnel that only sends toward the client idles out. Should outbound traffic count?

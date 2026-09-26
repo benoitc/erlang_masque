@@ -39,6 +39,9 @@
     h3_udp_handler_crash_resets_stream/1,
     h2_udp_handler_crash_resets_stream/1,
     h3_reset_while_starting_answers_listener/1,
+    h1_bind_handler_crash_closes_tunnel/1,
+    h1_udp_bind_assign_by_address/1,
+    h1_udp_bind_pending_limit/1,
     h3_reset_while_finalizing_answers_listener/1,
     bind_message_before_finalize/1,
     h3_unknown_reject_reason_gets_response/1,
@@ -91,6 +94,9 @@ all() ->
         h3_udp_handler_crash_resets_stream,
         h2_udp_handler_crash_resets_stream,
         h3_reset_while_starting_answers_listener,
+        h1_bind_handler_crash_closes_tunnel,
+        h1_udp_bind_assign_by_address,
+        h1_udp_bind_pending_limit,
         h3_reset_while_finalizing_answers_listener,
         bind_message_before_finalize,
         h3_unknown_reject_reason_gets_response,
@@ -142,8 +148,8 @@ init_per_testcase(Case, Config) ->
     {ok, H3} = masque_test_helpers:start_masque_server(maps:merge(Certs, Opts)),
     {ok, H2} = start_h2_server(Certs, Opts),
     H1 =
-        case Case of
-            h1_close_leaves_no_server_session -> start_h1_server(Certs, Opts);
+        case atom_to_list(Case) of
+            "h1_" ++ _ -> start_h1_server(Certs, Opts);
             _ -> undefined
         end,
     [{h3, H3}, {h2, H2}, {h1, H1} | Config].
@@ -201,10 +207,24 @@ extra_opts(h3_udp_bind_output_before_finalize_is_kept) ->
         bind_handler => masque_crash_bind_handler,
         handler_opts => HOpts#{early_assign => {{127, 0, 0, 1}, 9}}
     };
+extra_opts(h1_bind_handler_crash_closes_tunnel) ->
+    (bind_opts())#{bind_handler => masque_crash_bind_handler};
+extra_opts(h1_udp_bind_assign_by_address) ->
+    early_assign_opts(#{});
+extra_opts(h1_udp_bind_pending_limit) ->
+    early_assign_opts(#{max_pending_compression_responses => 0});
 extra_opts(h2_failed_session_releases_tunnel_slot) ->
     #{handler => masque_stop_init_handler, max_tunnels_per_connection => 1};
 extra_opts(_Case) ->
     #{}.
+
+early_assign_opts(Extra) ->
+    B = bind_opts(),
+    HOpts = maps:get(handler_opts, B),
+    B#{
+        bind_handler => masque_crash_bind_handler,
+        handler_opts => maps:merge(HOpts#{early_assign => {{127, 0, 0, 1}, 9}}, Extra)
+    }.
 
 bind_opts() ->
     #{
@@ -506,6 +526,33 @@ udp_handler_crash_resets_stream(Config, Transport) ->
         {masque_closed, Sess, peer_reset} -> ok
     after 5000 -> ct:fail(no_reset_on_crash)
     end.
+
+%% The h1 udp-bind session applies the same handler and compression
+%% rules as the h3/h2 one.
+h1_bind_handler_crash_closes_tunnel(Config) ->
+    Sess = bind_connect(Config, h1),
+    ok = masque:send_capsule(Sess, 16#ff01, <<>>),
+    receive
+        {masque_closed, Sess, _} -> ok
+    after 5000 -> ct:fail(no_close_on_crash)
+    end.
+
+h1_udp_bind_assign_by_address(Config) ->
+    Sess = bind_connect(Config, h1),
+    receive
+        {masque_compression_assigned, Sess, _Id, {{127, 0, 0, 1}, 9}} -> ok
+    after 5000 -> ct:fail(no_assign)
+    end,
+    ok = masque:close(Sess).
+
+h1_udp_bind_pending_limit(Config) ->
+    Sess = bind_connect(Config, h1),
+    receive
+        {masque_compression_assigned, Sess, _, _} = M -> ct:fail({unexpected, M})
+    after 500 -> ok
+    end,
+    {open, _} = sys:get_state(Sess),
+    ok = masque:close(Sess).
 
 %% A peer reset of a stream whose session is still starting answers
 %% the waiting listener at once instead of after the 30 s
