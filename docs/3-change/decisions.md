@@ -193,7 +193,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q20.** h1 idle timers are re-armed by inbound bytes only, so a tunnel that only sends toward the client idles out. Should outbound traffic count?
 - **Q21.** `dial_single_or_pool/5` waits for the pool checkout up to `checkout_timeout_ms` (60 s), regardless of the connect `timeout`. Intended?
 - **Q22.** The chain listeners set `handler`, `tcp_handler` and `ip_handler` to `masque_chain_handler` but not `bind_handler`, so udp-bind is not chained. Intended?
-- **Q23.** Are the listener gaps intended: h1 has no `fallback`, no `peer` / `peer_cert` and no tunnel limit; h2 has no `peer` / `peer_cert` and lifts fewer options into `handler_opts`?
+- **Q23.** Are the listener gaps intended: h1 has no `fallback`, no `peer` / `peer_cert` and no tunnel limit; h2 has no `peer` / `peer_cert`? (Option lifting into `handler_opts` is now the same on all three.)
 - **Q24.** The udp-bind proxy sends only on its own compressed contexts (or the client's uncompressed one) and reads client datagrams only on client-opened contexts, while the client session treats every installed context as two-way. Which reading of the draft is intended?
 - **Q25.** Error stops end the stream differently per protocol: UDP resets with `H3_MESSAGE_ERROR`, TCP with `H3_CONNECT_ERROR`, udp-bind with `H3_INTERNAL_ERROR`, IP with a FIN. Intended?
 - **Q26.** The h1 IP session has no limit on pending ADDRESS_REQUEST ids (h3/h2 cap it at 64). Intended?

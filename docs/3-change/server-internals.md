@@ -204,7 +204,7 @@ Datagram writes (udp, ip, udp-bind) never block: oversize UDP payloads are dropp
 
 The pipeline and the session layers are the same pattern implemented per module: three listeners, nine server sessions, each with its own copy of the handler runtime and the reject formatting. The copies have drifted. When you change behaviour in one copy, check the others. Known drift today:
 
-- **Option lifting.** h2 lifts fewer top-level keys into `handler_opts` (`resolver`, `allow`, `family`, `connect_timeout`, `socket_opts` are missing), so the TCP handler on h2 does not see top-level `family`, `connect_timeout` or `socket_opts`.
+- **Option lifting.** Shared: all three listeners copy `masque_server:handler_opt_keys/0` into `handler_opts`. Add a new listener-level handler option there.
 - **Request map.** Only h3 adds `peer` and `peer_cert`.
 - **Handler crash handling.** The udp-bind h1 session does not catch a crash in a callback; every other session stops with `{handler_crash, R}` (see the teardown matrix).
 - **Error stops.** udp resets with `H3_MESSAGE_ERROR`, tcp with `H3_CONNECT_ERROR`, udp-bind with `H3_INTERNAL_ERROR`, and ip ends with a FIN.

@@ -25,7 +25,7 @@
 -ifdef(TEST).
 %% Test-only: exercise the Extended CONNECT validator (pseudo-header
 %% reading, template matching) without standing up a listener.
--export([validate/7]).
+-export([validate/7, build_dispatch/1]).
 -endif.
 
 -type listener_name() :: atom().
@@ -156,27 +156,7 @@ build_dispatch(Opts) ->
         accept_bind => maps:get(accept_bind, Opts),
         resolver => maps:get(resolver, Opts, fun default_resolver/1),
         handler_opts => maps:merge(
-            maps:merge(
-                maps:with([address_pool, routes, mtu], Opts),
-                maps:with(
-                    [
-                        bind_address,
-                        bind_port,
-                        bind_socket_opts,
-                        public_addresses,
-                        public_address_fun,
-                        peer_filter_fun,
-                        scrub_fun,
-                        allow_private,
-                        allow_loopback,
-                        max_compression_contexts,
-                        max_compression_contexts_in,
-                        max_compression_contexts_out,
-                        max_pending_compression_responses
-                    ],
-                    Opts
-                )
-            ),
+            maps:with(masque_server:handler_opt_keys(), Opts),
             maps:get(handler_opts, Opts, #{})
         ),
         fallback => maps:get(fallback, Opts, undefined),
