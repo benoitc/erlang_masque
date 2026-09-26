@@ -13,7 +13,7 @@ Two processes are involved:
 
 ## Fingerprint
 
-`masque_upstream_pool:fingerprint/4` returns `{Host, Port, Transport, Hash}`, where `Transport` is `quic_h3` or `h2` and `Hash` is a SHA-256 of `verify`, `cacerts`, `ssl_opts` (sorted) and `alpn`. Callers with different trust or ALPN settings never share a connection. Per-tunnel options (`protocol`, `timeout`, `owner`, request headers) are not part of the key. The fingerprint is built by `pool_fingerprint/2` in `masque_racer`, which also builds the dial options (`pool_connect_opts/3`) and merges `upstream_pool_opts` (`idle_timeout_ms`, `max_streams`, `checkout_timeout_ms`).
+`fingerprint/4` in `masque_upstream_pool` returns `{Host, Port, Transport, Hash}`, where `Transport` is `quic_h3` or `h2` and `Hash` is a SHA-256 of `verify`, `cacerts`, `ssl_opts` (sorted) and `alpn`. Callers with different trust or ALPN settings never share a connection. Per-tunnel options (`protocol`, `timeout`, `owner`, request headers) are not part of the key. The fingerprint is built by `pool_fingerprint/2` in `masque_racer`, which also builds the dial options (`pool_connect_opts/3`) and merges `upstream_pool_opts` (`idle_timeout_ms`, `max_streams`, `checkout_timeout_ms`).
 
 ## Checkout
 
@@ -68,7 +68,7 @@ The owner arms an idle timer when it starts and whenever its last stream is rele
 | Connection closes | owner broadcasts `closed` to its sessions (they end with `peer_closed`) and stops |
 | `close_all/0` | pending waiters get `{error, shutdown}`, every owner is killed |
 
-Connect-UDP-Bind never checks out an owner: `masque:dial_single_or_pool/5` and `masque_racer:maybe_inject_pool_owner/2` skip the pool for `protocol => udp_bind`. Known gap: the `masque_upstream_owner` moduledoc still describes an ownership transfer from a separate dialer process, which the code no longer does.
+Connect-UDP-Bind never checks out an owner: `dial_single_or_pool/5` in `masque` and `maybe_inject_pool_owner/2` in `masque_racer` skip the pool for `protocol => udp_bind`.
 
 Tests: `masque_upstream_pool_tests`, `masque_upstream_owner_tests` (with the `masque_mock_transport` fake), `masque_upstream_pool_SUITE`.
 

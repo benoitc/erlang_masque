@@ -43,6 +43,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `connect_ip.md`, `connect_udp_bind.md`, `features.md` and `relay.md`
   are replaced by the new pages; version history from `features.md`
   moved here.
+- Module docs are `-moduledoc` / `-doc` attributes in Markdown. Only
+  `masque`, the handler behaviour and built-in handlers, the codecs, the
+  URI modules, `masque_ip`, `masque_metrics` and `masque_errors` appear
+  in the generated docs; the other modules are internal. `masque`
+  exports the `h3_handler_fun()` and `connection_handler_fun()` types.
 - Erlang/OTP 29 is now the only supported release (`minimum_otp_vsn`
   in `rebar.config`); CI runs tests, lint and dialyzer on OTP 29 only.
 - Bumped `quic` 1.3.0 -> 2.0.1 and `h1` (erlang_h1) 0.6.2 -> 0.9.1.
@@ -57,7 +62,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `masque.tunnel.duration_ms` cover every server session (UDP, TCP, IP
   and udp-bind on h3, h2 and h1).
 - Every listener copies the same top-level options into `handler_opts`
-  (`masque_server:handler_opt_keys/0`); h2 now also copies `resolver`,
+  (`handler_opt_keys/0` in `masque_server`); h2 now also copies `resolver`,
   `allow`, `family`, `connect_timeout` and `socket_opts`.
 - `transports` must be a list of `h3`, `h2` and `h1`; anything else
   returns `{error, {invalid_opts, {transports, T}}}` instead of crashing
@@ -106,7 +111,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Upstream pool checkout returns `{error, timeout | {dial_failed, R} |
   {dial_crashed, {C, R}}}` instead of exiting, and dials more
   connections per fingerprint when owners hit `max_streams`.
-- `masque_ip_session_registry:release/3` only frees ranges owned by the
+- `release/3` in `masque_ip_session_registry` only frees ranges owned by the
   caller; `release/4` takes the owner pid.
 - `masque_capsule:known/1` returns true for every implemented capsule
   type.
@@ -134,7 +139,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `decrement_ttl/1`, `checksum/1`, `upper_layer/1`,
   `masque_icmp:frag_needed/2`, `is_error/1`,
   `masque_chain_handler:handle_address_request/2`.
-- `masque_tls:client_opts/3` with an explicit ALPN list.
+- `client_opts/3` in `masque_tls` with an explicit ALPN list.
 - `masque_uri:parse_ip_literal/1`, `parse_uint/2`,
   `masque_uri_template:var_names/1`.
 - `masque_compression_table:install/3` (reports `close_proxy_id`

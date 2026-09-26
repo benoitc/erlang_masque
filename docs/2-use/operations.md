@@ -67,7 +67,7 @@ masque:info(Sess).
 
 `state` is `connecting`, `open` or `closed` (the peer ended the tunnel and queue-mode data is still unread). Datagram sessions add `rx_dropped`, the items dropped because the queue was full. CONNECT-IP adds `ipproto`, udp-bind adds `bind`. UDP over h3 reports no `transport`. `masque:ip_info/1` returns the CONNECT-IP addresses, routes and MTU. `info/1` exits if the session is gone.
 
-Server sessions have no public inspection call. `masque_ip_session_registry:all/0` lists the CONNECT-IP address assignments; for the rest see [debugging](../3-change/debugging.md).
+Server sessions have no public inspection call. `all/0` in `masque_ip_session_registry` lists the CONNECT-IP address assignments; for the rest see [debugging](../3-change/debugging.md).
 
 ## Drain for rolling restarts
 

@@ -40,6 +40,8 @@ rebar3 fmt --check
 
 Lint rules and the reasons some are relaxed are listed in `AGENTS.md` and `elvis.config`.
 
+If you touch module or function docs, also run `rebar3 ex_doc`; it must finish without warnings. How to document a module (published or internal) is in [code-map](docs/3-change/code-map.md#documenting-a-module).
+
 ## Branches, commits and pull requests
 
 - Branch off `main`; do not commit to `main` directly.

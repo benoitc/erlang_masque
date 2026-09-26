@@ -30,7 +30,7 @@ When the client sends ADDRESS_REQUEST, the session records each non-zero request
 1. No `address_pool`: every entry gets the "no address" reply (`masque_ip:reject_requests/1`: all-zero address, prefix 32 or 128).
 2. The first pool range of the requested IP version is used; `address_pool` may be a prefix, an `#ip_route{}` or a list of them.
 3. The prefix length is the requested one clamped to `[min_assignable_prefix, 32 | 128]`; by default only host addresses are handed out.
-4. Candidates are stride-aligned blocks walked from the start of the range. A block is skipped if it overlaps an assignment this session already holds, or if `masque_ip_session_registry:register/5` returns `{error, conflict}` because another session holds it. The first free block wins: this is first-fit, although the module doc says "round-robin".
+4. Candidates are stride-aligned blocks walked from the start of the range. A block is skipped if it overlaps an assignment this session already holds, or if `register/5` in `masque_ip_session_registry` returns `{error, conflict}` because another session holds it. The first free block wins: this is first-fit.
 5. Pool exhausted: that entry gets the "no address" reply.
 
 Each successful assignment bumps `ip_assign_inc/0` and emits `address_assigned` through `lifecycle_fun`.

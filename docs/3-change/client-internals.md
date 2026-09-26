@@ -19,7 +19,7 @@ Then `connect_via/4` picks the path:
 |---|---|
 | `[h3]` or `[h2]` | `dial_single_or_pool/5`: pool checkout if `upstream_pool => true`, then `dial_single/4` |
 | `[h1]` | `dial_single/4`, never pooled |
-| two or more | `masque_racer:race/4` |
+| two or more | `race/4` in `masque_racer` |
 
 The session module comes from `session_mod/2` in `masque.erl`; the racer has an identical table in `transport_mod/2` in `masque_racer`. Change both together.
 
@@ -38,7 +38,7 @@ The tcp, ip and udp-bind modules serve h3 and h2 by switching on a `transport` f
 
 ## The racer
 
-`masque_racer:race/4` runs inside the caller's process. It creates an `erlang:alias/0`, and every report from its workers is sent to that alias. The alias is dropped and flushed before `race/4` returns, so a late report can never land in the caller's mailbox.
+`race/4` in `masque_racer` runs inside the caller's process. It creates an `erlang:alias/0`, and every report from its workers is sent to that alias. The alias is dropped and flushed before `race/4` returns, so a late report can never land in the caller's mailbox.
 
 For each transport, the racer spawns a worker (`spawn_attempt/5`). The worker:
 
@@ -84,7 +84,7 @@ Outcomes:
 
 ### Deferred owner delivery
 
-A session can produce owner messages between its 2xx and `set_owner`: for example a CONNECT-IP proxy that sends ADDRESS_ASSIGN right after the response. Without care those would go to the worker, which then exits. `masque_client_owner` prevents that. With `defer_owner => true`, `masque_client_owner:init/1` puts an empty list in the session's process dictionary, `send/2` appends to it instead of sending, and `release/1`, called from each session's `swap_owner/2`, flushes the list in order to the new owner. Every owner message in every client session goes through `masque_client_owner:send/2`. The hold queue is invisible in `sys:get_state/1`; look at `erlang:process_info(Pid, dictionary)`.
+A session can produce owner messages between its 2xx and `set_owner`: for example a CONNECT-IP proxy that sends ADDRESS_ASSIGN right after the response. Without care those would go to the worker, which then exits. `masque_client_owner` prevents that. With `defer_owner => true`, `init/1` in `masque_client_owner` puts an empty list in the session's process dictionary, `send/2` appends to it instead of sending, and `release/1`, called from each session's `swap_owner/2`, flushes the list in order to the new owner. Every owner message in every client session goes through `send/2` in `masque_client_owner`. The hold queue is invisible in `sys:get_state/1`; look at `erlang:process_info(Pid, dictionary)`.
 
 ## The session state machine
 
@@ -129,7 +129,7 @@ In queue mode `{masque_closed, _, _}` is not sent; `recv/2` reports the end inst
 
 ## Owner handoff
 
-`{set_owner, Pid}` is accepted in `connecting` and `open`. `swap_owner/2` demonitors the old owner, monitors the new one and calls `masque_client_owner:release/1`. The racer is the only caller today. A session in `failed` or `closed` answers `set_owner` with an error, which the racer treats as a lost winner.
+`{set_owner, Pid}` is accepted in `connecting` and `open`. `swap_owner/2` demonitors the old owner, monitors the new one and calls `release/1` in `masque_client_owner`. The racer is the only caller today. A session in `failed` or `closed` answers `set_owner` with an error, which the racer treats as a lost winner.
 
 ## Delivery modes and rx queues
 
@@ -148,7 +148,7 @@ In queue mode `{masque_closed, _, _}` is not sent; `recv/2` reports the end inst
 
 With `upstream_pool => true` on h2 or h3, the checkout (in the racer worker, or in `dial_single_or_pool/5`) puts `pool_owner => Pid` in the session opts. The session then does not dial:
 
-- `do_connect/2` calls `masque_upstream_owner:acquire_stream/4`, which sends the request on the shared connection and registers the session as the stream handler. It returns `{ok, StreamId, Conn}`.
+- `do_connect/2` calls `acquire_stream/4` in `masque_upstream_owner`, which sends the request on the shared connection and registers the session as the stream handler. It returns `{ok, StreamId, Conn}`.
 - Stream data reaches the session directly from the transport; responses, h3 datagrams, resets, close and h3 GOAWAY come through the upstream owner, in the same message shapes, so the `open` clauses do not change.
 - `session_teardown/1` calls `release_stream/2` instead of closing the connection, and a capsule error releases the stream instead of cancelling it.
 
