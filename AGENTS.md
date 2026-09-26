@@ -47,65 +47,21 @@ self-skips unless `MASQUE_GO_BIN` points at an external MASQUE binary.
 
 ## Architecture
 
-### Module Layers
+Do not rely on a summary here; read the maintained docs before changing code:
 
-**Public API:** `masque.erl` (the facade: `connect/2,3`, `send/2,3`, `recv/2`,
-`close/1`, `info/1`, and the `start_listener*` / `stop_listener*` family for
-h3 / h2 / h1).
+- `docs/1-understand/architecture.md` - layers, processes, supervision, global state.
+- `docs/3-change/code-map.md` - every module by role, with "change this when".
+- `docs/3-change/server-internals.md` and `client-internals.md` - request and
+  connect flows, session anatomy, teardown.
+- `docs/3-change/transports.md` - h3/h2/h1 differences and the quic_h3, h2, h1
+  message contracts the code depends on (re-check them on dependency bumps).
+- `docs/3-change/testing.md` - suite map, fixtures, known traps (dial
+  `127.0.0.1`, not `localhost`).
+- `docs/3-change/decisions.md` - recorded decisions and open questions; do not
+  settle an open question in code without the maintainer.
 
-**Server transports:** `masque_server.erl` (HTTP/3 via `quic_h3`),
-`masque_h2_server.erl` (HTTP/2 Extended CONNECT), `masque_h1_server.erl`
-(HTTP/1.1 Upgrade and classic CONNECT). Per-stream server state lives in
-`masque_server_session.erl`, `masque_h2_server_session.erl`,
-`masque_h1_server_session.erl`, and the protocol-specific `*_server_session`
-modules; supervised by the `masque_*_session_sup` modules under `masque_sup`.
-
-**Client sessions:** `masque_client_session.erl` and the transport / protocol
-variants (`masque_h2_client_session`, `masque_h1_client_session`,
-`masque_tcp_client_session`, `masque_ip_client_session`,
-`masque_udp_bind_client_session`, and their `*_h1_*` forms).
-
-**Handlers (pluggable):** `masque_handler.erl` is the behaviour (all callbacks
-optional: `accept/1`, `init/2`, `handle_packet/2`, `handle_data/2`,
-`handle_capsule/3`, `handle_info/2`, `handle_eof/1`, `terminate/2`). Built-in
-handlers: `masque_udp_proxy_handler`, `masque_tcp_proxy_handler`,
-`masque_ip_proxy_handler`, `masque_udp_bind_proxy_handler`, and
-`masque_chain_handler` (relay chaining).
-
-**Codecs:** `masque_datagram` (RFC 9298 context-id framing), `masque_capsule`
-(RFC 9297 capsules), `masque_ip_capsule`, `masque_ip_packet`, `masque_icmp`,
-`masque_compression_capsule`, `masque_compression_table`,
-`masque_udp_bind_payload`.
-
-**URI templates:** `masque_uri`, `masque_uri_template`, `masque_uri_ip`,
-`masque_uri_udp_bind`.
-
-**Support:** `masque_racer` (Apple-style h3/h2/h1 transport racing),
-`masque_upstream_pool` and `masque_upstream_owner` (upstream connection
-pooling), `masque_errors` (status mapping), `masque_metrics`, `masque_tls`,
-`masque_ip_session_registry`, `masque_sup`, `masque_app`.
-
-### Supervision Tree
-
-`masque_app` -> `masque_sup` (one_for_one). Listeners and client sessions
-attach dynamically; the `masque_h2_session_sup` / `masque_h1_session_sup`
-families supervise per-protocol session processes (udp, tcp, ip, udp-bind).
-
-### Key Files
-
-- `include/masque.hrl` - CONNECT-UDP/TCP constants, default URI templates,
-  capsule and error-status macros.
-- `include/masque_ip.hrl` - CONNECT-IP constants and capsule types (RFC 9484).
-- `docs/design.md` - architecture and transport-racing design.
-- `docs/features.md` - feature matrix and RFC coverage.
-- `docs/api.md` - API reference.
-
-### Session Model
-
-The owner process drives a session through `masque.erl` and receives messages
-such as `{masque_data, Sess, Data}` for tunnelled bytes. Server handlers are
-invoked per stream; `accept/1` gates the handshake (returning a non-2xx
-rejects it) and the `handle_*` callbacks process the tunnel.
+When a change alters behaviour described in `docs/`, update the page in the
+same change.
 
 ## Linting & Formatting Notes
 
