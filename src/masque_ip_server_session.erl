@@ -114,7 +114,7 @@ finalize_h2(State0, Actions) ->
     case send_response(State0, 200, response_headers()) of
         ok ->
             State1 = claim_stream_and_buffer(State0),
-            State = maybe_flush_buf(State1),
+            State = maybe_flush_buf(mark_open(State1)),
             apply_init_actions(Actions, State);
         {error, _} ->
             {stop, stream_dead}
@@ -186,10 +186,7 @@ finalize(#state{pending_actions = Actions} = S) ->
                 _ ->
                     S1 = run_init_actions(
                         Actions,
-                        S#state{
-                            pending_actions = undefined,
-                            start_time = erlang:monotonic_time(millisecond)
-                        }
+                        mark_open(S#state{pending_actions = undefined})
                     ),
                     replay_early(lists:reverse(S1#state.early), S1#state{early = []})
             end;
@@ -371,6 +368,12 @@ unregister_from_router(Router, StreamId) ->
     catch
         _:_ -> ok
     end.
+
+%% The 2xx is sent and the stream claimed: the tunnel counts as open
+%% until `terminate/2'.
+mark_open(#state{transport = Transport} = S) ->
+    masque_metrics:tunnel_opened(#{protocol => ip, transport => Transport}),
+    S#state{start_time = erlang:monotonic_time(millisecond)}.
 
 emit_tunnel_closed(#state{start_time = undefined}) ->
     ok;

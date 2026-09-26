@@ -40,6 +40,7 @@
     h2_udp_handler_crash_resets_stream/1,
     h3_reset_while_starting_answers_listener/1,
     h1_bind_handler_crash_closes_tunnel/1,
+    h1_every_tunnel_counts_open_and_close/1,
     h1_udp_bind_assign_by_address/1,
     h1_udp_bind_pending_limit/1,
     h3_reset_while_finalizing_answers_listener/1,
@@ -95,6 +96,7 @@ all() ->
         h2_udp_handler_crash_resets_stream,
         h3_reset_while_starting_answers_listener,
         h1_bind_handler_crash_closes_tunnel,
+        h1_every_tunnel_counts_open_and_close,
         h1_udp_bind_assign_by_address,
         h1_udp_bind_pending_limit,
         h3_reset_while_finalizing_answers_listener,
@@ -209,6 +211,8 @@ extra_opts(h3_udp_bind_output_before_finalize_is_kept) ->
     };
 extra_opts(h1_bind_handler_crash_closes_tunnel) ->
     (bind_opts())#{bind_handler => masque_crash_bind_handler};
+extra_opts(h1_every_tunnel_counts_open_and_close) ->
+    bind_opts();
 extra_opts(h1_udp_bind_assign_by_address) ->
     early_assign_opts(#{});
 extra_opts(h1_udp_bind_pending_limit) ->
@@ -552,6 +556,52 @@ h1_udp_bind_pending_limit(Config) ->
     after 500 -> ok
     end,
     {open, _} = sys:get_state(Sess),
+    ok = masque:close(Sess).
+
+%% Every server session reports `tunnel_opened' once and
+%% `tunnel_closed' once, so `masque.tunnels.active' returns to where it
+%% started. Counted with call-count tracing on `masque_metrics'.
+h1_every_tunnel_counts_open_and_close(Config) ->
+    Opened = {masque_metrics, tunnel_opened, 1},
+    Closed = {masque_metrics, tunnel_closed, 2},
+    _ = erlang:trace_pattern(Opened, true, [call_count]),
+    _ = erlang:trace_pattern(Closed, true, [call_count]),
+    try
+        {call_count, O0} = erlang:trace_info(Opened, call_count),
+        {call_count, C0} = erlang:trace_info(Closed, call_count),
+        Kinds = [udp, tcp, ip, udp_bind],
+        Tunnels = [{T, K} || T <- [h3, h2, h1], K <- Kinds],
+        lists:foreach(fun({T, K}) -> open_and_close(Config, T, K) end, Tunnels),
+        N = length(Tunnels),
+        ok = wait_until(
+            fun() ->
+                {call_count, O} = erlang:trace_info(Opened, call_count),
+                {call_count, C} = erlang:trace_info(Closed, call_count),
+                {O - O0, C - C0} =:= {N, N}
+            end,
+            100
+        )
+    after
+        _ = erlang:trace_pattern(Opened, false, [call_count]),
+        _ = erlang:trace_pattern(Closed, false, [call_count])
+    end.
+
+open_and_close(Config, T, K) ->
+    Port = maps:get(port, ?config(T, Config)),
+    Proxy = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    Opts = #{verify => verify_none, transports => [T]},
+    {ok, Sess} =
+        case K of
+            udp ->
+                masque:connect(Proxy, {<<"192.0.2.6">>, 443}, Opts);
+            tcp ->
+                {_Echo, EchoPort} = start_tcp_echo(),
+                masque:connect(Proxy, {<<"127.0.0.1">>, EchoPort}, Opts#{protocol => tcp});
+            ip ->
+                masque:connect(Proxy, {'*', '*'}, Opts#{protocol => ip});
+            udp_bind ->
+                masque:bind_connect(Proxy, unscoped, Opts)
+        end,
     ok = masque:close(Sess).
 
 %% A peer reset of a stream whose session is still starting answers

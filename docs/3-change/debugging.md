@@ -154,7 +154,7 @@ No other handler emits lifecycle events.
 | `masque.tunnels.rejected` | `reason` |
 | `masque.bytes.in`, `masque.bytes.out` | `protocol`, `transport` |
 
-Coverage is uneven: `tunnel_opened` is only emitted by the h3 CONNECT-UDP session and the udp-bind sessions, while `tunnel_closed` is also emitted by IP sessions and the h1 TCP session. `masque.tunnels.active` can therefore drift for IP and h1 TCP tunnels, and h2 UDP, h1 UDP and h2/h3 TCP tunnels do not appear at all. Do not debug from these numbers alone.
+Every server session counts itself in `masque.tunnels.total` and `masque.tunnels.active`, so a steadily growing `active` means tunnels are not ending. Byte counters cover only some sessions (see [operations](../2-use/operations.md#metrics)).
 
 Drop counters are plain OTP `counters`, readable without any exporter:
 

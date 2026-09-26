@@ -31,7 +31,8 @@
     h_state :: term(),
     req :: map(),
     cap_buf = <<>> :: binary(),
-    max_cap :: pos_integer()
+    max_cap :: pos_integer(),
+    start_time :: integer() | undefined
 }).
 
 %%====================================================================
@@ -46,7 +47,18 @@ start_link(Args) ->
 %% gen_server
 %%====================================================================
 
-init(#{
+%% A tunnel counts as open once `init_session/1' succeeded: the 2xx is
+%% sent and the stream (or socket) is ours. `terminate/2' closes it.
+init(Args) ->
+    case init_session(Args) of
+        {ok, S} ->
+            masque_metrics:tunnel_opened(#{protocol => udp, transport => h2}),
+            {ok, S#state{start_time = erlang:monotonic_time(millisecond)}};
+        Other ->
+            Other
+    end.
+
+init_session(#{
     conn := Conn,
     stream_id := StreamId,
     handler := Handler,
@@ -146,7 +158,19 @@ handle_info({h2, _Conn, {closed, _Reason}}, S) ->
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
-terminate(normal, #state{
+terminate(Reason, S) ->
+    emit_tunnel_closed(S),
+    terminate_session(Reason, S).
+
+emit_tunnel_closed(#state{start_time = undefined}) ->
+    ok;
+emit_tunnel_closed(#state{start_time = T}) ->
+    masque_metrics:tunnel_closed(
+        erlang:monotonic_time(millisecond) - T,
+        #{protocol => udp, transport => h2}
+    ).
+
+terminate_session(normal, #state{
     conn = Conn,
     stream_id = StreamId,
     handler = Handler,
@@ -161,7 +185,7 @@ terminate(normal, #state{
         end),
     try_callback(Handler, terminate, [normal, HState]),
     ok;
-terminate(Reason, #state{
+terminate_session(Reason, #state{
     conn = Conn,
     handler = Handler,
     h_state = HState
@@ -172,7 +196,7 @@ terminate(Reason, #state{
     masque_h2_server:release_tunnel(Conn),
     try_callback(Handler, terminate, [Reason, HState]),
     ok;
-terminate(Reason, #state{
+terminate_session(Reason, #state{
     conn = Conn,
     stream_id = StreamId,
     handler = Handler,

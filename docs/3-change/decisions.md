@@ -177,7 +177,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q4.** Why are h3 server sessions unsupervised (started by the router with `gen_server:start/3`, then linked and monitored)?
 - **Q5.** All h2 sessions send the 2xx from their own `init/1`, and the h2 UDP session is the only one in a separate module without a `transport` field or metrics. Is that separation intended?
 - **Q6.** Should idle timeouts exist only on h1 sessions?
-- **Q7.** Are `masque.tunnels.*` metrics meant to cover every protocol and transport? Today only the h3 UDP and udp-bind sessions emit `tunnel_opened`, while the IP (h3), IP-h1 and TCP-h1 sessions emit `tunnel_closed`, which drives `masque.tunnels.active` negative.
+- **Q7.** Settled: `masque.tunnels.*` covers every protocol and transport; each server session reports one open and one close.
 - **Q8.** How stable are internal message shapes (`masque_datagram_in`, `masque_finalized`, `dial_result`, `owner_capacity`)?
 - **Q9.** Versioning: the 0.6.0 CHANGELOG entry and the v0.5/v0.6 tags are missing; is hex publishing planned?
 - **Q10.** Which connect-tcp draft revision is targeted?

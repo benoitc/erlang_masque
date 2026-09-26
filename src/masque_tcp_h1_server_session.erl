@@ -53,7 +53,18 @@ start_link(Args) ->
 %% gen_server
 %%====================================================================
 
-init(#{
+%% A tunnel counts as open once `init_session/1' succeeded: the 2xx is
+%% sent and the stream (or socket) is ours. `terminate/2' closes it.
+init(Args) ->
+    case init_session(Args) of
+        {ok, S} ->
+            masque_metrics:tunnel_opened(#{protocol => tcp, transport => h1}),
+            {ok, S#state{start_time = erlang:monotonic_time(millisecond)}};
+        Other ->
+            Other
+    end.
+
+init_session(#{
     conn := Conn,
     stream_id := StreamId,
     handler := Handler,
