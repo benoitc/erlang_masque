@@ -7,7 +7,7 @@
 %%% and `16#ff01', which makes `handle_capsule/3' crash.
 %%% With `early_data => Bin' the session also queues a message, before
 %%% the stream is finalized, that makes the handler send `Bin' as a
-%%% datagram.
+%%% datagram. With `init_delay => Ms' `init/2' sleeps after reporting.
 -module(masque_report_handler).
 -behaviour(masque_handler).
 
@@ -25,6 +25,7 @@ init(_Req, Opts) ->
         {ok, Bin} -> self() ! {masque_test_early_data, Bin};
         error -> ok
     end,
+    timer:sleep(maps:get(init_delay, Opts, 0)),
     {ok, Opts}.
 
 handle_packet(Data, State) ->

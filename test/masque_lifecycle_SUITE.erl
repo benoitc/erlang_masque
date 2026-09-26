@@ -38,6 +38,8 @@
     h2_bind_handler_crash_resets_stream/1,
     h3_udp_handler_crash_resets_stream/1,
     h2_udp_handler_crash_resets_stream/1,
+    h3_reset_while_starting_answers_listener/1,
+    h3_reset_while_finalizing_answers_listener/1,
     bind_message_before_finalize/1,
     h3_unknown_reject_reason_gets_response/1,
     h2_unknown_reject_reason_gets_response/1,
@@ -88,6 +90,8 @@ all() ->
         h2_bind_handler_crash_resets_stream,
         h3_udp_handler_crash_resets_stream,
         h2_udp_handler_crash_resets_stream,
+        h3_reset_while_starting_answers_listener,
+        h3_reset_while_finalizing_answers_listener,
         bind_message_before_finalize,
         h3_unknown_reject_reason_gets_response,
         h2_unknown_reject_reason_gets_response,
@@ -501,6 +505,71 @@ udp_handler_crash_resets_stream(Config, Transport) ->
     receive
         {masque_closed, Sess, peer_reset} -> ok
     after 5000 -> ct:fail(no_reset_on_crash)
+    end.
+
+%% A peer reset of a stream whose session is still starting answers
+%% the waiting listener at once instead of after the 30 s
+%% `start_session' timeout, and leaves no session behind.
+h3_reset_while_starting_answers_listener(_Config) ->
+    {Router, Caller} = start_pending_session(#{init_delay => 500}),
+    Pid = await_session(),
+    MRef = erlang:monitor(process, Pid),
+    Router ! {quic_h3, self(), {stream_reset, 0, 0}},
+    await_start_result(Caller, {error, stream_dead}),
+    await_down(MRef, Pid),
+    ok = gen_server:stop(Router).
+
+%% Same, once the session has started and waits for its finalize.
+h3_reset_while_finalizing_answers_listener(_Config) ->
+    {Router, Caller} = start_pending_session(#{}),
+    Pid = await_session(),
+    %% Queued ahead of the router's finalize cast: the session stays
+    %% started but unfinalized until it is resumed.
+    ok = sys:suspend(Pid),
+    MRef = erlang:monitor(process, Pid),
+    ok = wait_finalizing(Router, 50),
+    Router ! {quic_h3, self(), {stream_reset, 0, 0}},
+    await_start_result(Caller, {error, stream_dead}),
+    ok = sys:resume(Pid),
+    await_down(MRef, Pid),
+    ok = gen_server:stop(Router).
+
+start_pending_session(HOpts) ->
+    {ok, Router} = masque_server_connection:start_link(0),
+    unlink(Router),
+    %% A dead conn pid: transport calls fail fast with noproc.
+    Conn = spawn(fun() -> ok end),
+    Args = #{
+        conn => Conn,
+        stream_id => 0,
+        transport => h3,
+        router => Router,
+        protocol => udp,
+        handler => masque_report_handler,
+        handler_opts => HOpts#{report_to => self()},
+        req => #{target_host => <<"192.0.2.6">>, target_port => 443}
+    },
+    Self = self(),
+    Caller = spawn(fun() ->
+        Self ! {start_result, self(), masque_server_connection:start_session(Router, Args)}
+    end),
+    {Router, Caller}.
+
+await_start_result(Caller, Expected) ->
+    receive
+        {start_result, Caller, Result} -> ?assertEqual(Expected, Result)
+    after 2000 -> ct:fail(listener_still_waiting)
+    end.
+
+wait_finalizing(_Router, 0) ->
+    ct:fail(never_finalizing);
+wait_finalizing(Router, N) ->
+    case element(4, sys:get_state(Router)) of
+        #{0 := {_, {finalizing, _, _}, _}} ->
+            ok;
+        _ ->
+            timer:sleep(20),
+            wait_finalizing(Router, N - 1)
     end.
 
 %% Messages reaching an h3 session before the router finalizes it (and

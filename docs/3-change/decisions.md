@@ -185,7 +185,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q12.** Is `masque_capsule` meant to become the single capsule codec? Today `quic_h3_capsule` (through `masque_capsule`), `h2_capsule` and `h1_capsule` are all used.
 - **Q13.** Settled: [a handler crash ends the tunnel](#a-handler-crash-ends-the-tunnel).
 - **Q14.** Should draining send GOAWAY, and should the server react to a client GOAWAY? Today it does neither.
-- **Q15.** A peer reset of a pending h3 stream makes the router drop the entry without replying, so the listener's `start_session` call waits the full 30 s. Intended?
+- **Q15.** Settled as a defect: a peer reset of a pending h3 stream now answers the listener with `stream_dead` (see [server internals](server-internals.md)).
 - **Q16.** In a scoped udp-bind, context 0 goes to `handle_packet/2`, which the default bind handler does not export, so that traffic is dropped. Intended?
 - **Q17.** Should the h1 udp-bind server session enforce the same rules as the h3/h2 one (cross-side conflict, post-close rule, pending limit, crash handling, the `{compression_assign, {IP, Port}}` action)?
 - **Q18.** h3 pooled owners default to `dynamic` capacity and never report full, so the pool never opens a second h3 connection per fingerprint unless `max_streams` is set. Intended?

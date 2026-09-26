@@ -127,7 +127,7 @@ The listener's `start_session` call times out after 30 s (the init worker's `gen
 
 A finalize that fails (the stream is gone) makes the session stop with `stream_dead` and the router reply `{error, stream_dead}`; the listener then stays silent for the same reason.
 
-A peer reset of a pending stream reaches the router, which drops the pending entry (`drop_stream/2`) without replying to the listener. The listener's call then waits for the full 30 s before `cancel_pending/2` runs; see Q15 in [decisions](decisions.md).
+A peer reset of a pending stream reaches the router, which drops the pending entry (`drop_stream/2`) and answers the listener with `{error, stream_dead}` at once; the listener sends nothing on the dead stream. A session that already started is released and stopped with `connection_closed`; one still in its init worker is stopped when `session_init_done` finds no entry.
 
 ## h2 path
 

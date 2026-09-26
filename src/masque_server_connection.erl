@@ -365,9 +365,29 @@ drop_stream(StreamId, S) ->
         end,
         S#state.monitors
     ),
-    Pending2 = maps:remove(StreamId, S#state.pending),
+    Pending2 = drop_pending(StreamId, S#state.pending),
     S#state{
         sessions = Sessions2,
         monitors = Monitors2,
         pending = Pending2
     }.
+
+%% A stream that goes away while its session is still starting answers
+%% the waiting listener with `stream_dead' so it does not sit out the
+%% `start_session' timeout. A session already started is released and
+%% stopped; a worker still running is left to finish, and its session
+%% is stopped when `session_init_done' finds no pending entry.
+drop_pending(StreamId, Pending) ->
+    case maps:take(StreamId, Pending) of
+        {{From, {finalizing, Pid, MRef}, _Buf}, Pending2} ->
+            erlang:demonitor(MRef, [flush]),
+            unlink(Pid),
+            gen_server:cast(Pid, connection_closed),
+            gen_server:reply(From, {error, stream_dead}),
+            Pending2;
+        {{From, _WorkerPid, _Buf}, Pending2} ->
+            gen_server:reply(From, {error, stream_dead}),
+            Pending2;
+        error ->
+            Pending
+    end.
