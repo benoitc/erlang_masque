@@ -22,7 +22,7 @@ EgressOpts = #{
 {ok, _} = masque:start_listener(egress, EgressOpts).
 ```
 
-With a pooled ingress, all its tunnels arrive on a few connections, so size `max_tunnels_per_connection` for that, and keep the ingress `max_streams` at or below it (a tunnel over the limit is refused with 503). Leave the top-level `resolver` unset on a listener that serves UDP or TCP, or also set `resolver` in `handler_opts` (see [server](server.md#where-handler-options-go)).
+With a pooled ingress, all its tunnels arrive on a few connections, so size `max_tunnels_per_connection` for that, and keep the ingress `max_streams` at or below it (a tunnel over the limit is refused with 503).
 
 ## Ingress
 

@@ -34,7 +34,7 @@ Pin `transports => [h3]` when your protocol depends on UDP loss behaviour.
 | `handler_opts` key | Default | Meaning |
 |---|---|---|
 | `allow` | allow all | `fun({Host, Port}) -> boolean()`, checked in `accept/1`; `false` answers 403. |
-| `resolver` | `inet:getaddr/2`, IPv4 first | `fun(Host) -> {ok, Address} \| {error, _}`: one address, not a list. |
+| `resolver` | `inet:getaddr/2`, IPv4 first | `fun(Host) -> {ok, Address} \| {ok, [Address]} \| {error, _}`. With a list, the first address is used. |
 | `family` | `auto` | `inet`, `inet6` or `auto` (IPv6 when the host is an IPv6 literal). |
 | `allow_private` | `false` | Allow targets that resolve to non-public addresses. Otherwise refused with 502. |
 | `socket_opts` | `[]` | Extra `gen_udp` options. |

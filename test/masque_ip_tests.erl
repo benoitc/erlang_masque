@@ -158,3 +158,8 @@ resolve_target_test() ->
         masque_ip:resolve_target(ip, #{ip_target => '*'}, Resolver)
     ),
     ?assertEqual({ok, #{}}, masque_ip:resolve_target(udp, #{}, Resolver)).
+
+non_address_is_not_public_test() ->
+    ?assertNot(masque_ip:is_public([{8, 8, 8, 8}])),
+    ?assertNot(masque_ip:is_public(undefined)),
+    ?assertNot(masque_ip:is_public(<<"8.8.8.8">>)).
