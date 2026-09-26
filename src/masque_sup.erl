@@ -11,9 +11,11 @@
 
 -export([start_link/0, init/1]).
 
+-spec start_link() -> supervisor:startlink_ret().
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
+-spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
     %% ETS table for h2 per-connection tunnel counting.
     _ = ets:new(

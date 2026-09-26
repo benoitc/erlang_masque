@@ -93,15 +93,22 @@
 %%                           proxy's policy allows.
 %%   {Host :: binary(), Port :: 1..65535}
 %%                         - scoped bind: proxy enforces the peer.
+-spec start_link(unscoped | {binary() | inet:hostname(), inet:port_number()}, map(), pid()) ->
+    gen_statem:start_ret().
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
 
+-spec start(unscoped | {binary() | inet:hostname(), inet:port_number()}, map(), pid()) ->
+    gen_statem:start_ret().
 start(Target, Opts, Owner) ->
     gen_statem:start(?MODULE, {Target, Opts, Owner}, []).
 
+-spec stop(pid()) -> ok.
 stop(Pid) -> gen_statem:call(Pid, stop, 5000).
+-spec info(pid()) -> map().
 info(Pid) -> gen_statem:call(Pid, info, 1000).
 
+-spec send_to(pid(), {inet:ip_address(), inet:port_number()}, binary()) -> ok | {error, term()}.
 send_to(Pid, {IP, Port}, Bytes) when
     is_binary(Bytes),
     is_integer(Port),
@@ -110,24 +117,34 @@ send_to(Pid, {IP, Port}, Bytes) when
 ->
     gen_statem:call(Pid, {send_to, {IP, Port}, Bytes}).
 
+-spec recv(pid(), non_neg_integer()) ->
+    {ok, {inet:ip_address(), inet:port_number()}, binary()} | {error, term()}.
 recv(Pid, Timeout) ->
     gen_statem:call(Pid, {recv, Timeout}, Timeout + 500).
 
+-spec set_mode(pid(), message | queue) -> ok | {error, term()}.
 set_mode(Pid, Mode) when Mode =:= message; Mode =:= queue ->
     gen_statem:call(Pid, {set_mode, Mode}).
 
+-spec assign_compression(pid(), {inet:ip_address(), inet:port_number()}) ->
+    {ok, pos_integer()} | {error, term()}.
 assign_compression(Pid, Peer) ->
     gen_statem:call(Pid, {assign_compression, Peer}).
 
+-spec open_uncompressed_context(pid()) -> {ok, pos_integer()} | {error, term()}.
 open_uncompressed_context(Pid) ->
     gen_statem:call(Pid, open_uncompressed_context).
 
+-spec close_compression(pid(), pos_integer()) -> ok | {error, term()}.
 close_compression(Pid, ContextId) ->
     gen_statem:call(Pid, {close_compression, ContextId}).
 
+-spec proxy_public_address(pid()) ->
+    {ok, [{inet:ip_address(), inet:port_number()}]} | {error, term()}.
 proxy_public_address(Pid) ->
     gen_statem:call(Pid, proxy_public_address).
 
+-spec send_capsule(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send_capsule(Pid, Type, Value) ->
     gen_statem:call(Pid, {send_capsule, Type, Value}).
 
