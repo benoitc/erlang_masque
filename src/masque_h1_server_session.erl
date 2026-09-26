@@ -35,7 +35,8 @@
     cap_buf = <<>> :: binary(),
     max_cap :: pos_integer(),
     idle_ms :: non_neg_integer() | infinity,
-    idle_ref :: reference() | undefined
+    idle_ref :: reference() | undefined,
+    start_time :: integer() | undefined
 }).
 
 %%====================================================================
@@ -50,7 +51,18 @@ start_link(Args) ->
 %% gen_server
 %%====================================================================
 
-init(#{
+%% A tunnel counts as open once `init_session/1' succeeded: the 2xx is
+%% sent and the stream (or socket) is ours. `terminate/2' closes it.
+init(Args) ->
+    case init_session(Args) of
+        {ok, S} ->
+            masque_metrics:tunnel_opened(#{protocol => udp, transport => h1}),
+            {ok, S#state{start_time = erlang:monotonic_time(millisecond)}};
+        Other ->
+            Other
+    end.
+
+init_session(#{
     conn := Conn,
     stream_id := StreamId,
     handler := Handler,
@@ -162,7 +174,19 @@ handle_info({'EXIT', _Pid, _Reason}, S) ->
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
-terminate(_Reason, #state{handler = Handler, h_state = HState} = S) ->
+terminate(Reason, S) ->
+    emit_tunnel_closed(S),
+    terminate_session(Reason, S).
+
+emit_tunnel_closed(#state{start_time = undefined}) ->
+    ok;
+emit_tunnel_closed(#state{start_time = T}) ->
+    masque_metrics:tunnel_closed(
+        erlang:monotonic_time(millisecond) - T,
+        #{protocol => udp, transport => h1}
+    ).
+
+terminate_session(_Reason, #state{handler = Handler, h_state = HState} = S) ->
     _ = cancel_idle(S),
     _ = close_socket(S),
     try_callback(Handler, terminate, [_Reason, HState]),
@@ -242,6 +266,8 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
                     );
                 {stop, Reason, HS2} ->
                     {stop, Reason, S#state{h_state = HS2}};
+                {stop, Reason} ->
+                    {stop, Reason, S};
                 _ ->
                     {noreply, S}
             end;
@@ -307,8 +333,8 @@ safe_apply(M, F, A) ->
         apply(M, F, A)
     catch
         Class:Reason:Stack ->
-            error_logger:error_msg(
-                "masque h1 handler ~p:~p/~p failed: ~p:~p~n~p~n",
+            logger:error(
+                "masque h1 handler ~p:~p/~p failed: ~p:~p~n~p",
                 [M, F, length(A), Class, Reason, Stack]
             ),
             {stop, {handler_crash, Reason}}

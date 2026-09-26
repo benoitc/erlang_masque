@@ -33,7 +33,7 @@ The built-in `masque_tcp_proxy_handler` opens a `gen_tcp` connection to the targ
 | `handler_opts` key | Default | Meaning |
 |---|---|---|
 | `allow` | allow all | `fun({Host, Port}) -> boolean()`, checked in `accept/1`. |
-| `resolver` | `inet:getaddr/2`, IPv4 first | `fun(Host) -> {ok, Address} \| {error, _}`. |
+| `resolver` | `inet:getaddr/2`, IPv4 first | `fun(Host) -> {ok, Address} \| {ok, [Address]} \| {error, _}`. With a list, the first address is used. |
 | `family` | `auto` | `inet`, `inet6` or `auto`. |
 | `allow_private` | `false` | Allow non-public targets. Otherwise refused with 502. |
 | `connect_timeout` | `5000` | Timeout of the connection to the target, in ms. |

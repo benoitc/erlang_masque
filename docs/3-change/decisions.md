@@ -32,6 +32,12 @@ This page records design decisions that are visible in the code, with the reason
 - **Consequences.** The queue is bounded only by the target socket's `{active, N}` window.
 - **Where.** The `early` field and `replay_early/2` in the h3-capable server sessions.
 
+### A handler crash ends the tunnel
+
+- **Decision.** When a handler callback raises after `init/2`, the session logs it and stops with `{handler_crash, Reason}`. On h3 and h2 the stream is reset, on h1 the socket is closed, and `terminate/2` runs.
+- **Why.** Settled by the maintainer (former Q13). Continuing with the handler state from before the crash can leave the handler's sockets and its state out of step, and a reset tells the client the tunnel failed rather than ended.
+- **Where.** `dispatch/3` and `safe_apply/3` in every server session.
+
 ### h2 and h1 sessions live under per-protocol supervisors
 
 - **Decision.** One `simple_one_for_one` supervisor per protocol and transport under `masque_sup`, children `temporary`.
@@ -171,26 +177,26 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q4.** Why are h3 server sessions unsupervised (started by the router with `gen_server:start/3`, then linked and monitored)?
 - **Q5.** All h2 sessions send the 2xx from their own `init/1`, and the h2 UDP session is the only one in a separate module without a `transport` field or metrics. Is that separation intended?
 - **Q6.** Should idle timeouts exist only on h1 sessions?
-- **Q7.** Are `masque.tunnels.*` metrics meant to cover every protocol and transport? Today only the h3 UDP and udp-bind sessions emit `tunnel_opened`, while the IP (h3), IP-h1 and TCP-h1 sessions emit `tunnel_closed`, which drives `masque.tunnels.active` negative.
+- **Q7.** Settled: `masque.tunnels.*` covers every protocol and transport; each server session reports one open and one close.
 - **Q8.** How stable are internal message shapes (`masque_datagram_in`, `masque_finalized`, `dial_result`, `owner_capacity`)?
 - **Q9.** Versioning: the 0.6.0 CHANGELOG entry and the v0.5/v0.6 tags are missing; is hex publishing planned?
 - **Q10.** Which connect-tcp draft revision is targeted?
-- **Q11.** Should `upstream_pool => true` apply to udp-bind? Today the checkout happens (and may dial) but the session ignores the owner and dials its own connection.
+- **Q11.** Settled: udp-bind is never pooled; `upstream_pool` is ignored and no pooled connection is checked out.
 - **Q12.** Is `masque_capsule` meant to become the single capsule codec? Today `quic_h3_capsule` (through `masque_capsule`), `h2_capsule` and `h1_capsule` are all used.
-- **Q13.** Which handler-crash behaviour is intended? UDP, TCP and IP sessions log and ignore a crash in a callback; the h3/h2 udp-bind session stops and resets; the h1 udp-bind session crashes.
+- **Q13.** Settled: [a handler crash ends the tunnel](#a-handler-crash-ends-the-tunnel).
 - **Q14.** Should draining send GOAWAY, and should the server react to a client GOAWAY? Today it does neither.
-- **Q15.** A peer reset of a pending h3 stream makes the router drop the entry without replying, so the listener's `start_session` call waits the full 30 s. Intended?
+- **Q15.** Settled as a defect: a peer reset of a pending h3 stream now answers the listener with `stream_dead` (see [server internals](server-internals.md)).
 - **Q16.** In a scoped udp-bind, context 0 goes to `handle_packet/2`, which the default bind handler does not export, so that traffic is dropped. Intended?
-- **Q17.** Should the h1 udp-bind server session enforce the same rules as the h3/h2 one (cross-side conflict, post-close rule, pending limit, crash handling, the `{compression_assign, {IP, Port}}` action)?
-- **Q18.** h3 pooled owners default to `dynamic` capacity and never report full, so the pool never opens a second h3 connection per fingerprint unless `max_streams` is set. Intended?
+- **Q17.** Settled: the h1 udp-bind server session enforces the same rules as the h3/h2 one (see [udp-bind internals](udp-bind-internals.md#the-h1-session)).
+- **Q18.** Settled: pooled h3 owners default to 100 streams and report full on a transport `stream_limit` error, so the pool opens another connection (see [pool](pool.md)).
 - **Q19.** The `masque_ip_proxy_handler` moduledoc says the allocator is round-robin; the code is first-fit. Which is intended?
 - **Q20.** h1 idle timers are re-armed by inbound bytes only, so a tunnel that only sends toward the client idles out. Should outbound traffic count?
 - **Q21.** `dial_single_or_pool/5` waits for the pool checkout up to `checkout_timeout_ms` (60 s), regardless of the connect `timeout`. Intended?
 - **Q22.** The chain listeners set `handler`, `tcp_handler` and `ip_handler` to `masque_chain_handler` but not `bind_handler`, so udp-bind is not chained. Intended?
-- **Q23.** Are the listener gaps intended: h1 has no `fallback`, no `peer` / `peer_cert` and no tunnel limit; h2 has no `peer` / `peer_cert` and lifts fewer options into `handler_opts`?
+- **Q23.** Are the listener gaps intended: h1 has no `fallback`, no `peer` / `peer_cert` and no tunnel limit; h2 has no `peer` / `peer_cert`? (Option lifting into `handler_opts` is now the same on all three.)
 - **Q24.** The udp-bind proxy sends only on its own compressed contexts (or the client's uncompressed one) and reads client datagrams only on client-opened contexts, while the client session treats every installed context as two-way. Which reading of the draft is intended?
 - **Q25.** Error stops end the stream differently per protocol: UDP resets with `H3_MESSAGE_ERROR`, TCP with `H3_CONNECT_ERROR`, udp-bind with `H3_INTERNAL_ERROR`, IP with a FIN. Intended?
 - **Q26.** The h1 IP session has no limit on pending ADDRESS_REQUEST ids (h3/h2 cap it at 64). Intended?
-- **Q27.** Calls during `connecting` behave differently: three sessions crash, most answer `{error, not_ready}`, and the udp-bind h3/h2 session also refuses `info` and `stop`. What is the intended contract?
+- **Q27.** Settled: in `connecting` a call answers `{error, not_ready}` except `info` and `stop`; in `open` an unsupported call answers `{error, not_supported}`; in `closing`, `{error, closing}`.
 
 Next: [releasing](releasing.md).

@@ -44,7 +44,17 @@
 -include("masque.hrl").
 -include("masque_udp_bind.hrl").
 
--dialyzer({nowarn_function, [do_connect/2, build_authority/2]}).
+-dialyzer({nowarn_function, [do_connect/2]}).
+
+-define(RESERVED_HEADERS, [
+    <<":method">>,
+    <<":scheme">>,
+    <<":authority">>,
+    <<":path">>,
+    <<":protocol">>,
+    <<"capsule-protocol">>,
+    <<"connect-udp-bind">>
+]).
 
 -record(data, {
     owner :: pid(),
@@ -162,7 +172,7 @@ init({Target, Opts, Owner}) ->
         rx_buf = queue:new(),
         rx_waiters = queue:new(),
         max_cap = MaxCap,
-        extra_headers = maps:get(request_headers, Opts, []),
+        extra_headers = sanitise_extra_headers(maps:get(request_headers, Opts, [])),
         public_addresses = []
     },
     {ok, connecting, Data, [{next_event, internal, {do_handshake, Opts}}]}.
@@ -175,7 +185,7 @@ build_template(Opts, ProxyHost, ProxyPort) ->
                 {error, _} -> erlang:error(bad_template)
             end;
         error ->
-            Authority = build_authority(to_bin(ProxyHost), ProxyPort),
+            Authority = masque_uri:build_authority(to_bin(ProxyHost), ProxyPort),
             Raw = <<"https://", Authority/binary, ?MASQUE_DEFAULT_URI_TEMPLATE/binary>>,
             {ok, T} = masque_uri_template:parse_absolute(Raw),
             T
@@ -203,6 +213,10 @@ connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
 connecting({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
+connecting({call, From}, info, Data) ->
+    {keep_state, Data, [{reply, From, session_info(Data, connecting)}]};
+connecting({call, From}, stop, Data) ->
+    {stop_and_reply, normal, [{reply, From, ok}], Data};
 connecting({call, From}, _Other, Data) ->
     %% No outbound API works before the handshake completes.
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
@@ -381,7 +395,9 @@ open(
 ) ->
     {next_state, closing, Data, [{next_event, internal, do_close}]};
 open(info, _Msg, Data) ->
-    {keep_state, Data}.
+    {keep_state, Data};
+open({call, From}, _Other, Data) ->
+    {keep_state, Data, [{reply, From, {error, not_supported}}]}.
 
 %%====================================================================
 %% State: closing
@@ -419,6 +435,8 @@ closing(
             _:_ -> ok
         end),
     {stop, normal, Data};
+closing({call, From}, _Other, Data) ->
+    {keep_state, Data, [{reply, From, {error, closing}}]};
 closing(_, _, Data) ->
     {keep_state, Data}.
 
@@ -1008,8 +1026,8 @@ do_connect(#data{transport = h2} = Data, Opts) ->
 
 request_headers(#data{} = Data) ->
     Path = expand_path(Data#data.bind_target),
-    Authority = build_authority(
-        Data#data.proxy_host,
+    Authority = masque_uri:build_authority(
+        to_bin(Data#data.proxy_host),
         Data#data.proxy_port
     ),
     Base = [
@@ -1105,8 +1123,21 @@ transport_send_data(
         Err -> Err
     end.
 
-build_authority(Host, Port) ->
-    iolist_to_binary([Host, ":", integer_to_binary(Port)]).
+%% Drop headers the session writes itself and any name or value that is
+%% not a binary or carries CR/LF, so `request_headers' cannot rewrite
+%% or inject request headers.
+sanitise_extra_headers(List) when is_list(List) ->
+    [
+        {K, V}
+     || {K, V} <- List,
+        is_binary(K),
+        is_binary(V),
+        binary:match(K, [<<"\r">>, <<"\n">>]) =:= nomatch,
+        binary:match(V, [<<"\r">>, <<"\n">>]) =:= nomatch,
+        not lists:member(string:lowercase(K), ?RESERVED_HEADERS)
+    ];
+sanitise_extra_headers(_) ->
+    [].
 
 to_bin(B) when is_binary(B) -> B;
 to_bin(L) when is_list(L) -> iolist_to_binary(L).

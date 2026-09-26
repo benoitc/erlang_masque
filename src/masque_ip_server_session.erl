@@ -26,6 +26,7 @@
 
 %% Most ADDRESS_REQUEST entries left unanswered at once.
 -define(MAX_PEER_PENDING, 64).
+-define(H3_INTERNAL_ERROR, 16#102).
 
 -record(state, {
     conn :: pid(),
@@ -113,7 +114,7 @@ finalize_h2(State0, Actions) ->
     case send_response(State0, 200, response_headers()) of
         ok ->
             State1 = claim_stream_and_buffer(State0),
-            State = maybe_flush_buf(State1),
+            State = maybe_flush_buf(mark_open(State1)),
             apply_init_actions(Actions, State);
         {error, _} ->
             {stop, stream_dead}
@@ -185,10 +186,7 @@ finalize(#state{pending_actions = Actions} = S) ->
                 _ ->
                     S1 = run_init_actions(
                         Actions,
-                        S#state{
-                            pending_actions = undefined,
-                            start_time = erlang:monotonic_time(millisecond)
-                        }
+                        mark_open(S#state{pending_actions = undefined})
                     ),
                     replay_early(lists:reverse(S1#state.early), S1#state{early = []})
             end;
@@ -342,7 +340,7 @@ terminate(
     _ = unregister_from_router(Router, StreamId),
     _ =
         (try
-            transport_send_data(S, <<>>, true)
+            end_stream(Reason, S)
         catch
             _:_ -> ok
         end),
@@ -353,6 +351,15 @@ terminate(
 maybe_release_h2_tunnel(h2, Conn) -> masque_h2_server:release_tunnel(Conn);
 maybe_release_h2_tunnel(_, _) -> ok.
 
+%% A handler crash resets the stream so the client does not read it as
+%% a clean close; every other stop ends the stream with FIN.
+end_stream({handler_crash, _}, #state{transport = h3, conn = C, stream_id = Sid}) ->
+    quic_h3:cancel(C, Sid, ?H3_INTERNAL_ERROR);
+end_stream({handler_crash, _}, #state{transport = h2, conn = C, stream_id = Sid}) ->
+    h2:cancel(C, Sid, internal_error);
+end_stream(_Reason, S) ->
+    transport_send_data(S, <<>>, true).
+
 unregister_from_router(undefined, _) ->
     ok;
 unregister_from_router(Router, StreamId) ->
@@ -361,6 +368,12 @@ unregister_from_router(Router, StreamId) ->
     catch
         _:_ -> ok
     end.
+
+%% The 2xx is sent and the stream claimed: the tunnel counts as open
+%% until `terminate/2'.
+mark_open(#state{transport = Transport} = S) ->
+    masque_metrics:tunnel_opened(#{protocol => ip, transport => Transport}),
+    S#state{start_time = erlang:monotonic_time(millisecond)}.
 
 emit_tunnel_closed(#state{start_time = undefined}) ->
     ok;
@@ -551,6 +564,8 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
                     );
                 {stop, Reason, HS2} ->
                     {stop, Reason, S#state{h_state = HS2}};
+                {stop, Reason} ->
+                    {stop, Reason, S};
                 _ ->
                     {noreply, S}
             end;
@@ -740,8 +755,8 @@ safe_apply(M, F, A) ->
         apply(M, F, A)
     catch
         Class:Reason:Stack ->
-            error_logger:error_msg(
-                "masque ip handler ~p:~p/~p failed: ~p:~p~n~p~n",
+            logger:error(
+                "masque ip handler ~p:~p/~p failed: ~p:~p~n~p",
                 [M, F, length(A), Class, Reason, Stack]
             ),
             {stop, {handler_crash, Reason}}

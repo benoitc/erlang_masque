@@ -154,7 +154,7 @@ No other handler emits lifecycle events.
 | `masque.tunnels.rejected` | `reason` |
 | `masque.bytes.in`, `masque.bytes.out` | `protocol`, `transport` |
 
-Coverage is uneven: `tunnel_opened` is only emitted by the h3 CONNECT-UDP session and the udp-bind sessions, while `tunnel_closed` is also emitted by IP sessions and the h1 TCP session. `masque.tunnels.active` can therefore drift for IP and h1 TCP tunnels, and h2 UDP, h1 UDP and h2/h3 TCP tunnels do not appear at all. Do not debug from these numbers alone.
+Every server session counts itself in `masque.tunnels.total` and `masque.tunnels.active`, so a steadily growing `active` means tunnels are not ending. Byte counters cover only some sessions (see [operations](../2-use/operations.md#metrics)).
 
 Drop counters are plain OTP `counters`, readable without any exporter:
 
@@ -190,10 +190,10 @@ A growing `bcp38` count means clients send from addresses they were not assigned
 
 ## Logs
 
-The library logs very little. Server sessions log a handler callback that raises, with `error_logger:error_msg/2`: `masque handler Mod:Fun/Arity failed: Class:Reason` followed by the stack (TCP sessions say `masque tcp handler`). What happens next depends on the callback:
+The library logs very little. Server sessions log a handler callback that raises, with `logger:error/2`: `masque handler Mod:Fun/Arity failed: Class:Reason` followed by the stack (TCP sessions say `masque tcp handler`). What happens next depends on the callback:
 
 - a crash in `init/2` fails the handshake; the client gets 502.
-- a crash in a later callback is logged and ignored: the session keeps running with its previous handler state. udp-bind sessions are the exception; they stop with `{handler_crash, Reason}`.
+- a crash in a later callback stops the session with `{handler_crash, Reason}`; the client sees a stream reset (on h1, a closed socket).
 
 Session processes are `gen_server` / `gen_statem`, so an exit with a reason other than `normal`, `shutdown` or `{shutdown, _}` also produces the usual OTP error report through `logger`. Close reasons such as `peer_reset` or `goaway` are ordinary exit reasons, so a client session ending that way logs a report too; that is not a bug in itself.
 Next: [messages-and-errors](../reference/messages-and-errors.md) for every reason in one place, or [testing](testing.md) to turn what you found into a regression test.

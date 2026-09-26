@@ -54,7 +54,18 @@ start_link(Args) ->
 %% gen_server
 %%====================================================================
 
-init(#{
+%% A tunnel counts as open once `init_session/1' succeeded: the 2xx is
+%% sent and the stream (or socket) is ours. `terminate/2' closes it.
+init(Args) ->
+    case init_session(Args) of
+        {ok, S} ->
+            masque_metrics:tunnel_opened(#{protocol => ip, transport => h1}),
+            {ok, S#state{start_time = erlang:monotonic_time(millisecond)}};
+        Other ->
+            Other
+    end.
+
+init_session(#{
     conn := Conn,
     stream_id := StreamId,
     handler := Handler,
@@ -301,6 +312,8 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
                     );
                 {stop, Reason, HS2} ->
                     {stop, Reason, S#state{h_state = HS2}};
+                {stop, Reason} ->
+                    {stop, Reason, S};
                 _ ->
                     {noreply, S}
             end;
@@ -478,8 +491,8 @@ safe_apply(M, F, A) ->
         apply(M, F, A)
     catch
         Class:Reason:Stack ->
-            error_logger:error_msg(
-                "masque ip-h1 handler ~p:~p/~p failed: ~p:~p~n~p~n",
+            logger:error(
+                "masque ip-h1 handler ~p:~p/~p failed: ~p:~p~n~p",
                 [M, F, length(A), Class, Reason, Stack]
             ),
             {stop, {handler_crash, Reason}}

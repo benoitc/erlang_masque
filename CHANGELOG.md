@@ -47,7 +47,27 @@ and the project uses [Semantic Versioning](https://semver.org/).
   in `rebar.config`); CI runs tests, lint and dialyzer on OTP 29 only.
 - Bumped `quic` 1.3.0 -> 2.0.1 and `h1` (erlang_h1) 0.6.2 -> 0.9.1.
 - Bumped `h2` 0.9.0 -> 0.12.3.
-- Bumped `instrument` 1.1.3 -> 1.1.5 and `hackney` 4.3.0 -> 4.7.4.
+- Bumped `instrument` 1.1.3 -> 1.1.5.
+- Removed the unused `hackney` dependency.
+- A handler callback that raises after `init/2` stops the session with
+  `{handler_crash, Reason}` and resets the stream (closes the socket on
+  h1), instead of logging and keeping the old handler state. Handler
+  crashes are logged through `logger`. **Breaking**.
+- `masque.tunnels.total`, `masque.tunnels.active` and
+  `masque.tunnel.duration_ms` cover every server session (UDP, TCP, IP
+  and udp-bind on h3, h2 and h1).
+- Every listener copies the same top-level options into `handler_opts`
+  (`masque_server:handler_opt_keys/0`); h2 now also copies `resolver`,
+  `allow`, `family`, `connect_timeout` and `socket_opts`.
+- `transports` must be a list of `h3`, `h2` and `h1`; anything else
+  returns `{error, {invalid_opts, {transports, T}}}` instead of crashing
+  the caller or dropping unknown entries. **Breaking**.
+- Client sessions answer calls they do not support with
+  `{error, not_ready}` (connecting), `{error, not_supported}` (open) or
+  `{error, closing}` instead of crashing or leaving the caller waiting.
+- `upstream_pool` is ignored for Connect-UDP-Bind (no pooled connection
+  is checked out); pooled h3 owners default to 100 streams and report
+  full on a transport `stream_limit` error.
 - The h2 server now reads `:authority` and `:scheme` from the request
   headers and no longer falls back to the `host` header or a hard-coded
   `https` scheme. Both pseudo-headers are required, matching the h3 server.
@@ -125,6 +145,24 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `bad_ip_version` and `unknown_capsule_type`.
 
 ### Fixed
+
+- The UDP and TCP proxy handlers accept a resolver returning
+  `{ok, [Address]}` (the listener-level shape); a listener `resolver`
+  no longer causes 502 or skips the private-address check on TCP.
+  `masque_ip:is_public/1` returns `false` for anything that is not an
+  address.
+- A peer reset of an h3 stream whose session is still starting answers
+  the listener at once instead of after 30 s, and no longer leaves a
+  running session behind.
+- The udp-bind h1 server session applies the h3/h2 rules: cross-side
+  conflict handling, the post-close rule, the pending-assign limit, the
+  `{compression_assign, {IP, Port}}` action, drop counters and handler
+  crash handling.
+- `masque.tunnels.active` no longer drifts below zero for IP and h1 TCP
+  tunnels, nor above it when an h1 udp-bind session fails in init.
+- udp-bind clients bracket IPv6 proxy hosts in `:authority` / `Host`
+  and drop `request_headers` that are reserved or contain CR/LF.
+- A connecting udp-bind client session answers `info/1` and `close/1`.
 
 - Sessions and upstream sockets end on connection close (h3, h2),
   GOAWAY, peer stream reset and a clean FIN.

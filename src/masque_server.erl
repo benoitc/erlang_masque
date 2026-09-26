@@ -22,6 +22,7 @@
 %%% (or defers to the caller's `fallback' fun when provided).
 -module(masque_server).
 
+-export([handler_opt_keys/0]).
 -export([
     start_listener/2,
     stop_listener/1,
@@ -147,44 +148,13 @@ h3_handlers(Opts0) ->
     BindHandler = maps:get(bind_handler, Opts),
     AcceptBind = maps:get(accept_bind, Opts),
     Resolver = maps:get(resolver, Opts, fun default_resolver/1),
-    %% Lift IP-scoped listener options into handler_opts so the
-    %% default IP handler (and user handlers that follow the same
+    %% Lift listener-level handler options into handler_opts so the
+    %% default handlers (and user handlers that follow the same
     %% convention) see them without callers having to duplicate.
-    IpExtra = maps:with(
-        [
-            address_pool,
-            routes,
-            mtu,
-            resolver,
-            allow,
-            family,
-            allow_private,
-            connect_timeout,
-            socket_opts
-        ],
-        Opts
+    HandlerOpts = maps:merge(
+        maps:with(handler_opt_keys(), Opts),
+        maps:get(handler_opts, Opts, #{})
     ),
-    %% Same for bind-scoped opts.
-    BindExtra = maps:with(
-        [
-            bind_address,
-            bind_port,
-            bind_socket_opts,
-            public_addresses,
-            public_address_fun,
-            peer_filter_fun,
-            scrub_fun,
-            allow_private,
-            allow_loopback,
-            max_compression_contexts,
-            max_compression_contexts_in,
-            max_compression_contexts_out,
-            max_pending_compression_responses
-        ],
-        Opts
-    ),
-    UserHOpts = maps:get(handler_opts, Opts, #{}),
-    HandlerOpts = maps:merge(maps:merge(IpExtra, BindExtra), UserHOpts),
     Fallback = maps:get(fallback, Opts, undefined),
     DrainKey = maps:get(drain_key, Opts, undefined),
     Dispatch = #{
@@ -610,3 +580,33 @@ header(Name, Headers, Default) ->
         {_, V} -> V;
         false -> Default
     end.
+
+%% @doc Listener options that every listener (h3, h2, h1) copies into
+%% `handler_opts'. A key already present in `handler_opts' wins.
+-spec handler_opt_keys() -> [atom()].
+handler_opt_keys() ->
+    [
+        %% CONNECT-IP and the UDP/TCP proxy handlers
+        address_pool,
+        routes,
+        mtu,
+        resolver,
+        allow,
+        family,
+        allow_private,
+        connect_timeout,
+        socket_opts,
+        %% Connect-UDP-Bind
+        bind_address,
+        bind_port,
+        bind_socket_opts,
+        public_addresses,
+        public_address_fun,
+        peer_filter_fun,
+        scrub_fun,
+        allow_loopback,
+        max_compression_contexts,
+        max_compression_contexts_in,
+        max_compression_contexts_out,
+        max_pending_compression_responses
+    ].

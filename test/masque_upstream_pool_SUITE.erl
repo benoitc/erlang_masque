@@ -287,7 +287,7 @@ pool_entry_count() ->
     maps:fold(fun(_, Entries, Acc) -> Acc + length(Entries) end, 0, Cache).
 
 upstream_uri(Port) ->
-    iolist_to_binary(["https://localhost:", integer_to_list(Port)]).
+    iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]).
 
 unique_name(Prefix) ->
     list_to_atom(

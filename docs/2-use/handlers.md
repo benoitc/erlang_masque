@@ -113,22 +113,20 @@ On h3 the router asks the session to finalize once `init/2` returned. Messages t
 
 The tunnel ends when a callback returns `{stop, Reason, S}`, an action closes it, the client ends or resets the stream, or the connection goes away. `terminate/2` is then called with the reason. Reasons you will see: `normal`, `peer_reset`, `peer_closed` (h2 and h1), `connection_closed` and `router_gone` (h3), `idle_timeout` (h1), `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow`, `{tunnel_send_failed, _}` (TCP), and whatever your own callbacks returned.
 
-What the client sees depends on the reason. `normal` (and, for CONNECT-TCP, `target_closed` and `eof_timeout`) ends the stream with FIN. A reason that comes from the client or the connection (`peer_reset`, `peer_closed`, `connection_closed`, `router_gone`) sends nothing. Any other reason resets the stream with an error code, so the client can tell a clean close from a failure; CONNECT-IP sessions are the exception and end the stream with FIN whatever the reason. On h1 the socket is closed.
+What the client sees depends on the reason. `normal` (and, for CONNECT-TCP, `target_closed` and `eof_timeout`) ends the stream with FIN. A reason that comes from the client or the connection (`peer_reset`, `peer_closed`, `connection_closed`, `router_gone`) sends nothing. Any other reason resets the stream with an error code, so the client can tell a clean close from a failure; CONNECT-IP sessions are the exception and end the stream with FIN for every reason except a handler crash. On h1 the socket is closed.
 
 ## What a crash does
 
 Handler exceptions are caught and logged (see [operations](operations.md#logs)), but the outcome is not the same everywhere:
 
 - In `init/2`: the tunnel is refused with 502 on every transport.
-- In an event callback of a UDP, TCP or IP session: the event is dropped, the previous handler state is kept and the tunnel stays open.
-- In an event callback of a udp-bind session on h3 or h2: the tunnel ends with `{handler_crash, Reason}`.
-- In an event callback of a udp-bind session on h1: the exception is not caught and the session process exits.
+- In an event callback: the tunnel ends with `{handler_crash, Reason}`. On h3 and h2 the stream is reset; on h1 the socket is closed. `terminate/2` still runs.
 - In `accept/1`: not caught by `masque`. Return `{reject, _}` instead of raising.
 - In `terminate/2`: ignored.
 
 An action the session cannot carry out (a malformed `{icmp_error, _}` spec, an address that does not encode) crashes the session process. Server sessions are never restarted.
 
-Because the state is kept after a caught crash, a handler that fails half-way through an event can leave its sockets and its state out of step. Prefer returning `{stop, Reason, S}`.
+A crash is treated as a failure, not a clean close. To end a tunnel on purpose, return `{stop, Reason, S}` or the `close_session` action.
 
 ## Example
 

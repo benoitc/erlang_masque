@@ -17,20 +17,14 @@ This page is for running `masque` in production: what the metrics mean and which
 
 `protocol` is `udp`, `tcp`, `ip` or `udp_bind`; `transport` is `h3`, `h2` or `h1`. There is no listener-name attribute.
 
-Not every session reports every instrument:
+Every server session reports `masque.tunnels.total`, `masque.tunnels.active` and `masque.tunnel.duration_ms`: a tunnel counts as opened once its 2xx (101 or 200 on h1) is sent, and as closed when its session ends. The byte counters are not reported everywhere:
 
-| Session | total | active, duration | bytes |
-|---|---|---|---|
-| UDP over h3 | yes | yes | in, out |
-| UDP over h2, h1 | no | no | no |
-| TCP over h3, h2 | no | no | no |
-| TCP over h1 | no | closes only | no |
-| IP over h3, h1 | no | closes only | no |
-| IP over h2 | no | no | no |
-| udp-bind over h3, h2 | yes | yes | in, out |
-| udp-bind over h1 | yes | yes | out |
-
-Known issue: the sessions marked "closes only" record a close without a matching open, so `masque.tunnels.active` drifts downward (below zero) as those tunnels end, and `masque.tunnels.total` undercounts. Until every session reports both, do not use `masque.tunnels.active` as the number of open tunnels; count them in your handler's `init/2` and `terminate/2` if you need it.
+| Session | bytes |
+|---|---|
+| UDP over h3 | in, out |
+| udp-bind over h3, h2 | in, out |
+| udp-bind over h1 | out |
+| every other session | none |
 
 ## Counters
 
@@ -78,7 +72,7 @@ Server sessions have no public inspection call. `masque_ip_session_registry:all/
 ## Drain for rolling restarts
 
 1. `masque:drain_listener(Name)` on every listener of the node. New requests get 503 with `proxy-status: masque; error=proxy_internal_error`; open tunnels continue.
-2. Wait until your own open-tunnel count reaches zero, or until a deadline. Do not wait on `masque.tunnels.active` (see the known issue above).
+2. Wait until `masque.tunnels.active` (or your own open-tunnel count) reaches zero, or until a deadline.
 3. Stop the listeners (`stop_listener/1`, `stop_listener_h2/1`, `stop_listener_h1/1`) or the node.
 
 Clients that race transports reconnect to whichever instance your DNS or load balancer points at next. `masque:undrain_listener/1` cancels a drain; restarting a listener clears it too.
@@ -103,6 +97,6 @@ Clients that race transports reconnect to whichever instance your DNS or load ba
 
 ## Logs
 
-`masque` itself logs one thing: an exception raised by a handler callback in a server session, at error level through `error_logger` (which forwards to `logger`), with the module, function, arity, class, reason and stack. The udp-bind session over h1 does not catch handler exceptions, so there you get the standard OTP crash report instead. Refused requests are not logged; they are counted in `masque.tunnels.rejected`. What the handler crash does to the tunnel is described in [handlers](handlers.md#what-a-crash-does). The transport libraries (`quic`, `h2`, `h1`) log on their own.
+`masque` itself logs one thing: an exception raised by a handler callback in a server session, at error level through `logger`, with the module, function, arity, class, reason and stack. Refused requests are not logged; they are counted in `masque.tunnels.rejected`. What the handler crash does to the tunnel is described in [handlers](handlers.md#what-a-crash-does). The transport libraries (`quic`, `h2`, `h1`) log on their own.
 
 Next: [debugging](../3-change/debugging.md), or back to [concepts](../1-understand/concepts.md) for the map of the code.

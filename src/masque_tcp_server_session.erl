@@ -43,7 +43,8 @@
     fin_sent = false :: boolean(),
     %% H3 path: handler messages (e.g. target bytes) that arrived
     %% before finalize, newest first. Replayed once the 2xx is sent.
-    early = [] :: [term()]
+    early = [] :: [term()],
+    start_time :: integer() | undefined
 }).
 
 %%====================================================================
@@ -96,9 +97,9 @@ init(
                         ok ->
                             case claim_stream(State) of
                                 ok ->
-                                    apply_actions(Actions, State);
+                                    apply_actions(Actions, mark_open(State));
                                 {ok, _} ->
-                                    apply_actions(Actions, State);
+                                    apply_actions(Actions, mark_open(State));
                                 {error, _} ->
                                     {stop, stream_dead}
                             end;
@@ -126,7 +127,9 @@ finalize(#state{pending_actions = Actions} = S) ->
                 {error, _} ->
                     {error, S};
                 _ ->
-                    S1 = run_init_actions(Actions, S#state{pending_actions = undefined}),
+                    S1 = run_init_actions(
+                        Actions, mark_open(S#state{pending_actions = undefined})
+                    ),
                     replay_early(lists:reverse(S1#state.early), S1#state{early = []})
             end;
         {error, _} ->
@@ -232,12 +235,15 @@ handle_info(Msg, #state{pending_actions = Actions, early = Early} = S) when
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
-terminate(Reason, #state{
-    conn = Conn,
-    transport = Transport,
-    handler = Handler,
-    h_state = HState
-}) when
+terminate(
+    Reason,
+    #state{
+        conn = Conn,
+        transport = Transport,
+        handler = Handler,
+        h_state = HState
+    } = S
+) when
     Reason =:= connection_closed;
     Reason =:= router_gone;
     Reason =:= peer_reset;
@@ -245,6 +251,7 @@ terminate(Reason, #state{
 ->
     maybe_release_h2_tunnel(Transport, Conn),
     try_callback(Handler, terminate, [Reason, HState]),
+    emit_tunnel_closed(S),
     ok;
 terminate(
     Reason,
@@ -263,7 +270,22 @@ terminate(
             _:_ -> ok
         end),
     try_callback(Handler, terminate, [Reason, HState]),
+    emit_tunnel_closed(S),
     ok.
+
+%% The 2xx is sent and the stream claimed: the tunnel counts as open
+%% until `terminate/2'.
+mark_open(#state{transport = Transport} = S) ->
+    masque_metrics:tunnel_opened(#{protocol => tcp, transport => Transport}),
+    S#state{start_time = erlang:monotonic_time(millisecond)}.
+
+emit_tunnel_closed(#state{start_time = undefined}) ->
+    ok;
+emit_tunnel_closed(#state{start_time = T, transport = Transport}) ->
+    masque_metrics:tunnel_closed(
+        erlang:monotonic_time(millisecond) - T,
+        #{protocol => tcp, transport => Transport}
+    ).
 
 maybe_release_h2_tunnel(h2, Conn) -> masque_h2_server:release_tunnel(Conn);
 maybe_release_h2_tunnel(_, _) -> ok.
@@ -322,6 +344,8 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
                     );
                 {stop, Reason, HS2} ->
                     {stop, Reason, S#state{h_state = HS2}};
+                {stop, Reason} ->
+                    {stop, Reason, S};
                 _ ->
                     {noreply, S}
             end;
@@ -412,8 +436,8 @@ safe_apply(M, F, A) ->
         apply(M, F, A)
     catch
         Class:Reason:Stack ->
-            error_logger:error_msg(
-                "masque tcp handler ~p:~p/~p failed: ~p:~p~n~p~n",
+            logger:error(
+                "masque tcp handler ~p:~p/~p failed: ~p:~p~n~p",
                 [M, F, length(A), Class, Reason, Stack]
             ),
             {stop, {handler_crash, Reason}}

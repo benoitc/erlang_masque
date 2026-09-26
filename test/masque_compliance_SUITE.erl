@@ -1045,7 +1045,7 @@ h2_echo_round_trip(Config) ->
     %% Raw h2 client to isolate: connect, send CONNECT-UDP, send a
     %% DATAGRAM capsule, expect the echo handler to send one back.
     {ok, Conn} = h2:connect(
-        "localhost",
+        "127.0.0.1",
         Port,
         #{
             transport => ssl,

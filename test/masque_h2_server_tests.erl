@@ -161,3 +161,31 @@ udp_bind_no_host_fallback_test() ->
             true
         )
     ).
+
+%% The h2 listener copies the same listener options into handler_opts
+%% as the h3 and h1 listeners.
+dispatch_lifts_handler_opts_test() ->
+    Resolver = fun(_) -> {ok, [{192, 0, 2, 1}]} end,
+    Opts = #{
+        uri_template => ?UDP_TPL,
+        tcp_uri_template => ?TCP_TPL,
+        ip_uri_template => ?IP_TPL,
+        handler => masque_udp_proxy_handler,
+        tcp_handler => masque_tcp_proxy_handler,
+        ip_handler => masque_ip_proxy_handler,
+        bind_handler => masque_udp_bind_proxy_handler,
+        accept_bind => false,
+        resolver => Resolver,
+        family => inet6,
+        connect_timeout => 1000,
+        socket_opts => [{recbuf, 4096}],
+        allow_private => true,
+        handler_opts => #{family => inet}
+    },
+    #{handler_opts := H} = masque_h2_server:build_dispatch(Opts),
+    ?assertEqual(Resolver, maps:get(resolver, H)),
+    ?assertEqual(1000, maps:get(connect_timeout, H)),
+    ?assertEqual([{recbuf, 4096}], maps:get(socket_opts, H)),
+    ?assertEqual(true, maps:get(allow_private, H)),
+    %% A key already in handler_opts wins.
+    ?assertEqual(inet, maps:get(family, H)).

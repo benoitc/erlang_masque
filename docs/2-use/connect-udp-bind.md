@@ -109,8 +109,6 @@ On h3 and h2 the proxy session counts every packet or assign it drops:
 | `uncompressed_closed` | A proxy compression assign after the client closed its uncompressed context. |
 | `other` | Any other reason, including drops returned by `scrub_fun` or a custom handler. |
 
-The h1 bind session does not bump these counters.
-
 ## Owner messages
 
 | Message | Meaning |

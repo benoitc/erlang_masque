@@ -167,5 +167,10 @@ is_public({A, _, _, _, _, _, _, _}) when
     false;
 %% multicast ff00::/8
 is_public({A, _, _, _, _, _, _, _}) when A >= 16#FF00 -> false;
+is_public({_, _, _, _}) ->
+    true;
+is_public({_, _, _, _, _, _, _, _}) ->
+    true;
+%% Anything that is not an address is never public.
 is_public(_) ->
-    true.
+    false.

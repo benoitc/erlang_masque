@@ -194,15 +194,16 @@ pick_family(auto, Host) ->
         _ -> inet
     end.
 
+%% A listener-level `resolver' returns an address list (it is shared
+%% with CONNECT-IP); a handler-level one may return a single address.
 resolve(ResolverFun, Host, Family) ->
     case ResolverFun(Host) of
-        {ok, IP} ->
-            ActualFamily =
-                if
-                    tuple_size(IP) =:= 8 -> inet6;
-                    true -> Family
-                end,
-            {ok, IP, ActualFamily};
-        Err ->
-            Err
+        {ok, [IP | _]} -> {ok, IP, family_of(IP, Family)};
+        {ok, []} -> {error, nxdomain};
+        {ok, IP} when is_tuple(IP) -> {ok, IP, family_of(IP, Family)};
+        {error, _} = Err -> Err;
+        Other -> {error, {bad_resolver_result, Other}}
     end.
+
+family_of(IP, _Family) when tuple_size(IP) =:= 8 -> inet6;
+family_of(_IP, Family) -> Family.

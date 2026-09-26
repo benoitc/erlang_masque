@@ -229,10 +229,12 @@ connect(ProxyURI, Target, Opts) when is_map(Opts) ->
                 {ok, Host, Port} ->
                     Owner = maps:get(owner, Opts0, self()),
                     Opts1 = Opts0#{proxy => {Host, Port}},
-                    Transports = normalize_transports(
-                        maps:get(transports, Opts1, [h3, h2])
-                    ),
-                    connect_via(Transports, Target, Opts1, Owner);
+                    case normalize_transports(maps:get(transports, Opts1, [h3, h2])) of
+                        {ok, Transports} ->
+                            connect_via(Transports, Target, Opts1, Owner);
+                        {error, _} = Err ->
+                            Err
+                    end;
                 {error, _} = Err ->
                     Err
             end;
@@ -317,6 +319,9 @@ connect_via(Transports, Target, Opts, Owner) when
 %% Single-transport dial that honours `upstream_pool => true' the
 %% same way the racer does; h1 is pool-bypassed so it keeps the
 %% plain dial_single path.
+%% udp-bind is never pooled: each bind needs its own connection.
+dial_single_or_pool(Mod, Transport, Target, #{protocol := udp_bind} = Opts, Owner) ->
+    dial_single(Mod, Target, Opts#{transport => Transport}, Owner);
 dial_single_or_pool(
     Mod,
     Transport,
@@ -396,10 +401,31 @@ dial_single(Mod, Target, Opts, Owner) ->
             {error, Reason}
     end.
 
+%% An empty list means the default race. Unknown entries are refused
+%% rather than dropped, and duplicates are removed (first one wins).
 normalize_transports([]) ->
-    [h3, h2];
+    {ok, [h3, h2]};
 normalize_transports(L) when is_list(L) ->
-    [T || T <- L, T =:= h3 orelse T =:= h2 orelse T =:= h1].
+    case lists:all(fun(T) -> lists:member(T, [h3, h2, h1]) end, L) of
+        true -> {ok, dedup(L)};
+        false -> {error, {invalid_opts, {transports, L}}}
+    end;
+normalize_transports(Other) ->
+    {error, {invalid_opts, {transports, Other}}}.
+
+dedup(L) ->
+    lists:reverse(
+        lists:foldl(
+            fun(X, Acc) ->
+                case lists:member(X, Acc) of
+                    true -> Acc;
+                    false -> [X | Acc]
+                end
+            end,
+            [],
+            L
+        )
+    ).
 
 %% @equiv connect(ProxyURI, Target, #{})
 -spec connect(proxy_uri(), target()) -> {ok, session()} | {error, term()}.
@@ -547,10 +573,10 @@ bind_connect(ProxyURI, Target, Opts) when is_map(Opts) ->
         {ok, Host, Port} ->
             Owner = maps:get(owner, Opts1, self()),
             Opts2 = Opts1#{proxy => {Host, Port}},
-            Transports = normalize_transports(
-                maps:get(transports, Opts2, [h3, h2])
-            ),
-            connect_via(Transports, Target, Opts2, Owner);
+            case normalize_transports(maps:get(transports, Opts2, [h3, h2])) of
+                {ok, Transports} -> connect_via(Transports, Target, Opts2, Owner);
+                {error, _} = Err -> Err
+            end;
         {error, _} = Err ->
             Err
     end.

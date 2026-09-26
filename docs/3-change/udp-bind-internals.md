@@ -75,15 +75,9 @@ Packets from the kernel whose source family was not advertised are ignored; othe
 
 On h3 and h2 the session counts every drop with `masque_metrics:bind_drop_inc/1`; reasons are listed by `bind_drop_reasons/0`.
 
-## h1 drift
+## The h1 session
 
-`masque_udp_bind_h1_server_session` shares the wire format and the table module but not the session logic. Compared with the h3/h2 session it:
-
-- uses `install/2`, so it has no cross-side conflict handling;
-- never calls `mark_uncompressed_closed/1`, so the post-close rule is not enforced;
-- has no pending-ASSIGN limit and counts no drops;
-- expects `{compression_assign, Entry}` with a `#compression_entry{}` and crashes on the `{IP, Port}` form, and does not record the entry in its own table;
-- calls handler callbacks without catching crashes, so a handler crash takes the session down.
+`masque_udp_bind_h1_server_session` shares the wire format and the table module with the h3/h2 session, and applies the same rules: cross-side conflict handling (`install/3`), the post-close rule, the pending-ASSIGN limit, the `{compression_assign, {IP, Port}}` action, drop counters, and crash handling through `safe_apply/3`. The logic is a copy, not shared code: when you change a rule in one session, change the other.
 
 Tests: `masque_compression_table_tests`, `masque_compression_capsule_tests`, `masque_udp_bind_payload_tests`, `masque_udp_bind_proxy_handler_tests`, `masque_udp_bind_compliance_SUITE`, and the udp-bind cases in `masque_lifecycle_SUITE`. No test covers a compressed context end to end.
 

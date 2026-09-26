@@ -36,6 +36,16 @@
     h2_udp_bind_round_trip/1,
     h3_bind_handler_crash_resets_stream/1,
     h2_bind_handler_crash_resets_stream/1,
+    h3_udp_handler_crash_resets_stream/1,
+    h2_udp_handler_crash_resets_stream/1,
+    h3_reset_while_starting_answers_listener/1,
+    h1_bind_handler_crash_closes_tunnel/1,
+    unsupported_call_keeps_session/1,
+    udp_bind_skips_pool/1,
+    h1_every_tunnel_counts_open_and_close/1,
+    h1_udp_bind_assign_by_address/1,
+    h1_udp_bind_pending_limit/1,
+    h3_reset_while_finalizing_answers_listener/1,
     bind_message_before_finalize/1,
     h3_unknown_reject_reason_gets_response/1,
     h2_unknown_reject_reason_gets_response/1,
@@ -84,6 +94,16 @@ all() ->
         h2_udp_bind_round_trip,
         h3_bind_handler_crash_resets_stream,
         h2_bind_handler_crash_resets_stream,
+        h3_udp_handler_crash_resets_stream,
+        h2_udp_handler_crash_resets_stream,
+        h3_reset_while_starting_answers_listener,
+        h1_bind_handler_crash_closes_tunnel,
+        unsupported_call_keeps_session,
+        udp_bind_skips_pool,
+        h1_every_tunnel_counts_open_and_close,
+        h1_udp_bind_assign_by_address,
+        h1_udp_bind_pending_limit,
+        h3_reset_while_finalizing_answers_listener,
         bind_message_before_finalize,
         h3_unknown_reject_reason_gets_response,
         h2_unknown_reject_reason_gets_response,
@@ -134,8 +154,8 @@ init_per_testcase(Case, Config) ->
     {ok, H3} = masque_test_helpers:start_masque_server(maps:merge(Certs, Opts)),
     {ok, H2} = start_h2_server(Certs, Opts),
     H1 =
-        case Case of
-            h1_close_leaves_no_server_session -> start_h1_server(Certs, Opts);
+        case atom_to_list(Case) of
+            "h1_" ++ _ -> start_h1_server(Certs, Opts);
             _ -> undefined
         end,
     [{h3, H3}, {h2, H2}, {h1, H1} | Config].
@@ -193,10 +213,28 @@ extra_opts(h3_udp_bind_output_before_finalize_is_kept) ->
         bind_handler => masque_crash_bind_handler,
         handler_opts => HOpts#{early_assign => {{127, 0, 0, 1}, 9}}
     };
+extra_opts(h1_bind_handler_crash_closes_tunnel) ->
+    (bind_opts())#{bind_handler => masque_crash_bind_handler};
+extra_opts(udp_bind_skips_pool) ->
+    bind_opts();
+extra_opts(h1_every_tunnel_counts_open_and_close) ->
+    bind_opts();
+extra_opts(h1_udp_bind_assign_by_address) ->
+    early_assign_opts(#{});
+extra_opts(h1_udp_bind_pending_limit) ->
+    early_assign_opts(#{max_pending_compression_responses => 0});
 extra_opts(h2_failed_session_releases_tunnel_slot) ->
     #{handler => masque_stop_init_handler, max_tunnels_per_connection => 1};
 extra_opts(_Case) ->
     #{}.
+
+early_assign_opts(Extra) ->
+    B = bind_opts(),
+    HOpts = maps:get(handler_opts, B),
+    B#{
+        bind_handler => masque_crash_bind_handler,
+        handler_opts => maps:merge(HOpts#{early_assign => {{127, 0, 0, 1}, 9}}, Extra)
+    }.
 
 bind_opts() ->
     #{
@@ -480,6 +518,204 @@ bind_handler_crash_resets_stream(Config, Transport) ->
     after 5000 -> ct:fail(no_reset_on_crash)
     end.
 
+%% A crash in a callback after init stops the session and resets the
+%% stream; the session must not keep running on stale handler state.
+h3_udp_handler_crash_resets_stream(Config) ->
+    udp_handler_crash_resets_stream(Config, h3).
+
+h2_udp_handler_crash_resets_stream(Config) ->
+    udp_handler_crash_resets_stream(Config, h2).
+
+udp_handler_crash_resets_stream(Config, Transport) ->
+    Sess = connect(Config, Transport),
+    Pid = await_session(),
+    MRef = erlang:monitor(process, Pid),
+    ok = masque:send_capsule(Sess, 16#ff01, <<>>),
+    await_down(MRef, Pid),
+    receive
+        {masque_closed, Sess, peer_reset} -> ok
+    after 5000 -> ct:fail(no_reset_on_crash)
+    end.
+
+%% The h1 udp-bind session applies the same handler and compression
+%% rules as the h3/h2 one.
+h1_bind_handler_crash_closes_tunnel(Config) ->
+    Sess = bind_connect(Config, h1),
+    ok = masque:send_capsule(Sess, 16#ff01, <<>>),
+    receive
+        {masque_closed, Sess, _} -> ok
+    after 5000 -> ct:fail(no_close_on_crash)
+    end.
+
+h1_udp_bind_assign_by_address(Config) ->
+    Sess = bind_connect(Config, h1),
+    receive
+        {masque_compression_assigned, Sess, _Id, {{127, 0, 0, 1}, 9}} -> ok
+    after 5000 -> ct:fail(no_assign)
+    end,
+    ok = masque:close(Sess).
+
+h1_udp_bind_pending_limit(Config) ->
+    Sess = bind_connect(Config, h1),
+    receive
+        {masque_compression_assigned, Sess, _, _} = M -> ct:fail({unexpected, M})
+    after 500 -> ok
+    end,
+    {open, _} = sys:get_state(Sess),
+    ok = masque:close(Sess).
+
+%% `upstream_pool => true' has no effect on a bind: no pooled
+%% connection is checked out, on the single-transport path or in a race.
+udp_bind_skips_pool(Config) ->
+    Checkout = {masque_racer, checkout_pool, 2},
+    _ = erlang:trace_pattern(Checkout, true, [call_count]),
+    try
+        Port = maps:get(port, ?config(h3, Config)),
+        Proxy = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+        lists:foreach(
+            fun(Ts) ->
+                {ok, Sess} = masque:bind_connect(Proxy, unscoped, #{
+                    transports => Ts, verify => verify_none, upstream_pool => true
+                }),
+                ok = masque:close(Sess)
+            end,
+            [[h3], [h3, h2]]
+        ),
+        ?assertEqual({call_count, 0}, erlang:trace_info(Checkout, call_count))
+    after
+        _ = erlang:trace_pattern(Checkout, false, [call_count])
+    end.
+
+%% A call a session does not support is answered with an error; the
+%% session keeps running.
+unsupported_call_keeps_session(Config) ->
+    {EchoPid, EchoPort} = start_tcp_echo(),
+    Tcp = tcp_connect(Config, h3, EchoPort),
+    {error, not_supported} = masque:send(Tcp, 0, <<"x">>),
+    {open, _} = sys:get_state(Tcp),
+    ok = masque:close(Tcp),
+    exit(EchoPid, kill),
+    Port = maps:get(port, ?config(h2, Config)),
+    {ok, Ip} = masque:connect(
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+        {'*', '*'},
+        #{protocol => ip, transports => [h2], verify => verify_none}
+    ),
+    {error, not_supported} = masque:shutdown_write(Ip),
+    {open, _} = sys:get_state(Ip),
+    ok = masque:close(Ip).
+
+%% Every server session reports `tunnel_opened' once and
+%% `tunnel_closed' once, so `masque.tunnels.active' returns to where it
+%% started. Counted with call-count tracing on `masque_metrics'.
+h1_every_tunnel_counts_open_and_close(Config) ->
+    Opened = {masque_metrics, tunnel_opened, 1},
+    Closed = {masque_metrics, tunnel_closed, 2},
+    _ = erlang:trace_pattern(Opened, true, [call_count]),
+    _ = erlang:trace_pattern(Closed, true, [call_count]),
+    try
+        {call_count, O0} = erlang:trace_info(Opened, call_count),
+        {call_count, C0} = erlang:trace_info(Closed, call_count),
+        Kinds = [udp, tcp, ip, udp_bind],
+        Tunnels = [{T, K} || T <- [h3, h2, h1], K <- Kinds],
+        lists:foreach(fun({T, K}) -> open_and_close(Config, T, K) end, Tunnels),
+        N = length(Tunnels),
+        ok = wait_until(
+            fun() ->
+                {call_count, O} = erlang:trace_info(Opened, call_count),
+                {call_count, C} = erlang:trace_info(Closed, call_count),
+                {O - O0, C - C0} =:= {N, N}
+            end,
+            100
+        )
+    after
+        _ = erlang:trace_pattern(Opened, false, [call_count]),
+        _ = erlang:trace_pattern(Closed, false, [call_count])
+    end.
+
+open_and_close(Config, T, K) ->
+    Port = maps:get(port, ?config(T, Config)),
+    Proxy = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    Opts = #{verify => verify_none, transports => [T]},
+    {ok, Sess} =
+        case K of
+            udp ->
+                masque:connect(Proxy, {<<"192.0.2.6">>, 443}, Opts);
+            tcp ->
+                {_Echo, EchoPort} = start_tcp_echo(),
+                masque:connect(Proxy, {<<"127.0.0.1">>, EchoPort}, Opts#{protocol => tcp});
+            ip ->
+                masque:connect(Proxy, {'*', '*'}, Opts#{protocol => ip});
+            udp_bind ->
+                masque:bind_connect(Proxy, unscoped, Opts)
+        end,
+    ok = masque:close(Sess).
+
+%% A peer reset of a stream whose session is still starting answers
+%% the waiting listener at once instead of after the 30 s
+%% `start_session' timeout, and leaves no session behind.
+h3_reset_while_starting_answers_listener(_Config) ->
+    {Router, Caller} = start_pending_session(#{init_delay => 500}),
+    Pid = await_session(),
+    MRef = erlang:monitor(process, Pid),
+    Router ! {quic_h3, self(), {stream_reset, 0, 0}},
+    await_start_result(Caller, {error, stream_dead}),
+    await_down(MRef, Pid),
+    ok = gen_server:stop(Router).
+
+%% Same, once the session has started and waits for its finalize.
+h3_reset_while_finalizing_answers_listener(_Config) ->
+    {Router, Caller} = start_pending_session(#{}),
+    Pid = await_session(),
+    %% Queued ahead of the router's finalize cast: the session stays
+    %% started but unfinalized until it is resumed.
+    ok = sys:suspend(Pid),
+    MRef = erlang:monitor(process, Pid),
+    ok = wait_finalizing(Router, 50),
+    Router ! {quic_h3, self(), {stream_reset, 0, 0}},
+    await_start_result(Caller, {error, stream_dead}),
+    ok = sys:resume(Pid),
+    await_down(MRef, Pid),
+    ok = gen_server:stop(Router).
+
+start_pending_session(HOpts) ->
+    {ok, Router} = masque_server_connection:start_link(0),
+    unlink(Router),
+    %% A dead conn pid: transport calls fail fast with noproc.
+    Conn = spawn(fun() -> ok end),
+    Args = #{
+        conn => Conn,
+        stream_id => 0,
+        transport => h3,
+        router => Router,
+        protocol => udp,
+        handler => masque_report_handler,
+        handler_opts => HOpts#{report_to => self()},
+        req => #{target_host => <<"192.0.2.6">>, target_port => 443}
+    },
+    Self = self(),
+    Caller = spawn(fun() ->
+        Self ! {start_result, self(), masque_server_connection:start_session(Router, Args)}
+    end),
+    {Router, Caller}.
+
+await_start_result(Caller, Expected) ->
+    receive
+        {start_result, Caller, Result} -> ?assertEqual(Expected, Result)
+    after 2000 -> ct:fail(listener_still_waiting)
+    end.
+
+wait_finalizing(_Router, 0) ->
+    ct:fail(never_finalizing);
+wait_finalizing(Router, N) ->
+    case element(4, sys:get_state(Router)) of
+        #{0 := {_, {finalizing, _, _}, _}} ->
+            ok;
+        _ ->
+            timer:sleep(20),
+            wait_finalizing(Router, N - 1)
+    end.
+
 %% Messages reaching an h3 session before the router finalizes it (and
 %% a stop in that window) must not crash it.
 bind_message_before_finalize(_Config) ->
@@ -568,7 +804,7 @@ tcp_target_reset_resets_tunnel(Config, Transport) ->
     ok = gen_tcp:controlling_process(LSock, Target),
     Port = maps:get(port, ?config(Transport, Config)),
     {ok, Sess} = masque:connect(
-        iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
         {<<"127.0.0.1">>, TPort},
         #{verify => verify_none, transports => [Transport], protocol => tcp}
     ),
@@ -681,7 +917,7 @@ h3_udp_output_before_finalize_is_kept(Config) ->
 h3_ip_output_before_finalize_is_kept(Config) ->
     Port = maps:get(port, ?config(h3, Config)),
     {ok, Sess} = masque:connect(
-        iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
         {'*', '*'},
         #{protocol => ip, transports => [h3], verify => verify_none}
     ),
@@ -746,7 +982,7 @@ h2_tcp_rejects_capsule_protocol_response(Config) ->
     }),
     try
         {error, _} = masque:connect(
-            iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+            iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
             {<<"192.0.2.6">>, 443},
             #{verify => verify_none, transports => [h2], protocol => tcp}
         )
@@ -768,7 +1004,7 @@ tcp_target_listen() ->
 tcp_connect(Config, Transport, TPort) ->
     Port = maps:get(port, ?config(Transport, Config)),
     {ok, Sess} = masque:connect(
-        iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
         {<<"127.0.0.1">>, TPort},
         #{verify => verify_none, transports => [Transport], protocol => tcp}
     ),
@@ -799,7 +1035,7 @@ recv_tcp_wait(Sess) ->
 
 h2_connect(Config) ->
     h2:connect(
-        "localhost",
+        "127.0.0.1",
         maps:get(port, ?config(h2, Config)),
         #{transport => ssl, verify => verify_none, sync => true}
     ).
@@ -893,7 +1129,7 @@ start_h2_server(#{cert_file := CertFile, key_file := KeyFile}, Opts) ->
 connect(Config, Transport) ->
     Server = ?config(Transport, Config),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(maps:get(port, Server))]
+        ["https://127.0.0.1:", integer_to_list(maps:get(port, Server))]
     ),
     {ok, Sess} = masque:connect(
         ProxyURI,
@@ -912,7 +1148,7 @@ h3_open_udp(Config) ->
 
 h2_open_udp(Config) ->
     {ok, Conn} = h2:connect(
-        "localhost",
+        "127.0.0.1",
         maps:get(port, ?config(h2, Config)),
         #{transport => ssl, verify => verify_none, sync => true}
     ),

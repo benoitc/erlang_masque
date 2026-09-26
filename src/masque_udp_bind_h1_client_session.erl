@@ -23,7 +23,15 @@
 -include("masque.hrl").
 -include("masque_udp_bind.hrl").
 
--dialyzer({nowarn_function, [do_connect/2, build_authority/2]}).
+-dialyzer({nowarn_function, [do_connect/2]}).
+
+-define(RESERVED_HEADERS, [
+    <<"host">>,
+    <<"connection">>,
+    <<"upgrade">>,
+    <<"capsule-protocol">>,
+    <<"connect-udp-bind">>
+]).
 
 -record(data, {
     owner :: pid(),
@@ -116,7 +124,7 @@ init({Target, Opts, Owner}) ->
         rx_buf = queue:new(),
         rx_waiters = queue:new(),
         max_cap = MaxCap,
-        extra_headers = maps:get(request_headers, Opts, []),
+        extra_headers = sanitise_extra_headers(maps:get(request_headers, Opts, [])),
         public_addresses = []
     },
     {ok, connecting, Data, [{next_event, internal, {do_handshake, Opts}}]}.
@@ -239,7 +247,9 @@ open(
 ) ->
     {next_state, closing, Data, [{next_event, internal, do_close}]};
 open(info, _Msg, Data) ->
-    {keep_state, Data}.
+    {keep_state, Data};
+open({call, From}, _Other, Data) ->
+    {keep_state, Data, [{reply, From, {error, not_supported}}]}.
 
 closing(internal, do_close, #data{socket = Socket} = Data) ->
     _ =
@@ -254,6 +264,8 @@ closing(internal, do_close, #data{socket = Socket} = Data) ->
                 end
         end,
     {stop, normal, Data};
+closing({call, From}, _Other, Data) ->
+    {keep_state, Data, [{reply, From, {error, closing}}]};
 closing(_, _, Data) ->
     {keep_state, Data}.
 
@@ -753,8 +765,8 @@ do_connect(Data, Opts) ->
 
 build_request(Data) ->
     Path = expand_path(Data#data.bind_target),
-    Authority = build_authority(
-        Data#data.proxy_host,
+    Authority = masque_uri:build_authority(
+        to_bin(Data#data.proxy_host),
         Data#data.proxy_port
     ),
     HostHdr = [<<"Host: ">>, Authority, <<"\r\n">>],
@@ -934,8 +946,21 @@ setopts_active_once(Socket) ->
     _ = ssl:setopts(Socket, [{active, once}]),
     ok.
 
-build_authority(Host, Port) ->
-    iolist_to_binary([Host, ":", integer_to_binary(Port)]).
+%% Drop headers the session writes itself and any name or value that is
+%% not a binary or carries CR/LF, so `request_headers' cannot rewrite
+%% or inject request headers.
+sanitise_extra_headers(List) when is_list(List) ->
+    [
+        {K, V}
+     || {K, V} <- List,
+        is_binary(K),
+        is_binary(V),
+        binary:match(K, [<<"\r">>, <<"\n">>]) =:= nomatch,
+        binary:match(V, [<<"\r">>, <<"\n">>]) =:= nomatch,
+        not lists:member(string:lowercase(K), ?RESERVED_HEADERS)
+    ];
+sanitise_extra_headers(_) ->
+    [].
 
 to_bin(B) when is_binary(B) -> B;
 to_bin(L) when is_list(L) -> iolist_to_binary(L).

@@ -176,13 +176,26 @@ acquire_over_limit_rejects_test() ->
     ok = ?M:stop(Owner),
     ?MOCK:stop(Mock).
 
-h3_max_streams_is_dynamic_test() ->
+h3_max_streams_defaults_to_100_test() ->
     {Owner, Mock} = start_owner(quic_h3),
-    ?assertMatch(#{max_streams := dynamic}, ?M:info(Owner)),
-    %% With dynamic, the owner does not pre-cap; it delegates to the
-    %% transport (which, in this mock, returns whatever we configure).
-    {ok, _, _} = ?M:acquire_stream(Owner, sample_headers(), self(), #{}),
-    {ok, _, _} = ?M:acquire_stream(Owner, sample_headers(), self(), #{}),
+    ?assertMatch(#{max_streams := 100}, ?M:info(Owner)),
+    ok = ?M:stop(Owner),
+    ?MOCK:stop(Mock).
+
+%% A transport stream-limit error marks the owner full so the pool
+%% stops handing it out.
+transport_stream_limit_marks_owner_full_test() ->
+    {Owner, Mock} = start_owner(quic_h3, #{
+        pool => self(), request_result => {error, stream_limit}
+    }),
+    ?assertEqual(
+        {error, stream_limit},
+        ?M:acquire_stream(Owner, sample_headers(), self(), #{})
+    ),
+    receive
+        {owner_capacity, Owner, true} -> ok
+    after 1000 -> ?assert(false)
+    end,
     ok = ?M:stop(Owner),
     ?MOCK:stop(Mock).
 

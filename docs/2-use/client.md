@@ -20,7 +20,7 @@ This page covers everything you do on the client side of a tunnel: open it with 
 | Option | Default | What it does |
 |---|---|---|
 | `protocol` | `udp` | `udp`, `tcp` or `ip`. |
-| `transports` | `[h3, h2]` | Transports to try. One entry dials only that transport; two or more are raced. Add `h1` as a last resort: `[h3, h2, h1]`. |
+| `transports` | `[h3, h2]` | Transports to try. One entry dials only that transport; two or more are raced. Add `h1` as a last resort: `[h3, h2, h1]`. Anything but a list of `h3`, `h2`, `h1` returns `{error, {invalid_opts, {transports, T}}}`. |
 | `prefer_timeout_ms` | `250` | Head start of the first transport before the second one starts. |
 | `h1_prefer_timeout_ms` | `500` | Delay before the third transport starts, counted from the start of the second. |
 | `timeout` | `5000` | Handshake timeout in ms. When racing, the whole race must finish within it. |
@@ -38,7 +38,7 @@ This page covers everything you do on the client side of a tunnel: open it with 
 | `upstream_pool` | `false` | Share one h2 or h3 connection per proxy across tunnels. See below. |
 | `upstream_pool_opts` | `#{}` | `idle_timeout_ms` (30000), `max_streams` (integer or `dynamic`), `checkout_timeout_ms` (60000). |
 
-`request_headers` never overrides the headers the library sets itself (the pseudo-headers and `capsule-protocol` on h3 and h2; `host`, `upgrade`, `connection` and `capsule-protocol` on h1); such entries are dropped. On h1, a header containing CR or LF never reaches the wire: CONNECT-TCP drops it, and the h1 library refuses it for UDP and IP. Connect-UDP-Bind over h1 does not check, so sanitise values yourself there.
+`request_headers` never overrides the headers the library sets itself (the pseudo-headers and `capsule-protocol` on h3 and h2, plus `connect-udp-bind` for a bind; `host`, `upgrade`, `connection` and `capsule-protocol` on h1); such entries are dropped. On h1, a header containing CR or LF never reaches the wire: CONNECT-TCP and Connect-UDP-Bind drop it, and the h1 library refuses it for UDP and IP.
 
 ## Transports and racing
 
@@ -139,7 +139,7 @@ ok = masque:shutdown_write(Sess),        %% send FIN, keep receiving
 receive {masque_closed, Sess, peer_fin} -> done end.
 ```
 
-After `shutdown_write/1`, `send/2` returns `{error, write_closed}` and a second `shutdown_write/1` returns `{error, already_closed}`. Before the handshake finishes it returns `{error, not_ready}`; on UDP and IP tunnels `{error, not_supported}`. On h1 there is no half-close: OTP `ssl` drops the connection on the peer's TLS `close_notify`, so a FIN in either direction ends the tunnel. See [connect-tcp](connect-tcp.md).
+After `shutdown_write/1`, `send/2` returns `{error, write_closed}` and a second `shutdown_write/1` returns `{error, already_closed}`. Before the handshake finishes it returns `{error, not_ready}`; on UDP, IP and udp-bind tunnels `{error, not_supported}`. On h1 there is no half-close: OTP `ssl` drops the connection on the peer's TLS `close_notify`, so a FIN in either direction ends the tunnel. See [connect-tcp](connect-tcp.md).
 
 ## Errors
 
