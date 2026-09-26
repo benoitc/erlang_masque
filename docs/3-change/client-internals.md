@@ -167,8 +167,7 @@ Each client module contains four layers, the same pattern implemented per module
 
 Known drift between the copies:
 
-- `masque_client_session`, `masque_h2_client_session` and `masque_tcp_client_session` have no catch-all for calls in `connecting`: a `send`, `recv` or `set_mode` before the handshake completes crashes the session with `function_clause`. The other sessions answer `{error, not_ready}`.
-- `masque_udp_bind_client_session` answers every call in `connecting`, including `info` and `stop`, with `{error, not_ready}`, so `masque:close/1` does not stop a connecting udp-bind session.
+- Every session ends each state with a catch-all for calls: `connecting` answers `{error, not_ready}`, `open` answers `{error, not_supported}`, `closing` answers `{error, closing}`. Add the new call's clause before these when you extend the API.
 - udp-bind sessions reject a non-2xx with `{bad_status, Status}`; the others use `{handshake_rejected, Status}`.
 - The udp-bind sessions build `:authority` without bracketing IPv6 literals; the others use a bracketing `build_authority/2`.
 

@@ -139,7 +139,7 @@ ok = masque:shutdown_write(Sess),        %% send FIN, keep receiving
 receive {masque_closed, Sess, peer_fin} -> done end.
 ```
 
-After `shutdown_write/1`, `send/2` returns `{error, write_closed}` and a second `shutdown_write/1` returns `{error, already_closed}`. Before the handshake finishes it returns `{error, not_ready}`; on UDP and IP tunnels `{error, not_supported}`. On h1 there is no half-close: OTP `ssl` drops the connection on the peer's TLS `close_notify`, so a FIN in either direction ends the tunnel. See [connect-tcp](connect-tcp.md).
+After `shutdown_write/1`, `send/2` returns `{error, write_closed}` and a second `shutdown_write/1` returns `{error, already_closed}`. Before the handshake finishes it returns `{error, not_ready}`; on UDP, IP and udp-bind tunnels `{error, not_supported}`. On h1 there is no half-close: OTP `ssl` drops the connection on the peer's TLS `close_notify`, so a FIN in either direction ends the tunnel. See [connect-tcp](connect-tcp.md).
 
 ## Errors
 

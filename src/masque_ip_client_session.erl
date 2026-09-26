@@ -394,7 +394,12 @@ open(
 ) ->
     {next_state, closing, Data, [{next_event, internal, do_close}]};
 open(info, _Msg, Data) ->
-    {keep_state, Data}.
+    {keep_state, Data};
+%% A late `handshake_await' (the handshake already succeeded).
+open({call, From}, handshake_await, Data) ->
+    {keep_state, Data, [{reply, From, ok}]};
+open({call, From}, _Other, Data) ->
+    {keep_state, Data, [{reply, From, {error, not_supported}}]}.
 
 closing(internal, do_close, Data) ->
     _ =
@@ -417,6 +422,8 @@ closing(internal, do_close, Data) ->
         end,
     _ = session_teardown(Data),
     {stop, normal, Data};
+closing({call, From}, _Other, Data) ->
+    {keep_state, Data, [{reply, From, {error, closing}}]};
 closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
 

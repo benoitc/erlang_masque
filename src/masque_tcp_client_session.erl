@@ -215,7 +215,9 @@ connecting(info, _Msg, Data) ->
 connecting({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, connecting)}]};
 connecting({call, From}, stop, Data) ->
-    {stop_and_reply, normal, [{reply, From, ok}], Data}.
+    {stop_and_reply, normal, [{reply, From, ok}], Data};
+connecting({call, From}, _Other, Data) ->
+    {keep_state, Data, [{reply, From, {error, not_ready}}]}.
 
 %%====================================================================
 %% State: failed (dial error parked for `handshake_await')
@@ -324,7 +326,12 @@ open(
 ) ->
     {next_state, closing, Data, [{next_event, internal, do_close}]};
 open(info, _Msg, Data) ->
-    {keep_state, Data}.
+    {keep_state, Data};
+%% A late `handshake_await' (the handshake already succeeded).
+open({call, From}, handshake_await, Data) ->
+    {keep_state, Data, [{reply, From, ok}]};
+open({call, From}, _Other, Data) ->
+    {keep_state, Data, [{reply, From, {error, not_supported}}]}.
 
 closing({call, From}, shutdown_write, Data) ->
     {keep_state, Data, [{reply, From, {error, closing}}]};
@@ -353,6 +360,8 @@ closing(internal, do_close, Data) ->
         end,
     _ = session_teardown(Data),
     {stop, normal, Data};
+closing({call, From}, _Other, Data) ->
+    {keep_state, Data, [{reply, From, {error, closing}}]};
 closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
 

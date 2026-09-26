@@ -40,6 +40,7 @@
     h2_udp_handler_crash_resets_stream/1,
     h3_reset_while_starting_answers_listener/1,
     h1_bind_handler_crash_closes_tunnel/1,
+    unsupported_call_keeps_session/1,
     h1_every_tunnel_counts_open_and_close/1,
     h1_udp_bind_assign_by_address/1,
     h1_udp_bind_pending_limit/1,
@@ -96,6 +97,7 @@ all() ->
         h2_udp_handler_crash_resets_stream,
         h3_reset_while_starting_answers_listener,
         h1_bind_handler_crash_closes_tunnel,
+        unsupported_call_keeps_session,
         h1_every_tunnel_counts_open_and_close,
         h1_udp_bind_assign_by_address,
         h1_udp_bind_pending_limit,
@@ -557,6 +559,25 @@ h1_udp_bind_pending_limit(Config) ->
     end,
     {open, _} = sys:get_state(Sess),
     ok = masque:close(Sess).
+
+%% A call a session does not support is answered with an error; the
+%% session keeps running.
+unsupported_call_keeps_session(Config) ->
+    {EchoPid, EchoPort} = start_tcp_echo(),
+    Tcp = tcp_connect(Config, h3, EchoPort),
+    {error, not_supported} = masque:send(Tcp, 0, <<"x">>),
+    {open, _} = sys:get_state(Tcp),
+    ok = masque:close(Tcp),
+    exit(EchoPid, kill),
+    Port = maps:get(port, ?config(h2, Config)),
+    {ok, Ip} = masque:connect(
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+        {'*', '*'},
+        #{protocol => ip, transports => [h2], verify => verify_none}
+    ),
+    {error, not_supported} = masque:shutdown_write(Ip),
+    {open, _} = sys:get_state(Ip),
+    ok = masque:close(Ip).
 
 %% Every server session reports `tunnel_opened' once and
 %% `tunnel_closed' once, so `masque.tunnels.active' returns to where it

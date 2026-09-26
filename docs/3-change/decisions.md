@@ -197,6 +197,6 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q24.** The udp-bind proxy sends only on its own compressed contexts (or the client's uncompressed one) and reads client datagrams only on client-opened contexts, while the client session treats every installed context as two-way. Which reading of the draft is intended?
 - **Q25.** Error stops end the stream differently per protocol: UDP resets with `H3_MESSAGE_ERROR`, TCP with `H3_CONNECT_ERROR`, udp-bind with `H3_INTERNAL_ERROR`, IP with a FIN. Intended?
 - **Q26.** The h1 IP session has no limit on pending ADDRESS_REQUEST ids (h3/h2 cap it at 64). Intended?
-- **Q27.** Calls during `connecting` behave differently: three sessions crash, most answer `{error, not_ready}`, and the udp-bind h3/h2 session also refuses `info` and `stop`. What is the intended contract?
+- **Q27.** Settled: in `connecting` a call answers `{error, not_ready}` except `info` and `stop`; in `open` an unsupported call answers `{error, not_supported}`; in `closing`, `{error, closing}`.
 
 Next: [releasing](releasing.md).

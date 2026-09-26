@@ -130,9 +130,12 @@ When several transports race, the reason you get is the last attempt's reason, n
 | `recv/2` | `{error, timeout}` | nothing arrived in time |
 | `recv/2` | `{error, closed}` | the tunnel ended and the queue is empty, or the session is gone |
 | `recv/2` | `{error, rx_overflow}` | CONNECT-TCP in queue mode: you did not read fast enough and more than `rx_queue_limit` chunks piled up; the tunnel was reset |
-| `shutdown_write/1` | `{error, not_supported}` | CONNECT-UDP sessions |
+| `shutdown_write/1` | `{error, not_supported}` | CONNECT-UDP, CONNECT-IP and udp-bind sessions |
 | `shutdown_write/1` | `{error, not_ready}` / `{error, closing}` / `{error, already_closed}` | TCP session still connecting, closing, or already shut down |
 | `send_capsule/3` | `{error, not_supported}` | CONNECT-TCP |
+| any call | `{error, not_ready}` | the handshake has not finished (`info/1` and `close/1` still work) |
+| any call | `{error, not_supported}` | the session's protocol has no such operation, for example `send/3` on CONNECT-TCP |
+| any call | `{error, closing}` | the session is closing |
 | any call | `{error, Reason}` | the session is in `failed`: the dial error is returned and the session stops |
 | any call | `{error, closed}` | the session is in `closed` (peer ended, queue not yet drained) |
 

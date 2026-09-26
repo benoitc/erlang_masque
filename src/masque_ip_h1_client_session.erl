@@ -289,7 +289,9 @@ open(
 ) ->
     {next_state, closing, Data, [{next_event, internal, do_close}]};
 open(info, _Msg, Data) ->
-    {keep_state, Data}.
+    {keep_state, Data};
+open({call, From}, _Other, Data) ->
+    {keep_state, Data, [{reply, From, {error, not_supported}}]}.
 
 closing(internal, do_close, #data{socket = Socket} = Data) ->
     _ =
@@ -304,6 +306,8 @@ closing(internal, do_close, #data{socket = Socket} = Data) ->
                 end
         end,
     {stop, normal, Data};
+closing({call, From}, _Other, Data) ->
+    {keep_state, Data, [{reply, From, {error, closing}}]};
 closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
 

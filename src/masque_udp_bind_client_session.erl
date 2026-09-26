@@ -203,6 +203,10 @@ connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
 connecting({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
+connecting({call, From}, info, Data) ->
+    {keep_state, Data, [{reply, From, session_info(Data, connecting)}]};
+connecting({call, From}, stop, Data) ->
+    {stop_and_reply, normal, [{reply, From, ok}], Data};
 connecting({call, From}, _Other, Data) ->
     %% No outbound API works before the handshake completes.
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
@@ -381,7 +385,9 @@ open(
 ) ->
     {next_state, closing, Data, [{next_event, internal, do_close}]};
 open(info, _Msg, Data) ->
-    {keep_state, Data}.
+    {keep_state, Data};
+open({call, From}, _Other, Data) ->
+    {keep_state, Data, [{reply, From, {error, not_supported}}]}.
 
 %%====================================================================
 %% State: closing
@@ -419,6 +425,8 @@ closing(
             _:_ -> ok
         end),
     {stop, normal, Data};
+closing({call, From}, _Other, Data) ->
+    {keep_state, Data, [{reply, From, {error, closing}}]};
 closing(_, _, Data) ->
     {keep_state, Data}.
 
