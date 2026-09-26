@@ -1,16 +1,17 @@
-%%% @doc Client-side MASQUE CONNECT-UDP session.
+%%% Client-side CONNECT-UDP session over HTTP/3 (h2 is
+%%% `masque_h2_client_session`, h1 `masque_h1_client_session`).
 %%%
-%%% One gen_statem per tunnel. Owns the `quic_h3' connection, sends
+%%% One gen_statem per tunnel. Owns the `quic_h3` connection, sends
 %%% the Extended CONNECT request and drives it to 2xx, then holds the
 %%% request stream open for subsequent datagrams / capsules.
 %%%
 %%% States:
-%%% <ul>
-%%%   <li>`connecting' - waiting for the CONNECT-UDP response.</li>
-%%%   <li>`open' - tunnel is live; datagram plumbing lands in Step 5.</li>
-%%%   <li>`closing' - graceful shutdown in progress.</li>
-%%% </ul>
+%%% - `connecting` - waiting for the CONNECT-UDP response.
+%%% - `failed` - the dial failed; the error waits for `handshake_await`.
+%%% - `open` - tunnel is live; datagrams and capsules flow.
+%%% - `closing` - graceful shutdown in progress.
 -module(masque_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).

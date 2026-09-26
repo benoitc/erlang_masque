@@ -1,14 +1,14 @@
-%%% @doc Cross-session address registry for CONNECT-IP.
+%%% Cross-session address registry for CONNECT-IP.
 %%%
 %%% Stores `{Version, StartAddr, EndAddr, Prefix} -> {SessionPid,
-%%% ContextId}' assignments so an out-of-band consumer (e.g. a TUN
+%%% ContextId}` assignments so an out-of-band consumer (e.g. a TUN
 %%% device owner) can answer "which session serves destination X?"
 %%% without reaching into per-session state.
 %%%
-%%% Storage is a single ETS `ordered_set' keyed by
-%%% `{Version, StartIntAddr}'. Lookup does interval inclusion: find
-%%% the entry with the largest start address `=<' the probe and
-%%% verify the end address `>=' the probe. Because registrations are
+%%% Storage is a single ETS `ordered_set` keyed by
+%%% `{Version, StartIntAddr}`. Lookup does interval inclusion: find
+%%% the entry with the largest start address `=<` the probe and
+%%% verify the end address `>=` the probe. Because registrations are
 %%% rejected when their range overlaps an existing entry, at most one
 %%% interval can cover any given address.
 %%%
@@ -17,11 +17,12 @@
 %%% read traffic does not serialise on the server.
 %%%
 %%% All write APIs are tolerant of the registry not being started -
-%%% they become no-ops when `whereis(?MODULE) =:= undefined'. This
+%%% they become no-ops when `whereis(?MODULE) =:= undefined`. This
 %%% keeps test environments that don't boot the application from
 %%% needing extra setup, and keeps the proxy handler simple (it
-%%% always calls `register/5' / `release/3' without a feature flag).
+%%% always calls `register/5` / `release/3` without a feature flag).
 -module(masque_ip_session_registry).
+-moduledoc false.
 -behaviour(gen_server).
 
 -export([start_link/0]).
@@ -47,9 +48,9 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-%% @doc Register a host address or prefix as served by `SessionPid'.
-%% Returns `{error, conflict}' if the proposed range overlaps any
-%% existing registration, including an exact repeat; otherwise `ok'.
+%% Register a host address or prefix as served by `SessionPid`.
+%% Returns `{error, conflict}` if the proposed range overlaps any
+%% existing registration, including an exact repeat; otherwise `ok`.
 -spec register(
     4 | 6,
     inet:ip4_address() | inet:ip6_address(),
@@ -73,8 +74,8 @@ register(V, Addr, Pfx, Pid, ContextId) when
             )
     end.
 
-%% @doc Release a range registered by the calling process. Same as
-%% `release(V, Addr, Pfx, self())'.
+%% Release a range registered by the calling process. Same as
+%% `release(V, Addr, Pfx, self())`.
 -spec release(
     4 | 6,
     inet:ip4_address() | inet:ip6_address(),
@@ -83,7 +84,7 @@ register(V, Addr, Pfx, Pid, ContextId) when
 release(V, Addr, Pfx) when V =:= 4; V =:= 6 ->
     release(V, Addr, Pfx, self()).
 
-%% @doc Release a range registered by `Pid'. No-op if the range was
+%% Release a range registered by `Pid`. No-op if the range was
 %% not registered or belongs to another pid, so a session can never
 %% drop an entry another session now owns.
 -spec release(
@@ -98,8 +99,8 @@ release(V, Addr, Pfx, Pid) when (V =:= 4 orelse V =:= 6), is_pid(Pid) ->
         _Server -> gen_server:call(?MODULE, {release, V, Addr, Pfx, Pid})
     end.
 
-%% @doc Release every range owned by `Pid'. Used by the registry's
-%% own `'DOWN'' handler; exposed for tests and explicit cleanup.
+%% Release every range owned by `Pid`. Used by the registry's
+%% own `'DOWN'` handler; exposed for tests and explicit cleanup.
 -spec release_pid(pid()) -> ok.
 release_pid(Pid) when is_pid(Pid) ->
     case whereis(?MODULE) of
@@ -107,7 +108,7 @@ release_pid(Pid) when is_pid(Pid) ->
         _Server -> gen_server:call(?MODULE, {release_pid, Pid})
     end.
 
-%% @doc Look up the session serving `IP'. Reads ETS directly.
+%% Look up the session serving `IP`. Reads ETS directly.
 -spec lookup(inet:ip_address()) ->
     {ok, pid(), non_neg_integer()} | not_found.
 lookup(IP) ->
@@ -121,7 +122,7 @@ lookup(IP) ->
         error:badarg -> not_found
     end.
 
-%% @doc Snapshot of every registration. Intended for diagnostics.
+%% Snapshot of every registration. Intended for diagnostics.
 -spec all() ->
     [{4 | 6, non_neg_integer(), non_neg_integer(), non_neg_integer(), pid(), non_neg_integer()}].
 all() ->

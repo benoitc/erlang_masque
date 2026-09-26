@@ -1,10 +1,12 @@
-%%% @doc RFC 9298 error to HTTP status code mapping.
-%%%
-%%% All MASQUE failures reported during the CONNECT-UDP handshake must
-%%% be returned to the client as an HTTP status response. This module
-%%% centralises the mapping so server code and tests agree on the exact
-%%% status code for each failure mode.
 -module(masque_errors).
+-moduledoc """
+RFC 9298 error to HTTP status code mapping.
+
+All MASQUE failures reported during the CONNECT-UDP handshake must
+be returned to the client as an HTTP status response. This module
+centralises the mapping so server code and tests agree on the exact
+status code for each failure mode.
+""".
 
 -export([handshake_status/1, status_reason/1]).
 
@@ -25,9 +27,11 @@
 
 -export_type([handshake_error/0]).
 
-%% @doc Map a handshake error to the status code MASQUE should return.
-%% Any other reason (for example an unknown `{reject, _}' from a
-%% handler) maps to 502 so the client still gets a response.
+-doc """
+Map a handshake error to the status code MASQUE should return.
+Any other reason (for example an unknown `{reject, _}` from a
+handler) maps to 502 so the client still gets a response.
+""".
 -spec handshake_status(handshake_error() | term()) -> 400..599.
 handshake_status(bad_method) ->
     ?MASQUE_STATUS_METHOD_NOT_ALLOWED;
@@ -56,7 +60,9 @@ handshake_status({other, Status}) when
 handshake_status(_) ->
     ?MASQUE_STATUS_BAD_GATEWAY.
 
-%% @doc Short human-readable reason-phrase for the given error.
+-doc """
+Short human-readable reason-phrase for the given error.
+""".
 -spec status_reason(handshake_error() | term()) -> binary().
 status_reason(bad_method) -> <<"method must be CONNECT">>;
 status_reason(bad_protocol) -> <<":protocol must be connect-udp">>;

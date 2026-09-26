@@ -1,22 +1,23 @@
-%%% @doc Client-side MASQUE CONNECT-TCP session over HTTP/1.1.
+%%% Client-side MASQUE CONNECT-TCP session over HTTP/1.1.
 %%%
 %%% Classic HTTP CONNECT (RFC 9110 §9.3.6 / RFC 9112 §3.2.3). This is
 %%% the method every HTTPS proxy has spoken for decades: the client
-%%% writes `CONNECT host:port HTTP/1.1' with a `Host' header, the
-%%% server replies `200 Connection Established', and the raw TLS
+%%% writes `CONNECT host:port HTTP/1.1` with a `Host` header, the
+%%% server replies `200 Connection Established`, and the raw TLS
 %%% socket then carries arbitrary TCP bytes both ways. Not Extended
-%%% CONNECT, no `:protocol', no capsules.
+%%% CONNECT, no `:protocol`, no capsules.
 %%%
-%%% Intentionally bypasses `h1_connection': after the 200, the
+%%% Intentionally bypasses `h1_connection`: after the 200, the
 %%% connection is no longer HTTP, so driving it through the h1 state
 %%% machine gains nothing and actively conflicts with the tunnel
-%%% handoff ({@link h1:accept_connect/3} is the server-side analogue
+%%% handoff (`h1:accept_connect/3` is the server-side analogue
 %%% the listener uses).
 %%%
-%%% Cleartext is out of scope: we only open `ssl:connect/4' with
-%%% ALPN `http/1.1'. This matches the TLS-only contract documented in
+%%% Cleartext is out of scope: we only open `ssl:connect/4` with
+%%% ALPN `http/1.1`. This matches the TLS-only contract documented in
 %%% the h1 fallback plan.
 -module(masque_tcp_h1_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).

@@ -1,20 +1,21 @@
-%%% @doc Client-side CONNECT-IP session (RFC 9484) over HTTP/1.1.
+%%% Client-side CONNECT-IP session (RFC 9484) over HTTP/1.1.
 %%%
-%%% Runs the handshake as an HTTP/1.1 Upgrade (`Upgrade: connect-ip')
+%%% Runs the handshake as an HTTP/1.1 Upgrade (`Upgrade: connect-ip`)
 %%% and, after the 101 response, drives RFC 9297 capsules directly on
 %%% the raw TLS socket.
 %%%
 %%% Control-plane capsules (ADDRESS_ASSIGN, ADDRESS_REQUEST,
-%%% ROUTE_ADVERTISEMENT) are encoded via `masque_ip_capsule'. IP
-%%% packets ride the DATAGRAM capsule with `masque_datagram' carrying
-%%% the `context-id || IP bytes' payload. Wire format is identical to
-%%% the h2 / h3 paths so `masque_ip_capsule' + `masque_datagram' are
+%%% ROUTE_ADVERTISEMENT) are encoded via `masque_ip_capsule`. IP
+%%% packets ride the DATAGRAM capsule with `masque_datagram` carrying
+%%% the `context-id || IP bytes` payload. Wire format is identical to
+%%% the h2 / h3 paths so `masque_ip_capsule` + `masque_datagram` are
 %%% reused unchanged; only the transport plumbing differs.
 %%%
-%%% Sibling module of `masque_ip_client_session'; they do not share
+%%% Sibling module of `masque_ip_client_session`; they do not share
 %%% state. Keeping them separate avoids leaking the socket-ownership
 %%% and active-once read model back into the h2/h3 session.
 -module(masque_ip_h1_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).

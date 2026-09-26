@@ -1,49 +1,49 @@
-%%% @doc Default Connect-UDP-Bind handler. Owns the per-session
-%%% upstream `gen_udp' socket, computes the `Proxy-Public-Address'
-%%% list for the response, gates inbound packets via
-%%% `peer_filter_fun', and emits actions for the bind session to
-%%% put on the wire.
-%%%
-%%% This module ships a `masque_handler'-shaped callback set
-%%% (`init/2', `handle_info/2', `terminate/2') plus the
-%%% `handle_bind_packet/3' entry the bind session calls when a
-%%% datagram arrives from the client. `handle_bind_packet/3' is not
-%%% on the existing `masque_handler' behaviour because no other
-%%% protocol uses it; the bind sessions invoke it directly.
-%%%
-%%% Configurable via `handler_opts':
-%%%
-%%% <ul>
-%%%   <li>`bind_address :: inet:ip_address() | any' - which
-%%%       interface to bind to. Default `any'.</li>
-%%%   <li>`bind_port :: inet:port_number()' - default `0'
-%%%       (kernel-assigned ephemeral).</li>
-%%%   <li>`bind_socket_opts :: [gen_udp:option()]' - merged on top of
-%%%       `[binary, {active, N}]'.</li>
-%%%   <li>`active_n :: pos_integer()' - datagrams the socket delivers
-%%%       before it pauses until the session has relayed them. Default
-%%%       `32'.</li>
-%%%   <li>`public_addresses :: [{ip_address(), port()}]' -
-%%%       list emitted on `Proxy-Public-Address'. Required if the
-%%%       socket is bound to a wildcard address; otherwise sockname
-%%%       is the fallback.</li>
-%%%   <li>`public_address_fun :: fun((sockname()) -> [{ip, port}])'
-%%%       - alternative to the static list. Takes precedence when
-%%%       set.</li>
-%%%   <li>`peer_filter_fun :: fun((ip(), port()) -> ok | {drop, atom()})'
-%%%       - per-packet egress policy. Default passes only public
-%%%       peers (`masque_ip:is_public/1', IPv4-mapped IPv6 checked as
-%%%       IPv4).</li>
-%%%   <li>`allow_loopback :: boolean()' - let the default filter
-%%%       pass loopback peers. Default `false'.</li>
-%%%   <li>`allow_private :: boolean()' - let the default filter pass
-%%%       every peer. Default `false'.</li>
-%%%   <li>`scrub_fun :: fun((Packet, State) -> {pass, Packet, State} |
-%%%                                            {drop, Reason, State})'
-%%%       - data-plane policy hook for DDoS scrubbing or other
-%%%       per-packet filtering. Default identity.</li>
-%%% </ul>
 -module(masque_udp_bind_proxy_handler).
+-moduledoc """
+Default Connect-UDP-Bind handler. Owns the per-session
+upstream `gen_udp` socket, computes the `Proxy-Public-Address`
+list for the response, gates inbound packets via
+`peer_filter_fun`, and emits actions for the bind session to
+put on the wire.
+
+This module ships a `masque_handler`-shaped callback set
+(`init/2`, `handle_info/2`, `terminate/2`) plus the
+`handle_bind_packet/3` entry the bind session calls when a
+datagram arrives from the client. `handle_bind_packet/3` is not
+on the existing `masque_handler` behaviour because no other
+protocol uses it; the bind sessions invoke it directly.
+
+Configurable via `handler_opts`:
+
+- `bind_address :: inet:ip_address() | any` - which
+  interface to bind to. Default `any`.
+- `bind_port :: inet:port_number()` - default `0`
+  (kernel-assigned ephemeral).
+- `bind_socket_opts :: [gen_udp:option()]` - merged on top of
+  `[binary, {active, N}]`.
+- `active_n :: pos_integer()` - datagrams the socket delivers
+  before it pauses until the session has relayed them. Default
+  `32`.
+- `public_addresses :: [{ip_address(), port()}]` -
+  list emitted on `Proxy-Public-Address`. Required if the
+  socket is bound to a wildcard address; otherwise sockname
+  is the fallback.
+- `public_address_fun :: fun((sockname()) -> [{ip, port}])`
+  - alternative to the static list. Takes precedence when
+  set.
+- `peer_filter_fun :: fun((ip(), port()) -> ok | {drop, atom()})`
+  - per-packet egress policy. Default passes only public
+  peers (`masque_ip:is_public/1`, IPv4-mapped IPv6 checked as
+  IPv4).
+- `allow_loopback :: boolean()` - let the default filter
+  pass loopback peers. Default `false`.
+- `allow_private :: boolean()` - let the default filter pass
+  every peer. Default `false`.
+- `scrub_fun :: fun((Packet, State) -> {pass, Packet, State} |
+  {drop, Reason, State})`
+  - data-plane policy hook for DDoS scrubbing or other
+  per-packet filtering. Default identity.
+""".
 
 -export([init/2, handle_bind_packet/3, handle_info/2, terminate/2]).
 
@@ -132,9 +132,11 @@ terminate(_Reason, #state{socket = S}) ->
 %% Inbound from the client (already decoded by the session)
 %%====================================================================
 
-%% @doc The bind session calls this with the decoded peer tuple and
-%% the inner UDP payload. Returns either an `ok' continuation or a
-%% drop with a reason that the session can attribute via metrics.
+-doc """
+The bind session calls this with the decoded peer tuple and
+the inner UDP payload. Returns either an `ok` continuation or a
+drop with a reason that the session can attribute via metrics.
+""".
 -spec handle_bind_packet(ip_port(), binary(), #state{}) ->
     {ok, #state{}} | {drop, atom(), #state{}}.
 handle_bind_packet({IP, Port}, Payload, #state{} = S0) when

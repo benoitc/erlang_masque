@@ -1,31 +1,31 @@
-%%% @doc Default CONNECT-IP proxy handler (RFC 9484).
-%%%
-%%% Responsibilities:
-%%% <ul>
-%%%   <li>Allocate addresses from the configured `address_pool' in
-%%%       response to `ADDRESS_REQUEST' capsules (round-robin).</li>
-%%%   <li>Emit the initial `ROUTE_ADVERTISEMENT' combining the
-%%%       configured static `routes' with any `resolved_addresses'
-%%%       populated by the listener's DNS step.</li>
-%%%   <li>BCP-38 source-address filtering on inbound packets: the
-%%%       source must fall inside a prefix assigned to this client.</li>
-%%%   <li>Act as a router for accepted packets: decrement the TTL /
-%%%       Hop Limit (ICMP Time Exceeded when it runs out) and enforce
-%%%       the `mtu' option (default 1500; ICMPv6 Packet Too Big or
-%%%       ICMPv4 Fragmentation Needed when exceeded).</li>
-%%%   <li>Hand each accepted IP packet to the user-supplied
-%%%       `forward_fun' (default: drop).</li>
-%%%   <li>Record the addresses and routes the client assigns or
-%%%       advertises to the proxy (reported through `lifecycle_fun'
-%%%       as `peer_address_assigned' / `peer_routes_advertised').</li>
-%%% </ul>
-%%%
-%%% Assigned prefixes are registered in `masque_ip_session_registry',
-%%% which also keeps sessions sharing one pool from getting the same
-%%% addresses. A consumer that owns a TUN device can look up the
-%%% serving session there and push packets back with
-%%% `masque_ip:inject_packet/2'.
 -module(masque_ip_proxy_handler).
+-moduledoc """
+Default CONNECT-IP proxy handler (RFC 9484).
+
+Responsibilities:
+- Allocate addresses from the configured `address_pool` in
+  response to `ADDRESS_REQUEST` capsules (first free address).
+- Emit the initial `ROUTE_ADVERTISEMENT` combining the
+  configured static `routes` with any `resolved_addresses`
+  populated by the listener's DNS step.
+- BCP-38 source-address filtering on inbound packets: the
+  source must fall inside a prefix assigned to this client.
+- Act as a router for accepted packets: decrement the TTL /
+  Hop Limit (ICMP Time Exceeded when it runs out) and enforce
+  the `mtu` option (default 1500; ICMPv6 Packet Too Big or
+  ICMPv4 Fragmentation Needed when exceeded).
+- Hand each accepted IP packet to the user-supplied
+  `forward_fun` (default: drop).
+- Record the addresses and routes the client assigns or
+  advertises to the proxy (reported through `lifecycle_fun`
+  as `peer_address_assigned` / `peer_routes_advertised`).
+
+Assigned prefixes are registered in `masque_ip_session_registry`,
+which also keeps sessions sharing one pool from getting the same
+addresses. A consumer that owns a TUN device can look up the
+serving session there and push packets back with
+`masque_ip:inject_packet/2`.
+""".
 -behaviour(masque_handler).
 
 -export([
@@ -136,7 +136,7 @@ init(Req, Opts) ->
     end.
 
 %%====================================================================
-%% ADDRESS_REQUEST — round-robin allocator from the pool
+%% ADDRESS_REQUEST - first-fit allocator from the pool
 %%====================================================================
 
 handle_address_request(Requests, #state{} = S) ->
@@ -543,9 +543,11 @@ process_forward_actions(Actions, Packet, Opts) ->
 %% Drop emit / lifecycle hook
 %%====================================================================
 
-%% @doc Bump the drop counter and invoke `lifecycle_fun' if configured
-%% in handler opts. Public so a TUN/router consumer that runs its own
-%% data path can drive the same telemetry without re-implementing it.
+-doc """
+Bump the drop counter and invoke `lifecycle_fun` if configured
+in handler opts. Public so a TUN/router consumer that runs its own
+data path can drive the same telemetry without re-implementing it.
+""".
 -spec emit_drop(atom(), map()) -> ok.
 emit_drop(Reason, Detail) ->
     masque_metrics:ip_drop_inc(Reason),

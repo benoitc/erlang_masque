@@ -1,52 +1,49 @@
-%%% @doc Per-tunnel server session for Connect-UDP-Bind
+%%% Per-tunnel server session for Connect-UDP-Bind
 %%% (draft-ietf-masque-connect-udp-listen-11). Sibling of
-%%% `masque_server_session' / `masque_h2_server_session'; one module
-%%% serves both h2 and h3 by dispatching on a `transport' field, the
-%%% same shape used by `masque_ip_server_session'.
+%%% `masque_server_session` / `masque_h2_server_session`; one module
+%%% serves both h2 and h3 by dispatching on a `transport` field, the
+%%% same shape used by `masque_ip_server_session`.
 %%%
 %%% Responsibilities:
 %%%
-%%% <ul>
-%%%   <li>Run the handler's `init/2' and splice the resulting
-%%%       `{response_headers, _}' action into the 2xx response so the
-%%%       proxy emits `Connect-UDP-Bind: ?1' and `Proxy-Public-Address'.</li>
-%%%   <li>Own the per-session compression tables (own + peer, via
-%%%       `masque_compression_table').</li>
-%%%   <li>Drain capsules off the request stream and dispatch
-%%%       `COMPRESSION_ASSIGN' / `ACK' / `CLOSE' to the table; pass
-%%%       any other capsule to the handler's `handle_capsule/3'.</li>
-%%%   <li>Decode incoming HTTP datagrams: extract context-id, look up
-%%%       the compression-table entry, decode the inner Bound UDP
-%%%       Proxying Payload via `masque_udp_bind_payload', and call
-%%%       `masque_udp_bind_proxy_handler:handle_bind_packet/3'.</li>
-%%%   <li>Apply handler actions (`{send_bind_packet, Peer, Bytes}',
-%%%       `{compression_assign, _}', `{compression_ack, _}',
-%%%       `{compression_close, _}', plus the legacy `send_capsule' /
-%%%       `close_session').</li>
-%%% </ul>
+%%% - Run the handler's `init/2` and splice the resulting
+%%%   `{response_headers, _}` action into the 2xx response so the
+%%%   proxy emits `Connect-UDP-Bind: ?1` and `Proxy-Public-Address`.
+%%% - Own the per-session compression tables (own + peer, via
+%%%   `masque_compression_table`).
+%%% - Drain capsules off the request stream and dispatch
+%%%   `COMPRESSION_ASSIGN` / `ACK` / `CLOSE` to the table; pass
+%%%   any other capsule to the handler's `handle_capsule/3`.
+%%% - Decode incoming HTTP datagrams: extract context-id, look up
+%%%   the compression-table entry, decode the inner Bound UDP
+%%%   Proxying Payload via `masque_udp_bind_payload`, and call
+%%%   `masque_udp_bind_proxy_handler:handle_bind_packet/3`.
+%%% - Apply handler actions (`{send_bind_packet, Peer, Bytes}`,
+%%%   `{compression_assign, _}`, `{compression_ack, _}`,
+%%%   `{compression_close, _}`, plus the legacy `send_capsule` /
+%%%   `close_session`).
 %%%
 %%% Compression policy:
 %%%
-%%% <ul>
-%%%   <li>Wait-for-ACK on send is implemented via the table's
-%%%       `state' field; an outbound mapping is `pending_ack' until
-%%%       `COMPRESSION_ACK' arrives. The session emits compressed
-%%%       payloads only against `installed' entries; otherwise it
-%%%       falls through to the uncompressed channel if open, or
-%%%       drops the packet.</li>
-%%%   <li>`{compression_assign, {IP, Port}}' opens a mapping on the
-%%%       own table. At most `max_pending_compression_responses'
-%%%       (default 16) of them wait for a response at once; beyond
-%%%       that, and after the client closed its uncompressed context
-%%%       (post-close prohibition), the assign is dropped.</li>
-%%%   <li>Dropped datagrams and assigns are counted with
-%%%       `masque_metrics:bind_drop_inc/1'.</li>
-%%% </ul>
+%%% - Wait-for-ACK on send is implemented via the table's
+%%%   `state` field; an outbound mapping is `pending_ack` until
+%%%   `COMPRESSION_ACK` arrives. The session emits compressed
+%%%   payloads only against `installed` entries; otherwise it
+%%%   falls through to the uncompressed channel if open, or
+%%%   drops the packet.
+%%% - `{compression_assign, {IP, Port}}` opens a mapping on the
+%%%   own table. At most `max_pending_compression_responses`
+%%%   (default 16) of them wait for a response at once; beyond
+%%%   that, and after the client closed its uncompressed context
+%%%   (post-close prohibition), the assign is dropped.
+%%% - Dropped datagrams and assigns are counted with
+%%%   `masque_metrics:bind_drop_inc/1`.
 %%%
-%%% Over h3 the router (`masque_server_connection') calls `finalize'
+%%% Over h3 the router (`masque_server_connection`) calls `finalize`
 %%% once the session is registered; over h2 there is no router and the
-%%% session sends the 2xx and claims the stream from `init/1'.
+%%% session sends the 2xx and claims the stream from `init/1`.
 -module(masque_udp_bind_server_session).
+-moduledoc false.
 -behaviour(gen_server).
 
 -export([start_link/1]).

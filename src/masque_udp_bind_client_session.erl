@@ -1,31 +1,28 @@
-%%% @doc Connect-UDP-Bind client session for h2 / h3
+%%% Connect-UDP-Bind client session for h2 / h3
 %%% (draft-ietf-masque-connect-udp-listen-11). Sibling of
-%%% `masque_client_session' / `masque_ip_client_session'; one module
-%%% serves both transports by dispatching on a `transport' field.
+%%% `masque_client_session` / `masque_ip_client_session`; one module
+%%% serves both transports by dispatching on a `transport` field.
 %%%
-%%% Public API surfaced via `masque':
+%%% Public API surfaced via `masque`:
 %%%
-%%% <ul>
-%%%   <li>`masque:bind_connect/3' opens the tunnel.</li>
-%%%   <li>`masque:send_to/3' sends a UDP payload to a peer.</li>
-%%%   <li>`masque:assign_compression/2',
-%%%       `masque:open_uncompressed_context/1',
-%%%       `masque:close_compression/2' drive the compression-table
-%%%       lifecycle.</li>
-%%%   <li>`masque:proxy_public_address/1' reads the parsed
-%%%       `Proxy-Public-Address' list.</li>
-%%% </ul>
+%%% - `masque:bind_connect/3` opens the tunnel.
+%%% - `masque:send_to/3` sends a UDP payload to a peer.
+%%% - `masque:assign_compression/2`,
+%%%   `masque:open_uncompressed_context/1`,
+%%%   `masque:close_compression/2` drive the compression-table
+%%%   lifecycle.
+%%% - `masque:proxy_public_address/1` reads the parsed
+%%%   `Proxy-Public-Address` list.
 %%%
-%%% Owner messages (sent to the `owner' pid passed in opts):
+%%% Owner messages (sent to the `owner` pid passed in opts):
 %%%
-%%% <ul>
-%%%   <li>`{masque_bind_packet, Sess, {IP, Port}, UdpPayload}'</li>
-%%%   <li>`{masque_compression_assigned, Sess, ContextId, Peer}'</li>
-%%%   <li>`{masque_compression_acked, Sess, ContextId}'</li>
-%%%   <li>`{masque_compression_closed, Sess, ContextId}'</li>
-%%%   <li>`{masque_closed, Sess, Reason}'</li>
-%%% </ul>
+%%% - `{masque_bind_packet, Sess, {IP, Port}, UdpPayload}`
+%%% - `{masque_compression_assigned, Sess, ContextId, Peer}`
+%%% - `{masque_compression_acked, Sess, ContextId}`
+%%% - `{masque_compression_closed, Sess, ContextId}`
+%%% - `{masque_closed, Sess, Reason}`
 -module(masque_udp_bind_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).

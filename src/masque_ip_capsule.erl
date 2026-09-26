@@ -1,22 +1,21 @@
-%%% @doc RFC 9484 §5 — CONNECT-IP capsule codec.
-%%%
-%%% Encodes and decodes the three CONNECT-IP capsule types on top of
-%%% `masque_capsule' (RFC 9297 framing):
-%%%
-%%% <ul>
-%%%  <li>`ADDRESS_ASSIGN' (0x01) — Request IDs may be 0 (unprompted).</li>
-%%%  <li>`ADDRESS_REQUEST' (0x02) — at least one entry, Request IDs
-%%%      MUST be nonzero and unique per sender.</li>
-%%%  <li>`ROUTE_ADVERTISEMENT' (0x03) — lexicographic ordering by
-%%%      (Version, IP Protocol, Start Address); ranges disjoint
-%%%      within equal (Version, Protocol); protocol-0 ranges MUST NOT
-%%%      overlap nonzero-protocol ranges for the same Version.</li>
-%%% </ul>
-%%%
-%%% Every validation failure returns `{error, Reason}' — callers map
-%%% this into an H3_MESSAGE_ERROR stream reset per RFC 9297 §3.3.
-
 -module(masque_ip_capsule).
+-moduledoc """
+RFC 9484 §5 — CONNECT-IP capsule codec.
+
+Encodes and decodes the three CONNECT-IP capsule types on top of
+`masque_capsule` (RFC 9297 framing):
+
+- `ADDRESS_ASSIGN` (0x01) — Request IDs may be 0 (unprompted).
+- `ADDRESS_REQUEST` (0x02) — at least one entry, Request IDs
+  MUST be nonzero and unique per sender.
+- `ROUTE_ADVERTISEMENT` (0x03) — lexicographic ordering by
+  (Version, IP Protocol, Start Address); ranges disjoint
+  within equal (Version, Protocol); protocol-0 ranges MUST NOT
+  overlap nonzero-protocol ranges for the same Version.
+
+Every validation failure returns `{error, Reason}` — callers map
+this into an H3_MESSAGE_ERROR stream reset per RFC 9297 §3.3.
+""".
 
 -export([
     encode_address_assign/1,
@@ -64,8 +63,10 @@
 %% Capsule-level encode (body -> framed capsule)
 %%====================================================================
 
-%% @doc Encode a typed capsule onto the RFC 9297 capsule frame.
-%% Dispatches on the capsule type atom.
+-doc """
+Encode a typed capsule onto the RFC 9297 capsule frame.
+Dispatches on the capsule type atom.
+""".
 -spec encode(
     address_assign | address_request | route_advertisement,
     [address_entry() | request_entry() | route_entry()]
@@ -81,9 +82,11 @@ encode(route_advertisement, Entries) ->
     Body = encode_route_advertisement(Entries),
     masque_capsule:encode(?MASQUE_CAPSULE_ROUTE_ADVERTISEMENT, Body).
 
-%% @doc Decode the body bytes of a CONNECT-IP capsule into typed
-%% entries. The capsule type is determined by the caller from the
-%% capsule frame (e.g. via `masque_capsule:decode/1').
+-doc """
+Decode the body bytes of a CONNECT-IP capsule into typed
+entries. The capsule type is determined by the caller from the
+capsule frame (e.g. via `masque_capsule:decode/1`).
+""".
 -spec decode_body(non_neg_integer(), binary()) ->
     {ok, [address_entry() | request_entry() | route_entry()]}
     | {error, decode_error()}.

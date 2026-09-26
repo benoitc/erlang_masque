@@ -1,7 +1,7 @@
-%%% @doc Per-tunnel server session for HTTP/2 MASQUE.
+%%% Per-tunnel server session for HTTP/2 MASQUE.
 %%%
 %%% One of these is spawned by the h2 request-handler fun after an
-%%% Extended CONNECT (`:protocol = connect-udp') passes validation.
+%%% Extended CONNECT (`:protocol = connect-udp`) passes validation.
 %%%
 %%% HTTP/2 has no native datagram channel; UDP payloads arrive as
 %%% DATAGRAM capsules on the request-body stream, interleaved with
@@ -9,6 +9,7 @@
 %%% dispatches to the user handler (same behaviour as the h3 server),
 %%% and sends responses back as capsules on the same stream.
 -module(masque_h2_server_session).
+-moduledoc false.
 -behaviour(gen_server).
 
 -export([start_link/1]).

@@ -1,16 +1,16 @@
-%%% @doc Registry for pooled upstream MASQUE connections.
+%%% Registry for pooled upstream MASQUE connections.
 %%%
 %%% Callers ask for an owner that can open a MASQUE tunnel against
 %%% the configured upstream proxy. The registry either returns a
-%%% cached {@link masque_upstream_owner} pid that has spare stream
+%%% cached `masque_upstream_owner` pid that has spare stream
 %%% capacity, or spawns a fresh one that self-dials and notifies the
 %%% registry when it is ready. Single-flight: multiple callers for
 %%% the same fingerprint while a dial is in progress all block on
 %%% the same result.
 %%%
 %%% Fingerprints encode host + port + transport + a hash of
-%%% connection-affecting opts (`verify', `cacerts', `ssl_opts',
-%%% `alpn'). Two callers with different trust or ALPN settings get
+%%% connection-affecting opts (`verify`, `cacerts`, `ssl_opts`,
+%%% `alpn`). Two callers with different trust or ALPN settings get
 %%% different owners even if they target the same host:port.
 %%%
 %%% The registry itself never blocks on a handshake; the async
@@ -25,9 +25,10 @@
 %%%
 %%% h1 is not handled here - the pool is opt-in for h2 / h3 only.
 %%% Callers that want to pool an h1 upstream receive `{error,
-%%% pool_unsupported_for_transport}' and should fall back to the
+%%% pool_unsupported_for_transport}` and should fall back to the
 %%% direct per-tunnel path.
 -module(masque_upstream_pool).
+-moduledoc false.
 -behaviour(gen_server).
 
 -export([start_link/0]).
@@ -80,15 +81,15 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-%% @doc Get an owner for the given fingerprint. Opens a new one on
+%% Get an owner for the given fingerprint. Opens a new one on
 %% cache miss, blocks briefly on a concurrent dial for the same
-%% fingerprint, returns `{error, _}' on dial failure.
+%% fingerprint, returns `{error, _}` on dial failure.
 %%
-%% `Opts' carries everything the owner needs to dial: `host', `port',
-%% `connect_opts', optional `transport_mod' (for tests), plus any
-%% owner-level tuning (`idle_timeout_ms', `max_streams'). A dial
-%% that does not finish within `checkout_timeout_ms' (default 60 s)
-%% returns `{error, timeout}'.
+%% `Opts` carries everything the owner needs to dial: `host`, `port`,
+%% `connect_opts`, optional `transport_mod` (for tests), plus any
+%% owner-level tuning (`idle_timeout_ms`, `max_streams`). A dial
+%% that does not finish within `checkout_timeout_ms` (default 60 s)
+%% returns `{error, timeout}`.
 -spec checkout(fingerprint(), map()) ->
     {ok, pid()} | {error, term()}.
 checkout(FP, Opts) ->
@@ -99,16 +100,16 @@ checkout(FP, Opts) ->
         exit:{Reason, {gen_server, call, _}} -> {error, Reason}
     end.
 
-%% @doc Tear down every pooled owner. Used on application shutdown
+%% Tear down every pooled owner. Used on application shutdown
 %% and in tests. Safe to call while callers are in flight - they
-%% receive `{error, shutdown}'.
+%% receive `{error, shutdown}`.
 -spec close_all() -> ok.
 close_all() ->
     gen_server:call(?MODULE, close_all, 10000).
 
-%% @doc Build a fingerprint from the host / port / transport and the
-%% connection-affecting subset of `Opts'. Stable under re-ordering
-%% of list-valued opts so two callers that pass `ssl_opts' in
+%% Build a fingerprint from the host / port / transport and the
+%% connection-affecting subset of `Opts`. Stable under re-ordering
+%% of list-valued opts so two callers that pass `ssl_opts` in
 %% different order still hash to the same key.
 -spec fingerprint(
     binary() | string(),

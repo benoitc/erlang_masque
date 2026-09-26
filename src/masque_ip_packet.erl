@@ -1,16 +1,18 @@
-%%% @doc Lightweight read-only IP packet parsing for CONNECT-IP scope
-%%% checks (RFC 9484 section 5).
-%%%
-%%% The proxy negotiates a `target' (destination IP / prefix scope) and
-%%% an `ipproto' (upper-layer protocol scope) when the URI template
-%%% binds them. Inbound packets that fall outside the negotiated scope
-%%% must be dropped before forwarding.
-%%%
-%%% IPv6 carries the upper-layer protocol behind a chain of extension
-%%% headers; this module walks that chain to find the first
-%%% non-extension `Next Header' value, which is what RFC 9484 says
-%%% `ipproto' is matched against.
 -module(masque_ip_packet).
+-moduledoc """
+Lightweight read-only IP packet parsing for CONNECT-IP scope
+checks (RFC 9484 section 5).
+
+The proxy negotiates a `target` (destination IP / prefix scope) and
+an `ipproto` (upper-layer protocol scope) when the URI template
+binds them. Inbound packets that fall outside the negotiated scope
+must be dropped before forwarding.
+
+IPv6 carries the upper-layer protocol behind a chain of extension
+headers; this module walks that chain to find the first
+non-extension `Next Header` value, which is what RFC 9484 says
+`ipproto` is matched against.
+""".
 
 -export([
     destination/1,
@@ -31,7 +33,9 @@
 
 -export_type([version/0, address/0, proto/0]).
 
-%% @doc Extract the IP version and destination address from `Packet'.
+-doc """
+Extract the IP version and destination address from `Packet`.
+""".
 -spec destination(binary()) ->
     {ok, version(), address()} | {error, term()}.
 destination(
@@ -46,9 +50,11 @@ destination(
 destination(_) ->
     {error, malformed}.
 
-%% @doc Return the upper-layer protocol number, walking IPv6 extension
-%% headers (Hop-by-Hop 0, Routing 43, Fragment 44, Destination 60,
-%% AH 51) to find the first non-extension Next Header.
+-doc """
+Return the upper-layer protocol number, walking IPv6 extension
+headers (Hop-by-Hop 0, Routing 43, Fragment 44, Destination 60,
+AH 51) to find the first non-extension Next Header.
+""".
 -spec upper_protocol(binary()) -> {ok, proto()} | {error, term()}.
 upper_protocol(Pkt) ->
     case upper_layer(Pkt) of
@@ -56,9 +62,11 @@ upper_protocol(Pkt) ->
         {error, _} = Err -> Err
     end.
 
-%% @doc Like {@link upper_protocol/1}, and also return the bytes after
-%% the IP header (and IPv6 extension headers). For a non-initial IPv4
-%% fragment these are not the start of the upper-layer header.
+-doc """
+Like `upper_protocol/1`, and also return the bytes after
+the IP header (and IPv6 extension headers). For a non-initial IPv4
+fragment these are not the start of the upper-layer header.
+""".
 -spec upper_layer(binary()) -> {ok, proto(), binary()} | {error, malformed}.
 upper_layer(<<4:4, IHL:4, _Rest:64, Proto:8, _/binary>> = Pkt) when
     IHL >= 5, byte_size(Pkt) >= IHL * 4
@@ -71,8 +79,10 @@ upper_layer(<<6:4, _:4, _:8, _:16, _:16, NextHdr:8, _:8, _Src:128, _Dst:128, Res
 upper_layer(_) ->
     {error, malformed}.
 
-%% @doc Combined `target' / `ipproto' scope check used by the
-%% data plane. `*' means "any" on either axis.
+-doc """
+Combined `target` / `ipproto` scope check used by the
+data plane. `*` means "any" on either axis.
+""".
 -spec scope_passes(
     binary(),
     masque_uri_ip:ip_target(),
@@ -84,9 +94,11 @@ scope_passes(Packet, Target, IPProto) ->
         {error, _} -> false
     end.
 
-%% @doc Reasonful variant of `scope_passes/3' for telemetry. Returns
-%% the first failing axis instead of a boolean. A hostname target has
-%% no routes here and never matches; use `scope_check/4'.
+-doc """
+Reasonful variant of `scope_passes/3` for telemetry. Returns
+the first failing axis instead of a boolean. A hostname target has
+no routes here and never matches; use `scope_check/4`.
+""".
 -spec scope_check(
     binary(),
     masque_uri_ip:ip_target(),
@@ -96,9 +108,11 @@ scope_passes(Packet, Target, IPProto) ->
 scope_check(Packet, Target, IPProto) ->
     scope_check(Packet, Target, IPProto, []).
 
-%% @doc Like `scope_check/3', but a hostname target matches when the
-%% destination falls inside one of `Routes' (the routes advertised for
-%% the resolved addresses).
+-doc """
+Like `scope_check/3`, but a hostname target matches when the
+destination falls inside one of `Routes` (the routes advertised for
+the resolved addresses).
+""".
 -spec scope_check(
     binary(),
     masque_uri_ip:ip_target(),
@@ -122,11 +136,13 @@ scope_check(Packet, Target, IPProto, Routes) ->
             {error, malformed}
     end.
 
-%% @doc Decrement the IPv4 TTL or IPv6 Hop Limit of a packet the
-%% proxy is about to forward (RFC 9484: the proxy acts as an IP
-%% router). The IPv4 header checksum is recomputed. Returns
-%% `{error, ttl_zero}' when the packet must not be forwarded because
-%% the TTL / Hop Limit would reach zero.
+-doc """
+Decrement the IPv4 TTL or IPv6 Hop Limit of a packet the
+proxy is about to forward (RFC 9484: the proxy acts as an IP
+router). The IPv4 header checksum is recomputed. Returns
+`{error, ttl_zero}` when the packet must not be forwarded because
+the TTL / Hop Limit would reach zero.
+""".
 -spec decrement_ttl(binary()) -> {ok, binary()} | {error, ttl_zero | malformed}.
 decrement_ttl(<<4:4, IHL:4, Mid:7/binary, TTL:8, Proto:8, _Csum:16, Rest/binary>> = Pkt) when
     IHL >= 5, byte_size(Pkt) >= IHL * 4
@@ -153,7 +169,9 @@ decrement_ttl(<<6:4, Low:4, Head:6/binary, HopLimit:8, Rest/binary>> = Pkt) when
 decrement_ttl(_) ->
     {error, malformed}.
 
-%% @doc Standard 16-bit one's-complement Internet checksum (RFC 1071).
+-doc """
+Standard 16-bit one's-complement Internet checksum (RFC 1071).
+""".
 -spec checksum(binary()) -> 0..16#FFFF.
 checksum(Bin) ->
     finish_csum(sum_words(Bin, 0)).

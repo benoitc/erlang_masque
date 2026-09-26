@@ -1,10 +1,10 @@
-%%% @doc Supervisor for HTTP/1.1 MASQUE server sessions.
+%%% Supervisor for HTTP/1.1 MASQUE server sessions.
 %%%
-%%% One `simple_one_for_one' supervisor per protocol, sibling of
-%%% `masque_h2_session_sup'. For now only the UDP branch is populated;
-%%% IP and TCP variants are added by later implementation steps.
-%%% Sessions are `temporary' (not restarted on crash).
+%%% One `simple_one_for_one` supervisor per protocol, sibling of
+%%% `masque_h2_session_sup`: UDP, IP, TCP and udp-bind each have their
+%%% own instance. Sessions are `temporary` (not restarted on crash).
 -module(masque_h1_session_sup).
+-moduledoc false.
 -behaviour(supervisor).
 
 -export([

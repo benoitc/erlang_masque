@@ -1,5 +1,6 @@
-%%% @doc Application callback module for the `masque' library.
+%%% Application callback module for the `masque` library.
 -module(masque_app).
+-moduledoc false.
 -behaviour(application).
 
 -export([start/2, stop/1]).

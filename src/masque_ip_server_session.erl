@@ -1,13 +1,14 @@
-%%% @doc Per-tunnel server session for CONNECT-IP (RFC 9484).
+%%% Per-tunnel server session for CONNECT-IP (RFC 9484).
 %%%
 %%% Transport-generic (H3 + H2) in the shape of
-%%% `masque_tcp_server_session': a single `gen_server' with a
-%%% `transport :: h3 | h2' field that dispatches at the transport
+%%% `masque_tcp_server_session`: a single `gen_server` with a
+%%% `transport :: h3 | h2` field that dispatches at the transport
 %%% boundary. Over H3 the datagram channel is QUIC DATAGRAM frames
 %%% (delivered via the connection router as
-%%% `{masque_datagram_in, StreamId, Payload}'); over H2 it is the
+%%% `{masque_datagram_in, StreamId, Payload}`); over H2 it is the
 %%% RFC 9297 DATAGRAM-type capsule on the stream body.
 -module(masque_ip_server_session).
+-moduledoc false.
 -behaviour(gen_server).
 
 -export([start_link/1]).

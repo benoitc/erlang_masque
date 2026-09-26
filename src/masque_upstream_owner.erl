@@ -1,41 +1,39 @@
-%%% @doc Per-connection owner for a pooled upstream transport conn.
+%%% Per-connection owner for a pooled upstream transport conn.
 %%%
-%%% One `masque_upstream_owner' gen_server wraps exactly one h2 /
+%%% One `masque_upstream_owner` gen_server wraps exactly one h2 /
 %%% quic_h3 client connection. It is the process that called
-%%% `h2:connect/3' / `quic_h3:connect/3', so it is the process both
+%%% `h2:connect/3` / `quic_h3:connect/3`, so it is the process both
 %%% transport libraries deliver connection-level events to (response
 %%% headers, h3 datagrams, connection close, SETTINGS updates). The
 %%% owner hands per-stream events off to the calling session via the
-%%% transport library's `set_stream_handler/3,4' so `{h2, _, {data,
-%%% _, _, _}}' / `{quic_h3, _, {data, _, _, _}}' messages flow to
+%%% transport library's `set_stream_handler/3,4` so `{h2, _, {data,
+%%% _, _, _}}` / `{quic_h3, _, {data, _, _, _}}` messages flow to
 %%% the session's mailbox directly. The owner only demuxes the
-%%% things `set_stream_handler' does not cover: h3 datagrams (which
+%%% things `set_stream_handler` does not cover: h3 datagrams (which
 %%% the transport delivers to the connection owner), stream resets,
 %%% and connection-close notifications.
 %%%
 %%% Lifecycle:
 %%%
-%%% <ul>
-%%%  <li>Spawned by {@link masque_upstream_pool} via the pool dialer
-%%%      process, which has just completed the handshake and owns
-%%%      the conn. Ownership is transferred to this process on
-%%%      start.</li>
-%%%  <li>Sessions call `acquire_stream/4' to open a new tunnel on
-%%%      the pooled conn; the owner issues the CONNECT request,
-%%%      registers the session as the stream's handler, and returns
-%%%      `{ok, StreamId, Conn}'.</li>
-%%%  <li>Sessions call `release_stream/2' on normal or abnormal exit.
-%%%      The owner also monitors every session so a crashed session
-%%%      releases its slot automatically.</li>
-%%%  <li>When the last stream releases, the owner arms an idle timer
-%%%      (default 30 s, override via `idle_timeout_ms'). Expiry ->
-%%%      close the conn and stop normally; the pool registry
-%%%      observes the DOWN and drops its cache entry.</li>
-%%% </ul>
+%%% - Started by `masque_upstream_pool` (`start_for_pool/3`); the
+%%%   owner dials the upstream itself, so it owns the conn from the
+%%%   start and no ownership transfer is needed.
+%%% - Sessions call `acquire_stream/4` to open a new tunnel on
+%%%   the pooled conn; the owner issues the CONNECT request,
+%%%   registers the session as the stream's handler, and returns
+%%%   `{ok, StreamId, Conn}`.
+%%% - Sessions call `release_stream/2` on normal or abnormal exit.
+%%%   The owner also monitors every session so a crashed session
+%%%   releases its slot automatically.
+%%% - When the last stream releases, the owner arms an idle timer
+%%%   (default 30 s, override via `idle_timeout_ms`). Expiry ->
+%%%   close the conn and stop normally; the pool registry
+%%%   observes the DOWN and drops its cache entry.
 %%%
 %%% h1 does not use this module: h1 is 1-tunnel-per-socket, so the
 %%% pool bypasses it and sessions keep owning their socket directly.
 -module(masque_upstream_owner).
+-moduledoc false.
 -behaviour(gen_server).
 
 -export([start_link/1, stop/1]).
@@ -103,23 +101,23 @@
 start_link(Args) ->
     gen_server:start_link(?MODULE, Args, []).
 
-%% @doc Spawn an owner that dials the upstream itself and becomes
+%% Spawn an owner that dials the upstream itself and becomes
 %% the transport connection's owner.
 %%
 %% The spawned process blocks on the handshake in its init; the
-%% transport's `Conn' pid is therefore parented to the owner (no
-%% ownership transfer required, which matters for `quic_h3' where
-%% the public API does not expose a `controlling_process/2'
-%% equivalent). On success it sends `{dial_result, Tag, {ok, Self}}'
-%% to `RegistryPid' and then enters the normal gen_server loop. On
+%% transport's `Conn` pid is therefore parented to the owner (no
+%% ownership transfer required, which matters for `quic_h3` where
+%% the public API does not expose a `controlling_process/2`
+%% equivalent). On success it sends `{dial_result, Tag, {ok, Self}}`
+%% to `RegistryPid` and then enters the normal gen_server loop. On
 %% failure, including a dial that raises, it sends `{dial_result,
-%% Tag, {error, Reason}}' and exits normally. While running it sends
-%% `{owner_capacity, Self, Full}' to `RegistryPid' whenever it
+%% Tag, {error, Reason}}` and exits normally. While running it sends
+%% `{owner_capacity, Self, Full}` to `RegistryPid` whenever it
 %% reaches or leaves its stream limit.
 %%
-%% `Opts' must contain `transport' (h2 | quic_h3), `host', `port',
-%% and any transport-specific `connect_opts'. The optional
-%% `transport_mod' points at a mock implementing the same surface
+%% `Opts` must contain `transport` (h2 | quic_h3), `host`, `port`,
+%% and any transport-specific `connect_opts`. The optional
+%% `transport_mod` points at a mock implementing the same surface
 %% so unit tests can drive this path without a real TLS handshake.
 -spec start_for_pool(pid(), term(), map()) -> pid().
 start_for_pool(RegistryPid, Tag, Opts) ->
@@ -129,7 +127,7 @@ start_for_pool(RegistryPid, Tag, Opts) ->
 stop(Owner) ->
     gen_server:call(Owner, stop, 5000).
 
-%% @doc Open a new tunnel stream on this pooled conn. Issues the
+%% Open a new tunnel stream on this pooled conn. Issues the
 %% CONNECT request synchronously and registers the session as the
 %% stream's handler so subsequent stream-data events flow directly
 %% to the session's mailbox. Returns the transport's conn pid too
@@ -144,13 +142,13 @@ acquire_stream(Owner, Headers, SessionPid, ReqOpts) ->
         30000
     ).
 
-%% @doc Release the stream previously acquired by this session.
+%% Release the stream previously acquired by this session.
 %% Safe to call multiple times (second call is a no-op).
 -spec release_stream(pid(), non_neg_integer()) -> ok.
 release_stream(Owner, StreamId) ->
     gen_server:cast(Owner, {release, StreamId}).
 
-%% @doc Diagnostic snapshot.
+%% Diagnostic snapshot.
 -spec info(pid()) -> map().
 info(Owner) ->
     gen_server:call(Owner, info, 1000).

@@ -1,10 +1,11 @@
-%%% @doc Connect-UDP-Bind client session over HTTP/1.1
+%%% Connect-UDP-Bind client session over HTTP/1.1
 %%% (draft-ietf-masque-connect-udp-listen-11). Sibling of
-%%% `masque_udp_bind_client_session' for the h2/h3 paths.
+%%% `masque_udp_bind_client_session` for the h2/h3 paths.
 %%%
 %%% Public API and owner-message shape match the h2/h3 client; only
 %%% the transport plumbing differs.
 -module(masque_udp_bind_h1_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).

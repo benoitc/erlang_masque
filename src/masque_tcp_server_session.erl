@@ -1,11 +1,12 @@
-%%% @doc Per-tunnel server session for CONNECT-TCP.
+%%% Per-tunnel server session for CONNECT-TCP.
 %%%
 %%% Raw bytes on the HTTP stream body are relayed to/from the handler
 %%% module. No datagram framing, no context-IDs, no capsules (the 2xx
-%%% carries no `capsule-protocol'). Stream END_STREAM maps to TCP FIN
+%%% carries no `capsule-protocol`). Stream END_STREAM maps to TCP FIN
 %%% in each direction: a FIN from one side half-closes the tunnel and
 %%% the other direction keeps flowing until it ends too.
 -module(masque_tcp_server_session).
+-moduledoc false.
 -behaviour(gen_server).
 
 -export([start_link/1]).

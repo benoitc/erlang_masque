@@ -1,4 +1,4 @@
-%%% @doc Transport race for MASQUE client connects.
+%%% Transport race for MASQUE client connects.
 %%%
 %%% Apple's MASQUE clients (Private Relay, Network.framework) prefer
 %%% HTTP/3 but fall back to HTTP/2 on networks that block QUIC. They
@@ -8,31 +8,30 @@
 %%% tertiary rung for networks where h2 is also refused or ALPN is
 %%% stripped.
 %%%
-%%% This module implements that logic for a single `masque:connect/3'
+%%% This module implements that logic for a single `masque:connect/3`
 %%% call. The race loop runs in the caller's process and receives
-%%% through an `erlang:alias/0' that is dropped before `race/4'
+%%% through an `erlang:alias/0` that is dropped before `race/4`
 %%% returns, so late attempt reports never reach the caller's
 %%% mailbox. Each attempt runs in a worker process that monitors the
 %%% caller and gives up at the race deadline.
 %%%
-%%% Flow for `[T1, T2, T3]' (T3 optional):
-%%% <ol>
-%%%  <li>Start `T1' immediately with a shadow owner.</li>
-%%%  <li>After `prefer_timeout_ms' ms, start `T2' in parallel.</li>
-%%%  <li>After another `h1_prefer_timeout_ms' ms (only if `T3' is
-%%%      present), start `T3' in parallel.</li>
-%%%  <li>First attempt to report `ok' on its `handshake_await' call
-%%%      wins. Shadow owner is flipped to the real owner via
-%%%      `gen_statem:call(Pid, {set_owner, RealOwner})', losers are
-%%%      stopped.</li>
-%%% </ol>
+%%% Flow for `[T1, T2, T3]` (T3 optional):
+%%% 1. Start `T1` immediately with a shadow owner.
+%%% 2. After `prefer_timeout_ms` ms, start `T2` in parallel.
+%%% 3. After another `h1_prefer_timeout_ms` ms (only if `T3` is
+%%%    present), start `T3` in parallel.
+%%% 4. First attempt to report `ok` on its `handshake_await` call
+%%%    wins. Shadow owner is flipped to the real owner via
+%%%    `gen_statem:call(Pid, {set_owner, RealOwner})`, losers are
+%%%    stopped.
 %%%
 %%% Sessions are started with the race worker as owner and
-%%% `defer_owner => true': events they produce before `set_owner'
+%%% `defer_owner => true`: events they produce before `set_owner`
 %%% (for example a CONNECT-IP ADDRESS_ASSIGN sent right after the 2xx)
 %%% are held by the session and flushed in order to the real owner
-%%% on `set_owner' (see `masque_client_owner').
+%%% on `set_owner` (see `masque_client_owner`).
 -module(masque_racer).
+-moduledoc false.
 
 -export([race/4, checkout_pool/2]).
 
@@ -45,7 +44,7 @@
 %% The racing process and the alias it receives attempt reports on.
 -type racer() :: {pid(), reference()}.
 
-%% @doc Race the listed transports and return the winning session.
+%% Race the listed transports and return the winning session.
 -spec race([masque:transport()], masque:target(), map(), pid()) ->
     {ok, masque:session()} | {error, term()}.
 race(Transports, Target, Opts, RealOwner) ->

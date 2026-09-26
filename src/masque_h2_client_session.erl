@@ -1,11 +1,12 @@
-%%% @doc Client-side MASQUE CONNECT-UDP session over HTTP/2.
+%%% Client-side MASQUE CONNECT-UDP session over HTTP/2.
 %%%
-%%% Mirrors `masque_client_session' but uses `erlang_h2' as the
+%%% Mirrors `masque_client_session` but uses `erlang_h2` as the
 %%% transport. HTTP/2 has no native datagram channel, so every UDP
 %%% payload is wrapped in a DATAGRAM capsule (RFC 9297 §3.2) and
 %%% carried on the CONNECT request stream body alongside any
 %%% extension capsules.
 -module(masque_h2_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).

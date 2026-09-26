@@ -1,24 +1,26 @@
-%%% @doc URI template handling for RFC 9484 CONNECT-IP.
-%%%
-%%% RFC 9484 section 3 defines the request path as the expansion of
-%%% a URI Template with two variables, target and ipproto.
-%%%
-%%% Target values: the wildcard `<<"*">>', an IPv4 literal
-%%% (`<<"192.0.2.1">>'), an IPv6 literal (colons percent-encoded on
-%%% the wire), a DNS reg-name per RFC 3986, or a prefix
-%%% `<<"addr/len">>' (the slash appears as `%2F' inside the path
-%%% segment and is percent-decoded by the engine).
-%%%
-%%% ipproto values: the wildcard `<<"*">>' or a decimal integer in
-%%% the range 0..255 with no leading zeros other than the digit
-%%% itself.
-%%%
-%%% The module distinguishes client-side and server-side template
-%%% inputs. `parse_client_template/1' requires an absolute URI
-%%% template per RFC 9484 section 3. `parse_server_template/1'
-%%% accepts either a path+query match pattern or an absolute URI
-%%% (whose path+query portion is used).
 -module(masque_uri_ip).
+-moduledoc """
+URI template handling for RFC 9484 CONNECT-IP.
+
+RFC 9484 section 3 defines the request path as the expansion of
+a URI Template with two variables, target and ipproto.
+
+Target values: the wildcard `<<"*">>`, an IPv4 literal
+(`<<"192.0.2.1">>`), an IPv6 literal (colons percent-encoded on
+the wire), a DNS reg-name per RFC 3986, or a prefix
+`<<"addr/len">>` (the slash appears as `%2F` inside the path
+segment and is percent-decoded by the engine).
+
+ipproto values: the wildcard `<<"*">>` or a decimal integer in
+the range 0..255 with no leading zeros other than the digit
+itself.
+
+The module distinguishes client-side and server-side template
+inputs. `parse_client_template/1` requires an absolute URI
+template per RFC 9484 section 3. `parse_server_template/1`
+accepts either a path+query match pattern or an absolute URI
+(whose path+query portion is used).
+""".
 
 -export([parse_client_template/1, parse_server_template/1]).
 -export([expand/2, match/2]).
@@ -141,7 +143,9 @@ match_var(Key, Vars, Parse, ErrTag) ->
 %% Target validation / parsing
 %%====================================================================
 
-%% @doc Validate an already-typed target. Returns boolean.
+-doc """
+Validate an already-typed target. Returns boolean.
+""".
 -spec validate_target(ip_target()) -> boolean().
 validate_target('*') ->
     true;
@@ -198,7 +202,9 @@ validate_ipproto('*') -> true;
 validate_ipproto(N) when is_integer(N), N >= 0, N =< 255 -> true;
 validate_ipproto(_) -> false.
 
-%% @doc Parse a wire-form binary target into the typed form.
+-doc """
+Parse a wire-form binary target into the typed form.
+""".
 -spec parse_target(binary()) -> {ok, ip_target()} | {error, bad_target}.
 parse_target(<<"*">>) ->
     {ok, '*'};
@@ -240,7 +246,9 @@ parse_ipproto(Bin) when is_binary(Bin) ->
         error -> {error, bad_ipproto}
     end.
 
-%% @doc Render a typed target back to its wire-form binary.
+-doc """
+Render a typed target back to its wire-form binary.
+""".
 -spec format_target(ip_target()) -> binary().
 format_target('*') ->
     <<"*">>;

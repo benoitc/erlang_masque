@@ -1,36 +1,34 @@
-%%% @doc Built-in MASQUE handler that bridges a CONNECT-UDP tunnel to
-%%% a real UDP flow on the server.
-%%%
-%%% For every accepted tunnel the handler opens a `gen_udp' socket
-%%% bound to ephemeral port and a specific family, resolves the
-%%% target hostname, and relays bytes in both directions:
-%%%
-%%% <ul>
-%%%   <li>Client-to-target: `handle_packet/2' sends the payload to the
-%%%       resolved target on the UDP socket.</li>
-%%%   <li>Target-to-client: `{udp, Socket, _, _, Bytes}' messages arrive
-%%%       on the session process and are emitted as `send' actions
-%%%       back through the tunnel.</li>
-%%% </ul>
-%%%
-%%% Configure policy via `handler_opts':
-%%% <ul>
-%%%   <li>`allow => fun(target()) -> boolean()' - gate on host+port.</li>
-%%%   <li>`resolver => fun(binary()) -> {ok, inet:ip_address()}
-%%%                                   | {error, term()}' - override the
-%%%       default `inet:getaddr/2' resolver.</li>
-%%%   <li>`family => inet | inet6 | auto' (default `auto').</li>
-%%%   <li>`socket_opts => [gen_udp:option()]' - extra options merged on
-%%%       top of `[binary, {active, N}]'.</li>
-%%%   <li>`active_n => pos_integer()' - datagrams the socket delivers
-%%%       before it pauses until the session has relayed them, which
-%%%       bounds the session mailbox. Default `32'.</li>
-%%%   <li>`port => inet:port_number()' - bind the local UDP socket to
-%%%       a fixed port. Default `0' (kernel-assigned ephemeral).
-%%%       Useful for firewall rules; conflicts with concurrent tunnels
-%%%       that share a listener.</li>
-%%% </ul>
 -module(masque_udp_proxy_handler).
+-moduledoc """
+Built-in MASQUE handler that bridges a CONNECT-UDP tunnel to
+a real UDP flow on the server.
+
+For every accepted tunnel the handler opens a `gen_udp` socket
+bound to ephemeral port and a specific family, resolves the
+target hostname, and relays bytes in both directions:
+
+- Client-to-target: `handle_packet/2` sends the payload to the
+  resolved target on the UDP socket.
+- Target-to-client: `{udp, Socket, _, _, Bytes}` messages arrive
+  on the session process and are emitted as `send` actions
+  back through the tunnel.
+
+Configure policy via `handler_opts`:
+- `allow => fun(target()) -> boolean()` - gate on host+port.
+- `resolver => fun(binary()) -> {ok, inet:ip_address()}
+  | {error, term()}` - override the
+  default `inet:getaddr/2` resolver.
+- `family => inet | inet6 | auto` (default `auto`).
+- `socket_opts => [gen_udp:option()]` - extra options merged on
+  top of `[binary, {active, N}]`.
+- `active_n => pos_integer()` - datagrams the socket delivers
+  before it pauses until the session has relayed them, which
+  bounds the session mailbox. Default `32`.
+- `port => inet:port_number()` - bind the local UDP socket to
+  a fixed port. Default `0` (kernel-assigned ephemeral).
+  Useful for firewall rules; conflicts with concurrent tunnels
+  that share a listener.
+""".
 -behaviour(masque_handler).
 
 -export([accept/1, init/2, handle_packet/2, handle_info/2, terminate/2]).

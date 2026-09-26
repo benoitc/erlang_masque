@@ -1,22 +1,22 @@
-%%% @doc ICMPv4 (RFC 792) and ICMPv6 (RFC 4443) error-message
-%%% builders used by CONNECT-IP proxies to synthesise errors for
-%%% packets they cannot deliver.
-%%%
-%%% Each builder returns a complete IP packet (IP header + ICMP
-%%% message) ready to hand back to the client via
-%%% `masque:send_ip_packet/2' or a handler's
-%%% `{send_ip_packet, _}' / `{icmp_error, _}' action.
-%%%
-%%% Invoking-packet truncation (RFC 4443 §3.1 and RFC 1812 §4.3.2.3):
-%%% <ul>
-%%%  <li>ICMPv6: "as much of invoking packet as possible without the
-%%%      ICMPv6 packet exceeding the minimum IPv6 MTU" (1280 B).
-%%%      Budget: 1280 − 40 (IPv6 hdr) − 8 (ICMPv6 hdr) = 1232 B.</li>
-%%%  <li>ICMPv4: at least the IPv4 header plus 8 B of the original
-%%%      datagram's data; we cap at the IPv4 minimum MTU 576, i.e.
-%%%      576 − 20 − 8 = 548 B of the invoking packet.</li>
-%%% </ul>
 -module(masque_icmp).
+-moduledoc """
+ICMPv4 (RFC 792) and ICMPv6 (RFC 4443) error-message
+builders used by CONNECT-IP proxies to synthesise errors for
+packets they cannot deliver.
+
+Each builder returns a complete IP packet (IP header + ICMP
+message) ready to hand back to the client via
+`masque:send_ip_packet/2` or a handler's
+`{send_ip_packet, _}` / `{icmp_error, _}` action.
+
+Invoking-packet truncation (RFC 4443 §3.1 and RFC 1812 §4.3.2.3):
+- ICMPv6: "as much of invoking packet as possible without the
+  ICMPv6 packet exceeding the minimum IPv6 MTU" (1280 B).
+  Budget: 1280 − 40 (IPv6 hdr) − 8 (ICMPv6 hdr) = 1232 B.
+- ICMPv4: at least the IPv4 header plus 8 B of the original
+  datagram's data; we cap at the IPv4 minimum MTU 576, i.e.
+  576 − 20 − 8 = 548 B of the invoking packet.
+""".
 
 -export([
     dest_unreachable/3,
@@ -40,9 +40,11 @@
 %% API
 %%====================================================================
 
-%% @doc True when `Packet' is an ICMP error message: ICMPv4 types 3,
-%% 4, 5, 11 and 12, or an ICMPv6 type below 128. RFC 1122 §3.2.2 and
-%% RFC 4443 §2.4 (e) forbid answering those with another ICMP error.
+-doc """
+True when `Packet` is an ICMP error message: ICMPv4 types 3,
+4, 5, 11 and 12, or an ICMPv6 type below 128. RFC 1122 §3.2.2 and
+RFC 4443 §2.4 (e) forbid answering those with another ICMP error.
+""".
 -spec is_error(binary()) -> boolean().
 is_error(Packet) ->
     case masque_ip_packet:upper_layer(Packet) of
@@ -60,34 +62,42 @@ is_error(Packet) ->
 first_fragment(<<4:4, _:4, _:8, _:16, _:16, _:3, Offset:13, _/binary>>) -> Offset =:= 0;
 first_fragment(_) -> true.
 
-%% @doc Build a Destination Unreachable ICMP packet.
-%% Code maps to the RFC type/code tables.
-%% For IPv4 (type 3): 0 = net unreachable, 1 = host unreachable,
-%% 3 = port unreachable, 4 = frag needed (RFC 792 / RFC 1812).
-%% For IPv6 (type 1): 0 = no route, 1 = admin prohibited, 3 = addr
-%% unreachable, 4 = port unreachable, 5 = src addr failed
-%% ingress/egress policy (RFC 4443 section 3.1).
+-doc """
+Build a Destination Unreachable ICMP packet.
+Code maps to the RFC type/code tables.
+For IPv4 (type 3): 0 = net unreachable, 1 = host unreachable,
+3 = port unreachable, 4 = frag needed (RFC 792 / RFC 1812).
+For IPv6 (type 1): 0 = no route, 1 = admin prohibited, 3 = addr
+unreachable, 4 = port unreachable, 5 = src addr failed
+ingress/egress policy (RFC 4443 section 3.1).
+""".
 -spec dest_unreachable(v4 | v6, non_neg_integer(), binary()) -> binary().
 dest_unreachable(v4, Code, Invoking) ->
     build_v4(3, Code, <<0:32>>, Invoking);
 dest_unreachable(v6, Code, Invoking) ->
     build_v6(1, Code, <<0:32>>, Invoking).
 
-%% @doc Build an IPv6 Packet Too Big (type 2, RFC 4443 §3.2). `Mtu'
-%% is the next-hop MTU that caused the drop.
+-doc """
+Build an IPv6 Packet Too Big (type 2, RFC 4443 §3.2). `Mtu`
+is the next-hop MTU that caused the drop.
+""".
 -spec packet_too_big(non_neg_integer(), binary()) -> binary().
 packet_too_big(Mtu, Invoking) ->
     build_v6(2, 0, <<Mtu:32>>, Invoking).
 
-%% @doc Build an IPv4 Destination Unreachable, Fragmentation Needed
-%% and DF Set (type 3 code 4) carrying the next-hop `Mtu' (RFC 1191
-%% sec 4). The IPv4 counterpart of `packet_too_big/2'.
+-doc """
+Build an IPv4 Destination Unreachable, Fragmentation Needed
+and DF Set (type 3 code 4) carrying the next-hop `Mtu` (RFC 1191
+sec 4). The IPv4 counterpart of `packet_too_big/2`.
+""".
 -spec frag_needed(0..16#FFFF, binary()) -> binary().
 frag_needed(Mtu, Invoking) ->
     build_v4(3, 4, <<0:16, Mtu:16>>, Invoking).
 
-%% @doc Build a Time Exceeded ICMP packet. `Code' is 0 (TTL/HL
-%% exceeded in transit) or 1 (fragment reassembly timeout).
+-doc """
+Build a Time Exceeded ICMP packet. `Code` is 0 (TTL/HL
+exceeded in transit) or 1 (fragment reassembly timeout).
+""".
 -spec time_exceeded(v4 | v6, non_neg_integer(), binary()) -> binary().
 time_exceeded(v4, Code, Invoking) ->
     build_v4(11, Code, <<0:32>>, Invoking);
@@ -97,15 +107,15 @@ time_exceeded(v6, Code, Invoking) ->
 time_exceeded(v4, Invoking) -> time_exceeded(v4, 0, Invoking);
 time_exceeded(v6, Invoking) -> time_exceeded(v6, 0, Invoking).
 
-%% @doc Translate a session-level `{icmp_error, Spec}' action into
-%% the IP packet it represents. Used by the IP server session's
-%% action interpreter. `Spec' accepts:
-%% <ul>
-%%  <li>`{dest_unreachable, v4|v6, Code}'</li>
-%%  <li>`{packet_too_big, Mtu}'  (IPv6 only)</li>
-%%  <li>`{frag_needed, Mtu}'  (IPv4 only)</li>
-%%  <li>`{time_exceeded,   v4|v6}'</li>
-%% </ul>
+-doc """
+Translate a session-level `{icmp_error, Spec}` action into
+the IP packet it represents. Used by the IP server session's
+action interpreter. `Spec` accepts:
+- `{dest_unreachable, v4|v6, Code}`
+- `{packet_too_big, Mtu}`  (IPv6 only)
+- `{frag_needed, Mtu}`  (IPv4 only)
+- `{time_exceeded,   v4|v6}`
+""".
 -spec apply_action(atom(), term(), binary()) -> binary().
 apply_action(dest_unreachable, {V, Code}, Invoking) ->
     dest_unreachable(V, Code, Invoking);

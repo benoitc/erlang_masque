@@ -1,22 +1,22 @@
-%%% @doc Encode/decode the three Compression Context capsules used by
-%%% Connect-UDP-Bind (draft-ietf-masque-connect-udp-listen-11
-%%% sections 3.1 - 3.3):
-%%%
-%%% <ul>
-%%%   <li>`COMPRESSION_ASSIGN' (0x11) - Context ID + IP Version +
-%%%       (IP Address + UDP Port if Version != 0).</li>
-%%%   <li>`COMPRESSION_ACK' (0x12) - Context ID only.</li>
-%%%   <li>`COMPRESSION_CLOSE' (0x13) - Context ID only; zero is
-%%%       malformed.</li>
-%%% </ul>
-%%%
-%%% Pure data: this module never touches state, transports or
-%%% sessions. It only encodes / decodes wire bytes and validates the
-%%% structural rules the draft pins on these capsule bodies.
-%%% Lifecycle invariants (singleton uncompressed, parity, per-tuple
-%%% uniqueness, post-close prohibition, ACK accounting) live in
-%%% `masque_compression_table'.
 -module(masque_compression_capsule).
+-moduledoc """
+Encode/decode the three Compression Context capsules used by
+Connect-UDP-Bind (draft-ietf-masque-connect-udp-listen-11
+sections 3.1 - 3.3):
+
+- `COMPRESSION_ASSIGN` (0x11) - Context ID + IP Version +
+  (IP Address + UDP Port if Version != 0).
+- `COMPRESSION_ACK` (0x12) - Context ID only.
+- `COMPRESSION_CLOSE` (0x13) - Context ID only; zero is
+  malformed.
+
+Pure data: this module never touches state, transports or
+sessions. It only encodes / decodes wire bytes and validates the
+structural rules the draft pins on these capsule bodies.
+Lifecycle invariants (singleton uncompressed, parity, per-tuple
+uniqueness, post-close prohibition, ACK accounting) live in
+`masque_compression_table`.
+""".
 
 -export([
     encode/1, encode/2,
@@ -54,8 +54,10 @@
 %% Capsule-level encode (record -> framed capsule iodata)
 %%====================================================================
 
-%% @doc Encode a typed capsule record onto the RFC 9297 capsule
-%% frame.
+-doc """
+Encode a typed capsule record onto the RFC 9297 capsule
+frame.
+""".
 -spec encode(capsule_record()) -> iodata().
 encode(#compression_assign{} = R) ->
     masque_capsule:encode(
@@ -73,7 +75,9 @@ encode(#compression_close{} = R) ->
         encode_close(R)
     ).
 
-%% @doc Convenience: encode the body for a given capsule type atom.
+-doc """
+Convenience: encode the body for a given capsule type atom.
+""".
 -spec encode(assign | ack | close, capsule_record()) -> binary().
 encode(assign, R) -> encode_assign(R);
 encode(ack, R) -> encode_ack(R);
@@ -150,9 +154,11 @@ encode_close(#compression_close{context_id = Id}) when
 %% Body decode
 %%====================================================================
 
-%% @doc Decode the body bytes of a Compression Context capsule into
-%% the matching record. The capsule type is determined by the caller
-%% from the capsule frame.
+-doc """
+Decode the body bytes of a Compression Context capsule into
+the matching record. The capsule type is determined by the caller
+from the capsule frame.
+""".
 -spec decode_body(non_neg_integer(), binary()) ->
     {ok, capsule_record()} | {error, decode_error()}.
 decode_body(?MASQUE_CAPSULE_COMPRESSION_ASSIGN, Body) ->

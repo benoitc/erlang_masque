@@ -1,14 +1,15 @@
-%%% @doc Client-side MASQUE CONNECT-UDP session over HTTP/1.1.
+%%% Client-side MASQUE CONNECT-UDP session over HTTP/1.1.
 %%%
 %%% Runs the RFC 9298 handshake as an HTTP/1.1 Upgrade
-%%% (`Upgrade: connect-udp') and, after the 101 response, drives
+%%% (`Upgrade: connect-udp`) and, after the 101 response, drives
 %%% RFC 9297 capsules directly on the raw TLS socket. DATAGRAM
 %%% capsules carry the UDP payload; extension capsules are opaque.
 %%%
 %%% The on-wire shape of a DATAGRAM capsule is identical to the h2
-%%% and h3 paths, so `masque_datagram' and `masque_capsule' are
+%%% and h3 paths, so `masque_datagram` and `masque_capsule` are
 %%% reused unchanged; only the transport plumbing differs.
 -module(masque_h1_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).

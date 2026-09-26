@@ -1,15 +1,16 @@
-%%% @doc Client-side MASQUE CONNECT-TCP session.
+%%% Client-side MASQUE CONNECT-TCP session.
 %%%
 %%% TCP data travels as raw bytes on the HTTP request/response stream
 %%% body - no datagrams, no context-IDs, no capsules: the request
-%%% carries no `capsule-protocol' and a 2xx claiming it is rejected.
+%%% carries no `capsule-protocol` and a 2xx claiming it is rejected.
 %%% Stream END_STREAM = TCP FIN, one per direction: after the peer's
-%%% FIN the owner can keep sending until it calls `shutdown_write/1'
+%%% FIN the owner can keep sending until it calls `shutdown_write/1`
 %%% or closes the session, and after its own FIN it keeps receiving.
 %%%
 %%% Supports both HTTP/3 (quic_h3) and HTTP/2 (h2) as the outer
-%%% transport, selected by `transport => h3 | h2' in opts.
+%%% transport, selected by `transport => h3 | h2` in opts.
 -module(masque_tcp_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).
