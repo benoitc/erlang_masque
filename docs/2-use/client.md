@@ -38,7 +38,7 @@ This page covers everything you do on the client side of a tunnel: open it with 
 | `upstream_pool` | `false` | Share one h2 or h3 connection per proxy across tunnels. See below. |
 | `upstream_pool_opts` | `#{}` | `idle_timeout_ms` (30000), `max_streams` (integer or `dynamic`), `checkout_timeout_ms` (60000). |
 
-`request_headers` never overrides the headers the library sets itself (the pseudo-headers and `capsule-protocol` on h3 and h2; `host`, `upgrade`, `connection` and `capsule-protocol` on h1); such entries are dropped. On h1, a header containing CR or LF never reaches the wire: CONNECT-TCP drops it, and the h1 library refuses it for UDP and IP. Connect-UDP-Bind over h1 does not check, so sanitise values yourself there.
+`request_headers` never overrides the headers the library sets itself (the pseudo-headers and `capsule-protocol` on h3 and h2, plus `connect-udp-bind` for a bind; `host`, `upgrade`, `connection` and `capsule-protocol` on h1); such entries are dropped. On h1, a header containing CR or LF never reaches the wire: CONNECT-TCP and Connect-UDP-Bind drop it, and the h1 library refuses it for UDP and IP.
 
 ## Transports and racing
 

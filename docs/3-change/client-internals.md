@@ -169,7 +169,7 @@ Known drift between the copies:
 
 - Every session ends each state with a catch-all for calls: `connecting` answers `{error, not_ready}`, `open` answers `{error, not_supported}`, `closing` answers `{error, closing}`. Add the new call's clause before these when you extend the API.
 - udp-bind sessions reject a non-2xx with `{bad_status, Status}`; the others use `{handshake_rejected, Status}`.
-- The udp-bind sessions build `:authority` without bracketing IPv6 literals; the others use a bracketing `build_authority/2`.
+- The udp-bind sessions use `masque_uri:build_authority/2`; the others keep a local bracketing `build_authority/2`.
 
 ## Where to change what
 

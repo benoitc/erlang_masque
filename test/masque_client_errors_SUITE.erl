@@ -36,7 +36,8 @@
     refused_port_returns_error/1,
     silent_proxy_times_out/1,
     no_session_left_after_failure/1,
-    bind_h1_bad_responses_rejected/1
+    bind_h1_bad_responses_rejected/1,
+    bind_h1_request_ipv6_authority_and_headers/1
 ]).
 
 -define(TARGET, {<<"192.0.2.6">>, 443}).
@@ -62,7 +63,8 @@ all() ->
         refused_port_returns_error,
         silent_proxy_times_out,
         no_session_left_after_failure,
-        bind_h1_bad_responses_rejected
+        bind_h1_bad_responses_rejected,
+        bind_h1_request_ipv6_authority_and_headers
     ].
 
 init_per_suite(Config) ->
@@ -237,9 +239,74 @@ bind_h1_bad_responses_rejected(Config) ->
      || {Reply, Expected} <- Cases
     ].
 
+%% The udp-bind h1 client brackets an IPv6 proxy host and drops extra
+%% headers that would rewrite or inject request headers.
+bind_h1_request_ipv6_authority_and_headers(Config) ->
+    case start_capture_h1_proxy(Config) of
+        {error, R} ->
+            {skip, {no_ipv6_loopback, R}};
+        Port ->
+            URI = iolist_to_binary(["https://[::1]:", integer_to_list(Port)]),
+            Headers = [
+                {<<"x-ok">>, <<"1">>},
+                {<<"x-bad">>, <<"a\r\nInjected: 1">>},
+                {<<"Host">>, <<"evil">>}
+            ],
+            _ = dial(URI, h1, udp_bind, #{
+                verify => verify_none,
+                timeout => 1000,
+                request_headers => Headers,
+                %% ssl:connect/4 needs `inet6' to dial an IPv6 literal.
+                ssl_opts => [inet6]
+            }),
+            Req =
+                receive
+                    {captured_request, R} -> R
+                after 5000 -> ct:fail(no_request)
+                end,
+            Host = iolist_to_binary(["Host: [::1]:", integer_to_list(Port), "\r\n"]),
+            ?assertMatch({_, _}, binary:match(Req, Host)),
+            ?assertMatch({_, _}, binary:match(Req, <<"x-ok: 1\r\n">>)),
+            ?assertEqual(nomatch, binary:match(Req, <<"Injected">>)),
+            ?assertEqual(nomatch, binary:match(Req, <<"evil">>))
+    end.
+
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+%% One-shot TLS server on ::1 that sends the request head it reads to
+%% the test process and closes.
+start_capture_h1_proxy(Config) ->
+    #{cert_file := CertFile, key_file := KeyFile} = ?config(certs, Config),
+    Parent = self(),
+    spawn(fun() ->
+        case
+            ssl:listen(0, [
+                binary,
+                inet6,
+                {ip, {0, 0, 0, 0, 0, 0, 0, 1}},
+                {active, false},
+                {certfile, CertFile},
+                {keyfile, KeyFile}
+            ])
+        of
+            {ok, LSock} ->
+                {ok, {_, Port}} = ssl:sockname(LSock),
+                Parent ! {capture_proxy, Port},
+                {ok, T} = ssl:transport_accept(LSock, 5000),
+                {ok, Sock} = ssl:handshake(T, 5000),
+                {ok, Req} = ssl:recv(Sock, 0, 5000),
+                Parent ! {captured_request, Req},
+                ssl:close(Sock);
+            {error, _} = Err ->
+                Parent ! {capture_proxy, Err}
+        end
+    end),
+    receive
+        {capture_proxy, Result} -> Result
+    after 5000 -> ct:fail(capture_proxy_start)
+    end.
 
 %% One-shot TLS server: reads the request head and answers with
 %% `Reply', or with one byte of a valid head every 300 ms for `trickle'.
