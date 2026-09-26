@@ -108,7 +108,7 @@ tcp_burst_in_order(Config) ->
     Expected = payload(),
     {LSock, TPort} = start_burst_target(Expected),
     {ok, Sess} = masque:connect(
-        iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
         {<<"127.0.0.1">>, TPort},
         #{verify => verify_none, transports => [Transport], protocol => tcp}
     ),

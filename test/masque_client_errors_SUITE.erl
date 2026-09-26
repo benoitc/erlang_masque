@@ -230,7 +230,7 @@ bind_h1_bad_responses_rejected(Config) ->
     [
         begin
             Port = start_fake_h1_proxy(Config, Reply),
-            URI = iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+            URI = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
             ?assertEqual(
                 {error, Expected},
                 dial(URI, h1, udp_bind, #{verify => verify_none, timeout => 1000})
@@ -447,7 +447,7 @@ generate_ca_signed(#{tmp_dir := Dir}) ->
 
 proxy_uri(Config, Transport) ->
     Port = maps:get(Transport, ?config(ports, Config)),
-    iolist_to_binary(["https://localhost:", integer_to_list(Port)]).
+    iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]).
 
 connect(Config, Transport, Extra) ->
     Opts = maps:merge(#{transports => [Transport], timeout => 3000}, Extra),

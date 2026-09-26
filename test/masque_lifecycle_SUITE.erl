@@ -804,7 +804,7 @@ tcp_target_reset_resets_tunnel(Config, Transport) ->
     ok = gen_tcp:controlling_process(LSock, Target),
     Port = maps:get(port, ?config(Transport, Config)),
     {ok, Sess} = masque:connect(
-        iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
         {<<"127.0.0.1">>, TPort},
         #{verify => verify_none, transports => [Transport], protocol => tcp}
     ),
@@ -917,7 +917,7 @@ h3_udp_output_before_finalize_is_kept(Config) ->
 h3_ip_output_before_finalize_is_kept(Config) ->
     Port = maps:get(port, ?config(h3, Config)),
     {ok, Sess} = masque:connect(
-        iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
         {'*', '*'},
         #{protocol => ip, transports => [h3], verify => verify_none}
     ),
@@ -982,7 +982,7 @@ h2_tcp_rejects_capsule_protocol_response(Config) ->
     }),
     try
         {error, _} = masque:connect(
-            iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+            iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
             {<<"192.0.2.6">>, 443},
             #{verify => verify_none, transports => [h2], protocol => tcp}
         )
@@ -1004,7 +1004,7 @@ tcp_target_listen() ->
 tcp_connect(Config, Transport, TPort) ->
     Port = maps:get(port, ?config(Transport, Config)),
     {ok, Sess} = masque:connect(
-        iolist_to_binary(["https://localhost:", integer_to_list(Port)]),
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
         {<<"127.0.0.1">>, TPort},
         #{verify => verify_none, transports => [Transport], protocol => tcp}
     ),
@@ -1035,7 +1035,7 @@ recv_tcp_wait(Sess) ->
 
 h2_connect(Config) ->
     h2:connect(
-        "localhost",
+        "127.0.0.1",
         maps:get(port, ?config(h2, Config)),
         #{transport => ssl, verify => verify_none, sync => true}
     ).
@@ -1129,7 +1129,7 @@ start_h2_server(#{cert_file := CertFile, key_file := KeyFile}, Opts) ->
 connect(Config, Transport) ->
     Server = ?config(Transport, Config),
     ProxyURI = iolist_to_binary(
-        ["https://localhost:", integer_to_list(maps:get(port, Server))]
+        ["https://127.0.0.1:", integer_to_list(maps:get(port, Server))]
     ),
     {ok, Sess} = masque:connect(
         ProxyURI,
@@ -1148,7 +1148,7 @@ h3_open_udp(Config) ->
 
 h2_open_udp(Config) ->
     {ok, Conn} = h2:connect(
-        "localhost",
+        "127.0.0.1",
         maps:get(port, ?config(h2, Config)),
         #{transport => ssl, verify => verify_none, sync => true}
     ),
