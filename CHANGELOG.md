@@ -36,6 +36,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Documentation reorganised into Understand / Use / Change / Reference
+  levels under `docs/`, with new concept, architecture, internals,
+  testing, debugging and how-to pages, `CONTRIBUTING.md` and
+  `test/README.md`. `docs/design.md`, `usage.md`, `api.md`,
+  `connect_ip.md`, `connect_udp_bind.md`, `features.md` and `relay.md`
+  are replaced by the new pages; version history from `features.md`
+  moved here.
 - Erlang/OTP 29 is now the only supported release (`minimum_otp_vsn`
   in `rebar.config`); CI runs tests, lint and dialyzer on OTP 29 only.
 - Bumped `quic` 1.3.0 -> 2.0.1 and `h1` (erlang_h1) 0.6.2 -> 0.9.1.
@@ -227,6 +234,36 @@ and the project uses [Semantic Versioning](https://semver.org/).
   the downstream stream, so the capsule went to a not-yet-open
   stream and was lost. Handler actions produced before finalize are
   now buffered and flushed in order once the stream is open.
+
+## [0.6.0]
+
+No release tag or date was recorded for this version; the entries below
+were recovered from the former feature matrix (`docs/features.md`).
+
+### Added
+
+- CONNECT-IP drop-reason telemetry: inbound gating attributes drops to
+  `bcp38`, `scope_target`, `scope_ipproto`, `malformed`, `forward_drop`
+  and others, counted by `masque_metrics:ip_drop_inc/1` and
+  `ip_drop_count/1` (OTP `counters`, independent of `instrument`).
+- `lifecycle_fun` callback in the default IP proxy handler
+  (`address_assigned`, `address_released`, `route_advertised`,
+  `packet_dropped`) with matching counters.
+- `masque_ip_session_registry`: maps assigned addresses and prefixes to
+  the serving session, longest-prefix lookup, cleanup on session exit.
+- `masque_ip:inject_packet/2`: push packets from any process to the
+  client through the right server session (h1, h2, h3).
+- Per-session prefix assignments honouring the requested prefix length,
+  clamped by `min_assignable_prefix`.
+- `forward_fun` may return `{actions, [forward_action()], State}`.
+
+### Fixed
+
+- URI template hardening, canonical prefix targets, route range
+  validation, ADDRESS_ASSIGN/REQUEST canonical prefixes, malformed
+  control capsule abort on the IP client, close-on-reject for rejected
+  h1 CONNECT, optional `target` / `ipproto` variables, inbound packet
+  scoping with IPv6 extension headers.
 
 ## [0.5.0] - 2026-04-19
 
