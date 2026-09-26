@@ -285,6 +285,9 @@ kill_session(Pid) ->
 %% If `upstream_pool => true' and the transport supports pooling
 %% (h2, h3), check out a shared owner from the pool. h1 bypasses
 %% the pool (1-tunnel-per-socket).
+maybe_inject_pool_owner(_Transport, #{protocol := udp_bind} = Opts) ->
+    %% udp-bind is never pooled: each bind needs its own connection.
+    {ok, Opts};
 maybe_inject_pool_owner(Transport, #{upstream_pool := true} = Opts) when
     Transport =:= h2; Transport =:= h3
 ->

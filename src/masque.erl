@@ -319,6 +319,9 @@ connect_via(Transports, Target, Opts, Owner) when
 %% Single-transport dial that honours `upstream_pool => true' the
 %% same way the racer does; h1 is pool-bypassed so it keeps the
 %% plain dial_single path.
+%% udp-bind is never pooled: each bind needs its own connection.
+dial_single_or_pool(Mod, Transport, Target, #{protocol := udp_bind} = Opts, Owner) ->
+    dial_single(Mod, Target, Opts#{transport => Transport}, Owner);
 dial_single_or_pool(
     Mod,
     Transport,

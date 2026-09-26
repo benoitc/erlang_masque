@@ -41,6 +41,7 @@
     h3_reset_while_starting_answers_listener/1,
     h1_bind_handler_crash_closes_tunnel/1,
     unsupported_call_keeps_session/1,
+    udp_bind_skips_pool/1,
     h1_every_tunnel_counts_open_and_close/1,
     h1_udp_bind_assign_by_address/1,
     h1_udp_bind_pending_limit/1,
@@ -98,6 +99,7 @@ all() ->
         h3_reset_while_starting_answers_listener,
         h1_bind_handler_crash_closes_tunnel,
         unsupported_call_keeps_session,
+        udp_bind_skips_pool,
         h1_every_tunnel_counts_open_and_close,
         h1_udp_bind_assign_by_address,
         h1_udp_bind_pending_limit,
@@ -213,6 +215,8 @@ extra_opts(h3_udp_bind_output_before_finalize_is_kept) ->
     };
 extra_opts(h1_bind_handler_crash_closes_tunnel) ->
     (bind_opts())#{bind_handler => masque_crash_bind_handler};
+extra_opts(udp_bind_skips_pool) ->
+    bind_opts();
 extra_opts(h1_every_tunnel_counts_open_and_close) ->
     bind_opts();
 extra_opts(h1_udp_bind_assign_by_address) ->
@@ -559,6 +563,28 @@ h1_udp_bind_pending_limit(Config) ->
     end,
     {open, _} = sys:get_state(Sess),
     ok = masque:close(Sess).
+
+%% `upstream_pool => true' has no effect on a bind: no pooled
+%% connection is checked out, on the single-transport path or in a race.
+udp_bind_skips_pool(Config) ->
+    Checkout = {masque_racer, checkout_pool, 2},
+    _ = erlang:trace_pattern(Checkout, true, [call_count]),
+    try
+        Port = maps:get(port, ?config(h3, Config)),
+        Proxy = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+        lists:foreach(
+            fun(Ts) ->
+                {ok, Sess} = masque:bind_connect(Proxy, unscoped, #{
+                    transports => Ts, verify => verify_none, upstream_pool => true
+                }),
+                ok = masque:close(Sess)
+            end,
+            [[h3], [h3, h2]]
+        ),
+        ?assertEqual({call_count, 0}, erlang:trace_info(Checkout, call_count))
+    after
+        _ = erlang:trace_pattern(Checkout, false, [call_count])
+    end.
 
 %% A call a session does not support is answered with an error; the
 %% session keeps running.

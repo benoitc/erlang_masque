@@ -65,7 +65,7 @@
     %% Idle window before the owner closes the conn and stops.
     idle_timeout_ms => non_neg_integer() | infinity,
     %% Upper bound on concurrent streams. Defaults: h2 reads the peer
-    %% SETTINGS, h3 leaves it dynamic (ask the transport).
+    %% SETTINGS, h3 uses 100.
     max_streams => pos_integer() | dynamic,
     %% Registry to notify of capacity changes (set by the pool).
     pool => pid()
@@ -77,6 +77,8 @@
     session_pid :: pid(),
     monitor_ref :: reference()
 }).
+
+-define(DEFAULT_H3_MAX_STREAMS, 100).
 
 -record(state, {
     transport :: h2 | quic_h3,
@@ -205,6 +207,10 @@ handle_call(
                             _ = cancel_transport_stream(S, StreamId),
                             {reply, Err, S}
                     end;
+                {error, stream_limit} = Err ->
+                    %% The peer's stream limit is lower than
+                    %% `max_streams': stop handing out this owner.
+                    {reply, Err, mark_full(S)};
                 {error, _} = Err ->
                     {reply, Err, S}
             end
@@ -355,6 +361,14 @@ report_capacity(#state{pool = Pool, refs = Refs, max_streams = MS, full = Was} =
             S#state{full = Full}
     end.
 
+mark_full(#state{pool = undefined} = S) ->
+    S;
+mark_full(#state{full = true} = S) ->
+    S;
+mark_full(#state{pool = Pool} = S) ->
+    Pool ! {owner_capacity, self(), true},
+    S#state{full = true}.
+
 resolve_max_streams(h2, Mod, Conn, default) ->
     try Mod:get_peer_settings(Conn) of
         Map when is_map(Map) ->
@@ -372,8 +386,10 @@ resolve_max_streams(h2, Mod, Conn, default) ->
         _:_ ->
             100
     end;
+%% quic_h3 does not expose the peer's MAX_STREAMS; cap at the usual
+%% default so the pool opens another connection past it.
 resolve_max_streams(quic_h3, _Mod, _Conn, default) ->
-    dynamic;
+    ?DEFAULT_H3_MAX_STREAMS;
 resolve_max_streams(_, _Mod, _Conn, Explicit) when
     is_integer(Explicit), Explicit > 0
 ->

@@ -181,14 +181,14 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q8.** How stable are internal message shapes (`masque_datagram_in`, `masque_finalized`, `dial_result`, `owner_capacity`)?
 - **Q9.** Versioning: the 0.6.0 CHANGELOG entry and the v0.5/v0.6 tags are missing; is hex publishing planned?
 - **Q10.** Which connect-tcp draft revision is targeted?
-- **Q11.** Should `upstream_pool => true` apply to udp-bind? Today the checkout happens (and may dial) but the session ignores the owner and dials its own connection.
+- **Q11.** Settled: udp-bind is never pooled; `upstream_pool` is ignored and no pooled connection is checked out.
 - **Q12.** Is `masque_capsule` meant to become the single capsule codec? Today `quic_h3_capsule` (through `masque_capsule`), `h2_capsule` and `h1_capsule` are all used.
 - **Q13.** Settled: [a handler crash ends the tunnel](#a-handler-crash-ends-the-tunnel).
 - **Q14.** Should draining send GOAWAY, and should the server react to a client GOAWAY? Today it does neither.
 - **Q15.** Settled as a defect: a peer reset of a pending h3 stream now answers the listener with `stream_dead` (see [server internals](server-internals.md)).
 - **Q16.** In a scoped udp-bind, context 0 goes to `handle_packet/2`, which the default bind handler does not export, so that traffic is dropped. Intended?
 - **Q17.** Settled: the h1 udp-bind server session enforces the same rules as the h3/h2 one (see [udp-bind internals](udp-bind-internals.md#the-h1-session)).
-- **Q18.** h3 pooled owners default to `dynamic` capacity and never report full, so the pool never opens a second h3 connection per fingerprint unless `max_streams` is set. Intended?
+- **Q18.** Settled: pooled h3 owners default to 100 streams and report full on a transport `stream_limit` error, so the pool opens another connection (see [pool](pool.md)).
 - **Q19.** The `masque_ip_proxy_handler` moduledoc says the allocator is round-robin; the code is first-fit. Which is intended?
 - **Q20.** h1 idle timers are re-armed by inbound bytes only, so a tunnel that only sends toward the client idles out. Should outbound traffic count?
 - **Q21.** `dial_single_or_pool/5` waits for the pool checkout up to `checkout_timeout_ms` (60 s), regardless of the connect `timeout`. Intended?
