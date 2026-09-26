@@ -1,24 +1,25 @@
-%%% @doc Shared `failed' state for client sessions.
+%%% Shared `failed` state for client sessions.
 %%%
 %%% Client sessions dial the proxy from an internal event queued by
-%%% `init/1', so a dial error is known before the caller's
-%%% `handshake_await' call is processed. Instead of exiting (which
-%%% would turn the caller's `gen_statem:call' into an exit), a session
-%%% parks the error in a `failed' state: the next `handshake_await'
-%%% gets `{error, Reason}' and the session stops. With no caller the
+%%% `init/1`, so a dial error is known before the caller's
+%%% `handshake_await` call is processed. Instead of exiting (which
+%%% would turn the caller's `gen_statem:call` into an exit), a session
+%%% parks the error in a `failed` state: the next `handshake_await`
+%%% gets `{error, Reason}` and the session stops. With no caller the
 %%% state gives up after the handshake timeout.
 -module(masque_client_failed).
+-moduledoc false.
 
 -export([enter/1, handle/4, guard/1]).
 
-%% @doc State-enter actions for `failed': a state timeout bounded by
+%% State-enter actions for `failed`: a state timeout bounded by
 %% the session's handshake timeout.
 -spec enter(map()) -> [gen_statem:action()].
 enter(Opts) ->
     [{state_timeout, maps:get(timeout, Opts, 5000), give_up}].
 
-%% @doc Event handling for `failed'. `Reason' is the parked error and
-%% `OwnerRef' the session's owner monitor.
+%% Event handling for `failed`. `Reason` is the parked error and
+%% `OwnerRef` the session's owner monitor.
 -spec handle(gen_statem:event_type(), term(), term(), reference()) ->
     gen_statem:event_handler_result(atom()).
 handle({call, From}, handshake_await, Reason, _OwnerRef) ->
@@ -34,8 +35,8 @@ handle(info, {'DOWN', Ref, process, _, _}, _Reason, Ref) ->
 handle(_Type, _Event, _Reason, _OwnerRef) ->
     keep_state_and_data.
 
-%% @doc Run a dial step, turning an exit (e.g. a transport process
-%% that went away mid-call) into `{error, Reason}'.
+%% Run a dial step, turning an exit (e.g. a transport process
+%% that went away mid-call) into `{error, Reason}`.
 -spec guard(fun(() -> Result)) -> Result | {error, term()}.
 guard(Fun) ->
     try

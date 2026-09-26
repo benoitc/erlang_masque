@@ -1,17 +1,23 @@
-%%% @doc Top-level supervisor for the `masque' application.
+%%% Top-level supervisor for the `masque` application.
 %%%
-%%% Listeners and client sessions are attached dynamically as children
-%%% from later steps; the initial tree is empty on purpose.
+%%% Starts the h2 and h1 session supervisors (one per protocol), the
+%%% upstream pool and the CONNECT-IP address registry, and owns the
+%%% ETS table that counts h2 tunnels per connection. Listeners and
+%%% client sessions are not children. See
+%%% docs/1-understand/architecture.md.
 -module(masque_sup).
+-moduledoc false.
 -behaviour(supervisor).
 
 -export([start_link/0, init/1]).
 
+-spec start_link() -> supervisor:startlink_ret().
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
+-spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
-    %% ETS table for H2 per-connection tunnel counting (Step 4).
+    %% ETS table for h2 per-connection tunnel counting.
     _ = ets:new(
         masque_h2_tunnel_counts,
         [set, public, named_table, {write_concurrency, true}]

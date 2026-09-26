@@ -32,7 +32,7 @@ flowchart TD
     CS --> D
 ```
 
-- **Facade** (`masque`): the stable public API. It validates connect options, picks the session module for a protocol and transport, starts listeners, and holds the drain flags. Everything else is internal (the moduledoc of `masque` says so).
+- **Facade** (`masque`): the stable public API. It validates connect options, picks the session module for a protocol and transport, starts listeners, and holds the drain flags. The handler behaviour, the built-in handlers, the codecs and the URI modules are also documented for you to use; every other module is internal and hidden from the generated docs.
 - **Listeners and racer**: the entry points of each side. A listener turns an HTTP request into an accepted or rejected tunnel. The racer turns one `connect` call into several transport attempts and one winner.
 - **Sessions**: one process per tunnel on each side. A session owns the request stream, frames and unframes traffic, and on the server drives the handler. There is one module per cell of the protocol x transport matrix (see the [code map](../3-change/code-map.md)).
 - **Handlers**: the server extension point. They own the far side of the tunnel (a UDP socket, a TCP socket, an IP forwarder, or an upstream tunnel for chains) and talk to the session through actions.
@@ -122,7 +122,7 @@ Every session supervisor is `simple_one_for_one` (intensity 10, period 10) with 
 
 Not in the tree: listeners (owned by `quic_h3`, `h2`, `h1`), h3 routers and h3 sessions, all client sessions, racer workers, upstream owners, and the h2 tunnel-count watchers.
 
-`masque_app:start/2` starts `masque_sup`, then sets up metrics and creates the node's `via` token.
+`start/2` in `masque_app` starts `masque_sup`, then sets up metrics and creates the node's `via` token.
 
 ## Global state
 
@@ -151,13 +151,13 @@ Two consequences to keep in mind:
 
 Only reasons stated in the code or the existing docs are listed. Everything else is an open question.
 
-- **Handler `init/2` runs before the 2xx.** RFC 9298 says a 2xx means the proxy is ready to forward, so the handler must have opened its socket and checked the target first (comment in `masque_server_session:init/1`). A failing `init/2` becomes an HTTP error status instead of a tunnel that dies right after opening.
-- **The router exists only on h3.** `quic_h3` delivers HTTP datagrams to the connection's single owner pid (moduledoc of `masque_server_connection`, and the caveat in `masque_server:h3_handlers/1`), so something has to demultiplex them by stream id. `h2` and `h1` deliver stream events straight to a registered stream handler and have no separate datagram channel.
+- **Handler `init/2` runs before the 2xx.** RFC 9298 says a 2xx means the proxy is ready to forward, so the handler must have opened its socket and checked the target first (comment in `init/1` in `masque_server_session`). A failing `init/2` becomes an HTTP error status instead of a tunnel that dies right after opening.
+- **The router exists only on h3.** `quic_h3` delivers HTTP datagrams to the connection's single owner pid (moduledoc of `masque_server_connection`, and the caveat in `h3_handlers/1` in `masque_server`), so something has to demultiplex them by stream id. `h2` and `h1` deliver stream events straight to a registered stream handler and have no separate datagram channel.
 - **Finalize is asynchronous.** The router must keep routing datagrams while a session runs `init/2` and while it sends the 2xx; the router comments say a slow `send_response` must not stall routing. Datagrams that arrive in between are buffered in the router and replayed.
 - **Sessions are `temporary`.** A session is bound to one request stream; restarting it cannot recover the stream.
 - **Client sessions are started unlinked and monitored.** `dial_single` uses `start` plus a monitor so that a session that fails fast returns `{error, _}` to the caller instead of an exit signal (comment in `dial_single/4` in `masque`).
 - **The racer runs in the caller and receives through an alias.** Late attempt reports are dropped with the alias and never reach your mailbox (moduledoc of `masque_racer`). `defer_owner` exists so events a session emits between its 2xx and `set_owner` go to the real owner, in order (moduledoc of `masque_client_owner`).
-- **Upstream owners dial for themselves.** The process that calls `quic_h3:connect` becomes the connection owner and `quic_h3` has no `controlling_process` equivalent, so the owner process must be the one that dials (doc of `masque_upstream_owner:start_for_pool/3`).
+- **Upstream owners dial for themselves.** The process that calls `quic_h3:connect` becomes the connection owner and `quic_h3` has no `controlling_process` equivalent, so the owner process must be the one that dials (doc of `start_for_pool/3` in `masque_upstream_owner`).
 - **h1 has one tunnel per connection and closes on reject.** After 101 or 200 the socket is no longer HTTP. A rejected h1 request must close the connection so the client does not read later bytes as part of the rejected request (comment in `reject/4` in `masque_h1_server`, citing RFC 9931).
 
 Open questions (no answer in the repository):

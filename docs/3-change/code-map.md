@@ -99,12 +99,16 @@ Change a session module when you change the wire behaviour of that cell: framing
 | `masque_errors` | Handshake error to HTTP status and reason phrase. | you add a reject reason. |
 | `masque_metrics` | `instrument_meter` instruments for tunnels and bytes, plus `counters` for CONNECT-IP and bind drops. | you add a metric (see [operations](../2-use/operations.md)). |
 
+## Documenting a module
+
+Module and function docs are `-moduledoc` / `-doc` attributes in Markdown. Modules in the published surface (`masque`, `masque_handler`, the built-in handlers, the codecs, the URI modules, `masque_ip`, `masque_metrics`, `masque_errors`) get a `-moduledoc` that says what the module is for and a `-doc` on each exported function. Every other module is internal: it has `-moduledoc false.` and a plain `%%%` comment above `-module` that states its role and where it is explained in these pages. A new module is internal unless you add it to the published surface on purpose, and then to `groups_for_modules` in `rebar.config`. `rebar3 ex_doc` must finish without warnings: refer to an internal function as "`fun/N` in `mod`", not as a backticked `mod:fun/N`, which ex_doc tries to link.
+
 ## Naming quirks
 
 - `masque_client_session` and `masque_server_session` are h3 CONNECT-UDP only, not generic sessions.
 - `masque_h2_client_session` and `masque_h2_server_session` are h2 CONNECT-UDP only. h2 TCP, IP and bind use the `masque_tcp_*`, `masque_ip_*` and `masque_udp_bind_*` modules, which serve both h3 and h2.
 - `masque_h1_client_session` and `masque_h1_server_session` are h1 CONNECT-UDP only.
-- `masque_server` is the h3 listener for every protocol, although its moduledoc says "CONNECT-UDP proxy listener". The same stale wording is on `masque_h2_server` and `masque_h1_server`.
+- `masque_server` is the h3 listener for every protocol, not only CONNECT-UDP; the same goes for `masque_h2_server` and `masque_h1_server`.
 - `masque_h2_session_sup` and `masque_h1_session_sup` are both a module name and the registered name of their UDP instance; the other instances are registered as `masque_h2_tcp_session_sup`, `masque_h1_ip_session_sup`, and so on.
 - `masque_ip` is not "the IP protocol". It is a set of helpers, and `resolve_target/3` runs for every protocol.
 - `masque_upstream_owner` is the pool's connection owner; `masque_client_owner` handles the application owner. Neither is the h3 connection owner, which is the router. See [concepts](../1-understand/concepts.md#owner-three-meanings).

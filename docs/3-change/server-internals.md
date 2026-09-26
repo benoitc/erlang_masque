@@ -65,7 +65,7 @@ On h3 there is no supervisor. The router is started from `quic_h3`'s `connection
 
 ## h3: the router
 
-`masque_server_connection` exists because `quic_h3` delivers HTTP datagrams (and a few other connection-level events) to one owner pid per connection, not to the stream's handler. `masque_server:h3_handlers/1` returns a `connection_handler` that starts a router and hands it to `quic_h3` as `owner`. The router then:
+`masque_server_connection` exists because `quic_h3` delivers HTTP datagrams (and a few other connection-level events) to one owner pid per connection, not to the stream's handler. `h3_handlers/1` in `masque_server` returns a `connection_handler` that starts a router and hands it to `quic_h3` as `owner`. The router then:
 
 - routes `{quic_h3, _, {datagram, Sid, Payload}}` to the session as `{masque_datagram_in, Sid, Payload}`;
 - routes stream data it receives as `{masque_stream_data, Sid, Data, Fin}` (in server role `quic_h3` buffers unclaimed stream bodies itself, so this path is defensive);
@@ -166,7 +166,7 @@ Which module serves which cell:
 | ip | `masque_ip_server_session` | `masque_ip_server_session` | `masque_ip_h1_server_session` |
 | udp_bind | `masque_udp_bind_server_session` | `masque_udp_bind_server_session` | `masque_udp_bind_h1_server_session` |
 
-The h3 module for a request is chosen by `masque_server_connection:session_module/1`; h2 and h1 pick it through the supervisor that `start_session/1` routes to by `protocol`.
+The h3 module for a request is chosen by `session_module/1` in `masque_server_connection`; h2 and h1 pick it through the supervisor that `start_session/1` routes to by `protocol`.
 
 The capsule decode loop is the same everywhere: bytes append to `cap_buf`; above `max_capsule_size` (`handler_opts`, default 65 536) the session stops with `capsule_buffer_overflow`; a FIN on a capsule boundary is a clean end; a FIN inside a capsule is `truncated_capsule`; a decode error is `malformed_capsule`. h3 decodes with `masque_capsule` (a wrapper over `quic_h3_capsule`), h2 with `h2_capsule`, h1 with `h1_capsule`.
 
@@ -204,13 +204,13 @@ Datagram writes (udp, ip, udp-bind) never block: oversize UDP payloads are dropp
 
 The pipeline and the session layers are the same pattern implemented per module: three listeners, nine server sessions, each with its own copy of the handler runtime and the reject formatting. The copies have drifted. When you change behaviour in one copy, check the others. Known drift today:
 
-- **Option lifting.** Shared: all three listeners copy `masque_server:handler_opt_keys/0` into `handler_opts`. Add a new listener-level handler option there.
+- **Option lifting.** Shared: all three listeners copy `handler_opt_keys/0` in `masque_server` into `handler_opts`. Add a new listener-level handler option there.
 - **Request map.** Only h3 adds `peer` and `peer_cert`.
 - **Handler crash handling.** Every session stops with `{handler_crash, R}` (see the teardown matrix); each has its own copy of `safe_apply/3`.
 - **Error stops.** udp resets with `H3_MESSAGE_ERROR`, tcp with `H3_CONNECT_ERROR`, udp-bind with `H3_INTERNAL_ERROR`, and ip ends with a FIN.
 - **Metrics.** Every session emits `tunnel_opened` once its 2xx is sent (in `finalize`, the h2 init path, or the `init/1` wrapper on h1 and h2 UDP) and `tunnel_closed` from `terminate/2`, keyed on `start_time`. A new session must do the same; `h1_every_tunnel_counts_open_and_close` in `masque_lifecycle_SUITE` checks it.
 - **udp-bind h1.** `masque_udp_bind_h1_server_session` repeats the compression rules of the h3/h2 session; see [udp-bind internals](udp-bind-internals.md).
-- **Dead API.** `masque_server_connection:register_session/3`, `lookup_session/2`, `start_link/1` and the sessions' synchronous `handle_call(finalize, ...)` are not used by the current code path.
+- **Dead API.** `register_session/3` in `masque_server_connection`, `lookup_session/2`, `start_link/1` and the sessions' synchronous `handle_call(finalize, ...)` are not used by the current code path.
 
 If you plan a refactor, the natural cut is one listener pipeline with a small callback per transport, and the handler runtime moved next to `masque_handler`.
 
@@ -220,7 +220,7 @@ If you plan a refactor, the natural cut is one listener pipeline with a small ca
 |---|---|
 | Which requests are accepted, request validation | the three `validate` functions in `masque_server`, `masque_h2_server`, `masque_h1_server` |
 | Reject status, body, Proxy-Status | `reject/4` and `proxy_status_error/1` in the three listeners, `masque_errors` |
-| Per-connection tunnel limit | `masque_server_connection:handle_call({start_session, _}, ...)`, `masque_h2_server:try_reserve_tunnel/2` |
+| Per-connection tunnel limit | `masque_server_connection:handle_call({start_session, _}, ...)`, `try_reserve_tunnel/2` in `masque_h2_server` |
 | When the 2xx goes out, early output | `finalize/1` and the `early` clauses in the h3-capable sessions, router `handle_info({masque_finalized, ...})` |
 | A handler action | `do_actions/2` in every session that serves the protocol |
 | Teardown behaviour | the `terminate/2` clauses, `end_stream/2`, `terminate_transport/2`; add a case to `masque_lifecycle_SUITE` |

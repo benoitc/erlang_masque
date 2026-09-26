@@ -1,11 +1,12 @@
-%%% @doc MASQUE CONNECT-UDP listener over HTTP/1.1.
+%%% HTTP/1.1 listener for every MASQUE protocol (CONNECT-UDP, CONNECT-IP,
+%%% Connect-UDP-Bind over Upgrade; CONNECT-TCP as classic CONNECT).
 %%%
-%%% Wraps `h1:start_server/3' with a request handler that validates
-%%% the RFC 9298 Upgrade envelope (`GET' + `Upgrade: connect-udp' +
-%%% `Capsule-Protocol: ?1'), matches the path against the configured
-%%% URI template, and spawns a per-tunnel `masque_h1_server_session'
-%%% on acceptance. The session itself calls `h1:accept_upgrade/3' so
-%%% socket ownership lands on the session gen_server.
+%%% Wraps `h1:start_server/3` with a request handler that validates
+%%% the Upgrade envelope (`GET` + `Upgrade` + `Capsule-Protocol: ?1`),
+%%% matches the path against the configured URI templates, and starts
+%%% a per-tunnel session under the protocol's `masque_h1_session_sup`
+%%% on acceptance. The session itself calls `h1:accept_upgrade/3` (or
+%%% `h1:accept_connect/3`) so socket ownership lands on the session.
 %%%
 %%% No per-connection tunnel accounting: h1 Upgrade inherently tops
 %%% out at one tunnel per TCP/TLS connection (the state machine
@@ -13,9 +14,10 @@
 %%%
 %%% Handles CONNECT-UDP, CONNECT-IP, and classic CONNECT-TCP (the
 %%% RFC 9110 §9.3.6 tunnel). The first two use HTTP Upgrade + RFC 9297
-%%% capsules; CONNECT-TCP uses the classic `CONNECT host:port HTTP/1.1'
+%%% capsules; CONNECT-TCP uses the classic `CONNECT host:port HTTP/1.1`
 %%% method and becomes a raw byte pipe after the 200 response.
 -module(masque_h1_server).
+-moduledoc false.
 
 -export([
     start_listener/2,

@@ -1,13 +1,14 @@
-%%% @doc Per-tunnel server session for Connect-UDP-Bind
+%%% Per-tunnel server session for Connect-UDP-Bind
 %%% (draft-ietf-masque-connect-udp-listen-11) over HTTP/1.1.
 %%%
-%%% Sibling of `masque_udp_bind_server_session' (h2/h3); the wire
+%%% Sibling of `masque_udp_bind_server_session` (h2/h3); the wire
 %%% format above the transport is identical, so capsule and payload
 %%% logic is reused unchanged. Only the transport plumbing differs:
 %%% h1 takes ownership of the upgraded TLS socket via
-%%% `h1:accept_upgrade/3' and reads / writes capsules directly on
-%%% it through `h1_capsule:encode/2' and `h1_capsule:decode/1'.
+%%% `h1:accept_upgrade/3` and reads / writes capsules directly on
+%%% it through `h1_capsule:encode/2` and `h1_capsule:decode/1`.
 -module(masque_udp_bind_h1_server_session).
+-moduledoc false.
 -behaviour(gen_server).
 
 -export([start_link/1]).

@@ -1,9 +1,11 @@
-%%% @doc Metrics instrumentation for masque tunnels.
-%%%
-%%% Uses `instrument_meter' to track tunnel lifecycle, throughput,
-%%% and rejections. Call `setup/0' from application start. Instruments
-%%% are stored in `persistent_term' for zero-overhead lookups.
 -module(masque_metrics).
+-moduledoc """
+Metrics instrumentation for masque tunnels.
+
+Uses `instrument_meter` to track tunnel lifecycle, throughput,
+and rejections. Call `setup/0` from application start. Instruments
+are stored in `persistent_term` for zero-overhead lookups.
+""".
 
 -export([
     setup/0,
@@ -97,10 +99,12 @@ setup() ->
     ),
     ok.
 
-%% @doc Idempotent allocator for the IP-side simple counters. Safe to
-%% call multiple times; only the first call wins (subsequent calls
-%% keep the existing reference so counts accumulated from earlier
-%% callers are preserved).
+-doc """
+Idempotent allocator for the IP-side simple counters. Safe to
+call multiple times; only the first call wins (subsequent calls
+keep the existing reference so counts accumulated from earlier
+callers are preserved).
+""".
 -spec setup_ip_counters() -> ok.
 setup_ip_counters() ->
     case persistent_term:get(masque_ip_drop_counters, undefined) of
@@ -251,7 +255,9 @@ lifecycle_get(Idx) ->
 %% Connect-UDP-Bind drop counters.
 %%====================================================================
 
-%% @doc Idempotent allocator for the udp-bind drop counters.
+-doc """
+Idempotent allocator for the udp-bind drop counters.
+""".
 -spec setup_bind_counters() -> ok.
 setup_bind_counters() ->
     case persistent_term:get(masque_bind_drop_counters, undefined) of

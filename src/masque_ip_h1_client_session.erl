@@ -1,20 +1,21 @@
-%%% @doc Client-side CONNECT-IP session (RFC 9484) over HTTP/1.1.
+%%% Client-side CONNECT-IP session (RFC 9484) over HTTP/1.1.
 %%%
-%%% Runs the handshake as an HTTP/1.1 Upgrade (`Upgrade: connect-ip')
+%%% Runs the handshake as an HTTP/1.1 Upgrade (`Upgrade: connect-ip`)
 %%% and, after the 101 response, drives RFC 9297 capsules directly on
 %%% the raw TLS socket.
 %%%
 %%% Control-plane capsules (ADDRESS_ASSIGN, ADDRESS_REQUEST,
-%%% ROUTE_ADVERTISEMENT) are encoded via `masque_ip_capsule'. IP
-%%% packets ride the DATAGRAM capsule with `masque_datagram' carrying
-%%% the `context-id || IP bytes' payload. Wire format is identical to
-%%% the h2 / h3 paths so `masque_ip_capsule' + `masque_datagram' are
+%%% ROUTE_ADVERTISEMENT) are encoded via `masque_ip_capsule`. IP
+%%% packets ride the DATAGRAM capsule with `masque_datagram` carrying
+%%% the `context-id || IP bytes` payload. Wire format is identical to
+%%% the h2 / h3 paths so `masque_ip_capsule` + `masque_datagram` are
 %%% reused unchanged; only the transport plumbing differs.
 %%%
-%%% Sibling module of `masque_ip_client_session'; they do not share
+%%% Sibling module of `masque_ip_client_session`; they do not share
 %%% state. Keeping them separate avoids leaking the socket-ownership
 %%% and active-once read model back into the h2/h3 session.
 -module(masque_ip_h1_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).
@@ -76,22 +77,28 @@
 %% API
 %%====================================================================
 
+-spec start_link(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
 
+-spec start(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start(Target, Opts, Owner) ->
     gen_statem:start(?MODULE, {Target, Opts, Owner}, []).
 
+-spec stop(pid()) -> ok.
 stop(Pid) -> gen_statem:call(Pid, stop, 5000).
+-spec info(pid()) -> map().
 info(Pid) -> gen_statem:call(Pid, info, 1000).
 
 -spec send_ip_packet(pid(), binary()) -> ok | {error, term()}.
 send_ip_packet(Pid, Packet) when is_binary(Packet) ->
     gen_statem:call(Pid, {send_ip_packet, Packet}).
 
+-spec recv(pid(), non_neg_integer()) -> {ok, binary()} | {error, term()}.
 recv(Pid, Timeout) ->
     gen_statem:call(Pid, {recv, Timeout}, Timeout + 500).
 
+-spec set_mode(pid(), message | queue) -> ok | {error, term()}.
 set_mode(Pid, Mode) when Mode =:= message; Mode =:= queue ->
     gen_statem:call(Pid, {set_mode, Mode}).
 
@@ -114,6 +121,7 @@ advertise_routes(Pid, Routes) ->
 ip_info(Pid) ->
     gen_statem:call(Pid, ip_info, 1000).
 
+-spec send_capsule(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send_capsule(Pid, Type, Value) ->
     gen_statem:call(Pid, {send_capsule, Type, Value}).
 

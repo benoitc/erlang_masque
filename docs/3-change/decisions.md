@@ -7,16 +7,16 @@ This page records design decisions that are visible in the code, with the reason
 ### Handler init runs before the 2xx
 
 - **Decision.** The server session runs the handler's `init/2` to completion before any 2xx (or 101/200 on h1) is sent.
-- **Why.** RFC 9298 section 3: a 2xx means the proxy is ready to forward, and the built-in handlers open the target socket in `init/2` (comment in `masque_server_session:init/1`). On h1, running `init/2` first also lets a rejection "surface as a clean 502 on the as-yet-unupgraded h1 connection" (comment in `masque_h1_server_session:init/1`).
+- **Why.** RFC 9298 section 3: a 2xx means the proxy is ready to forward, and the built-in handlers open the target socket in `init/2` (comment in `init/1` in `masque_server_session`). On h1, running `init/2` first also lets a rejection "surface as a clean 502 on the as-yet-unupgraded h1 connection" (comment in `init/1` in `masque_h1_server_session`).
 - **Consequences.** A slow `init/2` delays the response. On h3 it forces the finalize step and the early queue below. A handler cannot write to the tunnel from `init/2` directly; it returns init actions, run after the 2xx.
 - **Where.** `init/1` of every server session; [server internals](server-internals.md#the-shared-pipeline).
 
 ### One router per h3 connection
 
 - **Decision.** Each accepted h3 connection gets a `masque_server_connection` process that is the `quic_h3` connection owner and routes datagrams to sessions by stream id.
-- **Why.** `quic_h3` delivers HTTP datagrams to the connection owner, not to the stream handler (`masque_server:h3_handlers/1` doc, router moduledoc).
+- **Why.** `quic_h3` delivers HTTP datagrams to the connection owner, not to the stream handler (`h3_handlers/1` in `masque_server` doc, router moduledoc).
 - **Consequences.** MASQUE cannot share an h3 connection with another extension that needs the owner slot. All datagrams of a connection pass through one process. The per-connection tunnel limit lives in the router. h2 and h1 have no equivalent process.
-- **Where.** `masque_server_connection`, `masque_server:h3_handlers/1`.
+- **Where.** `masque_server_connection`, `h3_handlers/1` in `masque_server`.
 
 ### Asynchronous session start and finalize on h3
 
@@ -123,13 +123,13 @@ This page records design decisions that are visible in the code, with the reason
 
 - **Decision.** Pooling needs `upstream_pool => true`; h1 is never pooled; connections are shared only between callers with the same host, port, transport and connection-affecting options.
 - **Why.** "Two callers with different trust or ALPN settings get different owners"; h1 is one tunnel per socket (pool and owner moduledocs).
-- **Where.** `masque_upstream_pool`, `masque_racer:checkout_pool/2`.
+- **Where.** `masque_upstream_pool`, `checkout_pool/2` in `masque_racer`.
 
 ### The pool registry never blocks on a handshake
 
 - **Decision.** Each upstream owner dials in its own process; the registry only records waiters.
 - **Why.** "A slow upstream only stalls callers on its own key"; dialing in the owner means the connection is owned by it from the start, which matters because `quic_h3` exposes no `controlling_process/2` equivalent (pool and owner moduledocs).
-- **Where.** `masque_upstream_pool:handle_call({checkout, ...})`, `masque_upstream_owner:start_for_pool/3`.
+- **Where.** `masque_upstream_pool:handle_call({checkout, ...})`, `start_for_pool/3` in `masque_upstream_owner`.
 
 ### Relay loops are detected with a per-listener via token
 
@@ -171,8 +171,8 @@ This page records design decisions that are visible in the code, with the reason
 
 Questions Q1 to Q12 come from the documentation plan; the rest were found while writing the internals pages. None of them has an answer in the repository.
 
-- **Q1.** Should module docs move to `-moduledoc` / `-doc` so internal modules can be hidden from hexdocs? This touches source doc attributes only.
-- **Q2.** Is every module except `masque`, the handlers and the codecs meant to be internal? `masque.erl` says so, but the docs publish everything.
+- **Q1.** Settled: module docs are `-moduledoc` / `-doc` attributes, and internal modules are hidden (see [code map](code-map.md#documenting-a-module)).
+- **Q2.** Settled: the published surface is `masque`, `masque_handler` and the built-in handlers, the codecs, the URI modules, `masque_ip`, `masque_metrics` and `masque_errors`; everything else is internal.
 - **Q3.** Is the router needed only because `quic_h3` delivers datagrams to the connection owner, or is there another reason h2 and h1 sessions sit under supervisors while h3 has a router?
 - **Q4.** Why are h3 server sessions unsupervised (started by the router with `gen_server:start/3`, then linked and monitored)?
 - **Q5.** All h2 sessions send the 2xx from their own `init/1`, and the h2 UDP session is the only one in a separate module without a `transport` field or metrics. Is that separation intended?
@@ -189,7 +189,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q16.** In a scoped udp-bind, context 0 goes to `handle_packet/2`, which the default bind handler does not export, so that traffic is dropped. Intended?
 - **Q17.** Settled: the h1 udp-bind server session enforces the same rules as the h3/h2 one (see [udp-bind internals](udp-bind-internals.md#the-h1-session)).
 - **Q18.** Settled: pooled h3 owners default to 100 streams and report full on a transport `stream_limit` error, so the pool opens another connection (see [pool](pool.md)).
-- **Q19.** The `masque_ip_proxy_handler` moduledoc says the allocator is round-robin; the code is first-fit. Which is intended?
+- **Q19.** The `masque_ip_proxy_handler` allocator is first-fit (its moduledoc used to say round-robin). Is round-robin wanted, so a released address is not handed out again at once?
 - **Q20.** h1 idle timers are re-armed by inbound bytes only, so a tunnel that only sends toward the client idles out. Should outbound traffic count?
 - **Q21.** `dial_single_or_pool/5` waits for the pool checkout up to `checkout_timeout_ms` (60 s), regardless of the connect `timeout`. Intended?
 - **Q22.** The chain listeners set `handler`, `tcp_handler` and `ip_handler` to `masque_chain_handler` but not `bind_handler`, so udp-bind is not chained. Intended?

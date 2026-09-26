@@ -1,31 +1,28 @@
-%%% @doc Connect-UDP-Bind client session for h2 / h3
+%%% Connect-UDP-Bind client session for h2 / h3
 %%% (draft-ietf-masque-connect-udp-listen-11). Sibling of
-%%% `masque_client_session' / `masque_ip_client_session'; one module
-%%% serves both transports by dispatching on a `transport' field.
+%%% `masque_client_session` / `masque_ip_client_session`; one module
+%%% serves both transports by dispatching on a `transport` field.
 %%%
-%%% Public API surfaced via `masque':
+%%% Public API surfaced via `masque`:
 %%%
-%%% <ul>
-%%%   <li>`masque:bind_connect/3' opens the tunnel.</li>
-%%%   <li>`masque:send_to/3' sends a UDP payload to a peer.</li>
-%%%   <li>`masque:assign_compression/2',
-%%%       `masque:open_uncompressed_context/1',
-%%%       `masque:close_compression/2' drive the compression-table
-%%%       lifecycle.</li>
-%%%   <li>`masque:proxy_public_address/1' reads the parsed
-%%%       `Proxy-Public-Address' list.</li>
-%%% </ul>
+%%% - `masque:bind_connect/3` opens the tunnel.
+%%% - `masque:send_to/3` sends a UDP payload to a peer.
+%%% - `masque:assign_compression/2`,
+%%%   `masque:open_uncompressed_context/1`,
+%%%   `masque:close_compression/2` drive the compression-table
+%%%   lifecycle.
+%%% - `masque:proxy_public_address/1` reads the parsed
+%%%   `Proxy-Public-Address` list.
 %%%
-%%% Owner messages (sent to the `owner' pid passed in opts):
+%%% Owner messages (sent to the `owner` pid passed in opts):
 %%%
-%%% <ul>
-%%%   <li>`{masque_bind_packet, Sess, {IP, Port}, UdpPayload}'</li>
-%%%   <li>`{masque_compression_assigned, Sess, ContextId, Peer}'</li>
-%%%   <li>`{masque_compression_acked, Sess, ContextId}'</li>
-%%%   <li>`{masque_compression_closed, Sess, ContextId}'</li>
-%%%   <li>`{masque_closed, Sess, Reason}'</li>
-%%% </ul>
+%%% - `{masque_bind_packet, Sess, {IP, Port}, UdpPayload}`
+%%% - `{masque_compression_assigned, Sess, ContextId, Peer}`
+%%% - `{masque_compression_acked, Sess, ContextId}`
+%%% - `{masque_compression_closed, Sess, ContextId}`
+%%% - `{masque_closed, Sess, Reason}`
 -module(masque_udp_bind_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).
@@ -96,15 +93,22 @@
 %%                           proxy's policy allows.
 %%   {Host :: binary(), Port :: 1..65535}
 %%                         - scoped bind: proxy enforces the peer.
+-spec start_link(unscoped | {binary() | inet:hostname(), inet:port_number()}, map(), pid()) ->
+    gen_statem:start_ret().
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
 
+-spec start(unscoped | {binary() | inet:hostname(), inet:port_number()}, map(), pid()) ->
+    gen_statem:start_ret().
 start(Target, Opts, Owner) ->
     gen_statem:start(?MODULE, {Target, Opts, Owner}, []).
 
+-spec stop(pid()) -> ok.
 stop(Pid) -> gen_statem:call(Pid, stop, 5000).
+-spec info(pid()) -> map().
 info(Pid) -> gen_statem:call(Pid, info, 1000).
 
+-spec send_to(pid(), {inet:ip_address(), inet:port_number()}, binary()) -> ok | {error, term()}.
 send_to(Pid, {IP, Port}, Bytes) when
     is_binary(Bytes),
     is_integer(Port),
@@ -113,24 +117,34 @@ send_to(Pid, {IP, Port}, Bytes) when
 ->
     gen_statem:call(Pid, {send_to, {IP, Port}, Bytes}).
 
+-spec recv(pid(), non_neg_integer()) ->
+    {ok, {inet:ip_address(), inet:port_number()}, binary()} | {error, term()}.
 recv(Pid, Timeout) ->
     gen_statem:call(Pid, {recv, Timeout}, Timeout + 500).
 
+-spec set_mode(pid(), message | queue) -> ok | {error, term()}.
 set_mode(Pid, Mode) when Mode =:= message; Mode =:= queue ->
     gen_statem:call(Pid, {set_mode, Mode}).
 
+-spec assign_compression(pid(), {inet:ip_address(), inet:port_number()}) ->
+    {ok, pos_integer()} | {error, term()}.
 assign_compression(Pid, Peer) ->
     gen_statem:call(Pid, {assign_compression, Peer}).
 
+-spec open_uncompressed_context(pid()) -> {ok, pos_integer()} | {error, term()}.
 open_uncompressed_context(Pid) ->
     gen_statem:call(Pid, open_uncompressed_context).
 
+-spec close_compression(pid(), pos_integer()) -> ok | {error, term()}.
 close_compression(Pid, ContextId) ->
     gen_statem:call(Pid, {close_compression, ContextId}).
 
+-spec proxy_public_address(pid()) ->
+    {ok, [{inet:ip_address(), inet:port_number()}]} | {error, term()}.
 proxy_public_address(Pid) ->
     gen_statem:call(Pid, proxy_public_address).
 
+-spec send_capsule(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send_capsule(Pid, Type, Value) ->
     gen_statem:call(Pid, {send_capsule, Type, Value}).
 

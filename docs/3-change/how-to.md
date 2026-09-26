@@ -47,10 +47,10 @@ What it is: a new `:protocol` value (or header-negotiated variant, as udp-bind i
    - `masque_h1_server`: `defaults/1`, `build_dispatch/1`, `validate/5,6`, `dispatch_request_1/6`.
    - If targets need resolving before `accept/1`, extend `masque_ip:resolve_target/3`.
 4. Server sessions: a module for h2/h3 (dispatch on a `transport` field, like `masque_ip_server_session`) and one for h1.
-   - h3: add a clause to `masque_server_connection:session_module/1`.
+   - h3: add a clause to `session_module/1` in `masque_server_connection`.
    - h2: add `start_link_<proto>/0`, a `start_session/1` clause and an `init/1` clause to `masque_h2_session_sup`.
    - h1: the same in `masque_h1_session_sup`.
-   - Add both supervisors as children in `masque_sup:init/1`.
+   - Add both supervisors as children in `init/1` in `masque_sup`.
 5. Client sessions: the same split. Select them in both `session_mod/2` in `masque` and `transport_mod/2` in `masque_racer` (the table is duplicated).
 6. Handler: a default `masque_<proto>_proxy_handler` and any new callbacks as optional callbacks in `masque_handler`.
 7. Facade: new functions in `masque.erl` if `connect/3` and `send/2,3` are not enough (udp-bind added `bind_connect/3`, `send_to/3` and friends).
@@ -84,9 +84,9 @@ Tests: codec cases in the protocol's `_tests` module, a property in `prop_masque
 
 What it is: how a session ends and what it sends on the way out. Read the teardown section of [server-internals](server-internals.md) first.
 
-Server side, per session module: `terminate/2` (the clauses decide FIN versus reset), `reset_and_stop/2`, and for TCP `end_stream/2`. The router's `terminate/2` in `masque_server_connection` casts `connection_closed` to its sessions. h2 sessions give their slot back with `masque_h2_server:release_tunnel/1`.
+Server side, per session module: `terminate/2` (the clauses decide FIN versus reset), `reset_and_stop/2`, and for TCP `end_stream/2`. The router's `terminate/2` in `masque_server_connection` casts `connection_closed` to its sessions. h2 sessions give their slot back with `release_tunnel/1` in `masque_h2_server`.
 
-Client side, per session module: `end_tunnel/3` (queue-mode sessions park in `closed`), `session_teardown/1`, `client_stream_abort/2`, `terminate/3`, and the `closing` state. Pooled sessions release their stream with `masque_upstream_owner:release_stream/2` instead of closing the connection.
+Client side, per session module: `end_tunnel/3` (queue-mode sessions park in `closed`), `session_teardown/1`, `client_stream_abort/2`, `terminate/3`, and the `closing` state. Pooled sessions release their stream with `release_stream/2` in `masque_upstream_owner` instead of closing the connection.
 
 Tests: a case in `masque_lifecycle_SUITE` per transport, using the template in [testing](testing.md). Run `masque_client_rx_SUITE` if you touch the client path.
 
@@ -99,7 +99,7 @@ Contract:
 ## If you want to change the client connect flow or racing
 
 1. Facade: `masque:connect/3`, `validate_connect_opts/2`, `connect_via/4`, `dial_single_or_pool/5`, `dial_single/4`.
-2. Racer: `masque_racer:race/4`, `spawn_attempt/5`, `transfer_owner/3`, `checkout_pool/2`.
+2. Racer: `race/4` in `masque_racer`, `spawn_attempt/5`, `transfer_owner/3`, `checkout_pool/2`.
 3. Owner handoff: `masque_client_owner` (holds messages while `defer_owner => true`) and the `{set_owner, Pid}` clause in each client session.
 4. Early dial failures: `masque_client_failed`.
 
@@ -131,8 +131,8 @@ See [debugging](debugging.md).
 
 ## If you want to extend the public API
 
-1. Add the function to `masque.erl` with a `-spec` and a `%% @doc`. Export new types with `-export_type`.
-2. If the call goes to a session, add the matching `handle` clause in every session module that must support it, and a reply in the `failed` and `closed` states (both are shared: `masque_client_failed:handle/4`, `masque_client_rx:closed/5`).
+1. Add the function to `masque.erl` with a `-spec` and a `-doc`. Export new types with `-export_type`.
+2. If the call goes to a session, add the matching `handle` clause in every session module that must support it, and a reply in the `failed` and `closed` states (both are shared: `handle/4` in `masque_client_failed`, `closed/5` in `masque_client_rx`).
 3. New owner messages or error reasons go in [messages-and-errors](../reference/messages-and-errors.md).
 4. Add a CHANGELOG entry under `Added`.
 

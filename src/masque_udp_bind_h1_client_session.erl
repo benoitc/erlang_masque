@@ -1,10 +1,11 @@
-%%% @doc Connect-UDP-Bind client session over HTTP/1.1
+%%% Connect-UDP-Bind client session over HTTP/1.1
 %%% (draft-ietf-masque-connect-udp-listen-11). Sibling of
-%%% `masque_udp_bind_client_session' for the h2/h3 paths.
+%%% `masque_udp_bind_client_session` for the h2/h3 paths.
 %%%
 %%% Public API and owner-message shape match the h2/h3 client; only
 %%% the transport plumbing differs.
 -module(masque_udp_bind_h1_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).
@@ -62,35 +63,52 @@
 %% Cap on the 101 response head, same as the CONNECT-TCP h1 client.
 -define(MAX_RESPONSE_HEADER, 65536).
 
+-spec start_link(unscoped | {binary() | inet:hostname(), inet:port_number()}, map(), pid()) ->
+    gen_statem:start_ret().
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
+-spec start(unscoped | {binary() | inet:hostname(), inet:port_number()}, map(), pid()) ->
+    gen_statem:start_ret().
 start(Target, Opts, Owner) ->
     gen_statem:start(?MODULE, {Target, Opts, Owner}, []).
 
+-spec stop(pid()) -> ok.
 stop(Pid) -> gen_statem:call(Pid, stop, 5000).
+-spec info(pid()) -> map().
 info(Pid) -> gen_statem:call(Pid, info, 1000).
 
+-spec send_to(pid(), {inet:ip_address(), inet:port_number()}, binary()) -> ok | {error, term()}.
 send_to(Pid, {IP, Port}, Bytes) when is_binary(Bytes) ->
     gen_statem:call(Pid, {send_to, {IP, Port}, Bytes}).
 
+-spec recv(pid(), non_neg_integer()) ->
+    {ok, {inet:ip_address(), inet:port_number()}, binary()} | {error, term()}.
 recv(Pid, Timeout) ->
     gen_statem:call(Pid, {recv, Timeout}, Timeout + 500).
 
+-spec set_mode(pid(), message | queue) -> ok | {error, term()}.
 set_mode(Pid, Mode) when Mode =:= message; Mode =:= queue ->
     gen_statem:call(Pid, {set_mode, Mode}).
 
+-spec assign_compression(pid(), {inet:ip_address(), inet:port_number()}) ->
+    {ok, pos_integer()} | {error, term()}.
 assign_compression(Pid, Peer) ->
     gen_statem:call(Pid, {assign_compression, Peer}).
 
+-spec open_uncompressed_context(pid()) -> {ok, pos_integer()} | {error, term()}.
 open_uncompressed_context(Pid) ->
     gen_statem:call(Pid, open_uncompressed_context).
 
+-spec close_compression(pid(), pos_integer()) -> ok | {error, term()}.
 close_compression(Pid, Id) ->
     gen_statem:call(Pid, {close_compression, Id}).
 
+-spec proxy_public_address(pid()) ->
+    {ok, [{inet:ip_address(), inet:port_number()}]} | {error, term()}.
 proxy_public_address(Pid) ->
     gen_statem:call(Pid, proxy_public_address).
 
+-spec send_capsule(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send_capsule(Pid, Type, Value) ->
     gen_statem:call(Pid, {send_capsule, Type, Value}).
 

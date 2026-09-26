@@ -1,15 +1,17 @@
-%%% @doc MASQUE CONNECT-UDP listener over HTTP/2.
+%%% HTTP/2 listener for every MASQUE protocol (CONNECT-UDP, CONNECT-TCP,
+%%% CONNECT-IP, Connect-UDP-Bind).
 %%%
-%%% Wraps `h2:start_server/3' with a handler fun that validates the
-%%% Extended CONNECT envelope (RFC 8441 + RFC 9298), matches the
-%%% request path against the configured URI template, and spawns a
-%%% per-tunnel `masque_h2_server_session' on acceptance.
+%%% Wraps `h2:start_server/3` with a handler fun that validates the
+%%% Extended CONNECT envelope (RFC 8441), matches the request path
+%%% against the configured URI templates, and starts a per-tunnel
+%%% session under the protocol's `masque_h2_session_sup` on acceptance.
 %%%
-%%% For the cert/key config this follows `erlang_h2' conventions:
-%%% both are PEM file paths (string or binary). `quic_h3' takes DER
-%%% binaries, so the `masque' facade exposes two distinct start
+%%% For the cert/key config this follows `erlang_h2` conventions:
+%%% both are PEM file paths (string or binary). `quic_h3` takes DER
+%%% binaries, so the `masque` facade exposes two distinct start
 %%% functions and the test helpers keep both forms around.
 -module(masque_h2_server).
+-moduledoc false.
 
 -export([
     start_listener/2,

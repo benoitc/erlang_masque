@@ -1,15 +1,16 @@
-%%% @doc Client-side MASQUE CONNECT-TCP session.
+%%% Client-side MASQUE CONNECT-TCP session.
 %%%
 %%% TCP data travels as raw bytes on the HTTP request/response stream
 %%% body - no datagrams, no context-IDs, no capsules: the request
-%%% carries no `capsule-protocol' and a 2xx claiming it is rejected.
+%%% carries no `capsule-protocol` and a 2xx claiming it is rejected.
 %%% Stream END_STREAM = TCP FIN, one per direction: after the peer's
-%%% FIN the owner can keep sending until it calls `shutdown_write/1'
+%%% FIN the owner can keep sending until it calls `shutdown_write/1`
 %%% or closes the session, and after its own FIN it keeps receiving.
 %%%
 %%% Supports both HTTP/3 (quic_h3) and HTTP/2 (h2) as the outer
-%%% transport, selected by `transport => h3 | h2' in opts.
+%%% transport, selected by `transport => h3 | h2` in opts.
 -module(masque_tcp_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).
@@ -69,25 +70,33 @@
 %% API
 %%====================================================================
 
+-spec start_link(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
 
+-spec start(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start(Target, Opts, Owner) ->
     gen_statem:start(?MODULE, {Target, Opts, Owner}, []).
 
+-spec stop(pid()) -> ok.
 stop(Pid) -> gen_statem:call(Pid, stop, 5000).
+-spec info(pid()) -> map().
 info(Pid) -> gen_statem:call(Pid, info, 1000).
 
+-spec send(pid(), iodata()) -> ok | {error, term()}.
 send(Pid, Data) ->
     gen_statem:call(Pid, {send, Data}).
 
+-spec recv(pid(), non_neg_integer()) -> {ok, binary()} | {error, term()}.
 recv(Pid, Timeout) ->
     gen_statem:call(Pid, {recv, Timeout}, Timeout + 500).
 
+-spec set_mode(pid(), message | queue) -> ok | {error, term()}.
 set_mode(Pid, Mode) when Mode =:= message; Mode =:= queue ->
     gen_statem:call(Pid, {set_mode, Mode}).
 
 %% CONNECT-TCP carries raw bytes only; there is no capsule channel.
+-spec send_capsule(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send_capsule(_Pid, _Type, _Value) ->
     {error, not_supported}.
 

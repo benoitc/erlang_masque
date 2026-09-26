@@ -1,22 +1,23 @@
-%%% @doc Per-tunnel server session for classic CONNECT-TCP over
+%%% Per-tunnel server session for classic CONNECT-TCP over
 %%% HTTP/1.1 (RFC 9110 §9.3.6).
 %%%
-%%% Spawned by `masque_h1_server' after a `CONNECT' method + valid
+%%% Spawned by `masque_h1_server` after a `CONNECT` method + valid
 %%% authority-form request-target passes validation. This session
 %%% takes the raw TLS socket over from the h1 state machine via
-%%% `h1:accept_connect/3' (writes the 200 Connection Established
+%%% `h1:accept_connect/3` (writes the 200 Connection Established
 %%% response atomically, no response-body framing), then bridges
-%%% bytes through the configured `tcp_handler' (default
-%%% `masque_tcp_proxy_handler'), which owns the outbound target
+%%% bytes through the configured `tcp_handler` (default
+%%% `masque_tcp_proxy_handler`), which owns the outbound target
 %%% socket.
 %%%
-%%% Handler contract identical to `masque_tcp_server_session':
-%%% `init/2' opens the target, `handle_data/2' forwards
-%%% client-to-target, `handle_info/2' returns `{send_data, Bytes}'
+%%% Handler contract identical to `masque_tcp_server_session`:
+%%% `init/2` opens the target, `handle_data/2` forwards
+%%% client-to-target, `handle_info/2` returns `{send_data, Bytes}`
 %%% actions for target-to-client. The only difference on this path
-%%% is the proxy-side wire (raw `ssl:send/2', no capsules, no
+%%% is the proxy-side wire (raw `ssl:send/2`, no capsules, no
 %%% Extended CONNECT).
 -module(masque_tcp_h1_server_session).
+-moduledoc false.
 -behaviour(gen_server).
 
 -export([start_link/1]).

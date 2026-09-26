@@ -1,32 +1,31 @@
-%%% @doc Connect-UDP-Bind URI and header helpers.
-%%%
-%%% Sibling of `masque_uri' that adds bind-specific bits the existing
-%%% UDP matcher must not learn about:
-%%%
-%%% <ul>
-%%%   <li>The percent-encoded `*' wildcard for `target_host' /
-%%%       `target_port', meaning "unscoped" - the bind socket can
-%%%       talk to any peer the proxy's policy allows. The standard
-%%%       `masque_uri:match/2' rejects `*' as a host/port, so the
-%%%       dispatch path uses this matcher instead when the
-%%%       `Connect-UDP-Bind' request header is present.</li>
-%%%   <li>Parse and format the two HTTP fields the draft adds:
-%%%       <ul>
-%%%         <li>`Connect-UDP-Bind' - RFC 9651 Boolean. Both endpoints
-%%%             send `?1' to indicate support; bind is only enabled
-%%%             once each side has both sent and received it.</li>
-%%%         <li>`Proxy-Public-Address' - RFC 9651 List of String
-%%%             items, each a `"ip:port"' tuple (IPv6 literals
-%%%             bracketed). Required on a successful bind response;
-%%%             absent / malformed / empty must fail the
-%%%             handshake.</li>
-%%%       </ul></li>
-%%% </ul>
-%%%
-%%% This module is pure - no I/O, no state. It is deliberately
-%%% additive: nothing here changes the behaviour of `masque_uri' for
-%%% legacy CONNECT-UDP requests.
 -module(masque_uri_udp_bind).
+-moduledoc """
+Connect-UDP-Bind URI and header helpers.
+
+Sibling of `masque_uri` that adds bind-specific bits the existing
+UDP matcher must not learn about:
+
+- The percent-encoded `*` wildcard for `target_host` /
+  `target_port`, meaning "unscoped" - the bind socket can
+  talk to any peer the proxy's policy allows. The standard
+  `masque_uri:match/2` rejects `*` as a host/port, so the
+  dispatch path uses this matcher instead when the
+  `Connect-UDP-Bind` request header is present.
+- Parse and format the two HTTP fields the draft adds:
+- `Connect-UDP-Bind` - RFC 9651 Boolean. Both endpoints
+  send `?1` to indicate support; bind is only enabled
+  once each side has both sent and received it.
+- `Proxy-Public-Address` - RFC 9651 List of String
+  items, each a `"ip:port"` tuple (IPv6 literals
+  bracketed). Required on a successful bind response;
+  absent / malformed / empty must fail the
+  handshake.
+  </ul>
+
+This module is pure - no I/O, no state. It is deliberately
+additive: nothing here changes the behaviour of `masque_uri` for
+legacy CONNECT-UDP requests.
+""".
 
 -export([
     match/2,
@@ -73,12 +72,14 @@
 %% URI matching / expansion
 %%====================================================================
 
-%% @doc Match a request path against a CONNECT-UDP URI template,
-%% accepting `*' (or its percent-encoded form `%2A') for both
-%% `target_host' and `target_port' to mean "unscoped bind". Returns a
-%% map carrying the literal target plus a `bind' classification so
-%% the caller can dispatch accordingly. Falls back to the legacy
-%% `masque_uri:match/2' when neither variable is the wildcard.
+-doc """
+Match a request path against a CONNECT-UDP URI template,
+accepting `*` (or its percent-encoded form `%2A`) for both
+`target_host` and `target_port` to mean "unscoped bind". Returns a
+map carrying the literal target plus a `bind` classification so
+the caller can dispatch accordingly. Falls back to the legacy
+`masque_uri:match/2` when neither variable is the wildcard.
+""".
 -spec match(binary(), binary()) ->
     {ok, bind_match()} | {error, no_match | bad_port | bad_host | bad_template}.
 match(Template, Path) when is_binary(Template), is_binary(Path) ->
@@ -152,16 +153,18 @@ parse_port_value(Bin) ->
         _ -> not_port
     end.
 
-%% @doc Expand a CONNECT-UDP URI template for a bind handshake.
-%% Accepts the typed `bind_target()' (`unscoped' or `{Host, Port}')
-%% and a raw `vars()' map; the unscoped form encodes both target
-%% variables as the wildcard `*'.
-%%
-%% The unscoped path goes directly through
-%% `masque_uri_template:expand/2' rather than `masque_uri:expand/2'
-%% because the latter's `vars()' typespec narrows `target_port' to
-%% an integer port number, while we need a wildcard string for an
-%% unscoped bind.
+-doc """
+Expand a CONNECT-UDP URI template for a bind handshake.
+Accepts the typed `bind_target()` (`unscoped` or `{Host, Port}`)
+and a raw `vars()` map; the unscoped form encodes both target
+variables as the wildcard `*`.
+
+The unscoped path goes directly through
+`masque_uri_template:expand/2` rather than `masque_uri:expand/2`
+because the latter's `vars()` typespec narrows `target_port` to
+an integer port number, while we need a wildcard string for an
+unscoped bind.
+""".
 -spec expand(binary(), bind_target() | masque_uri_template:vars()) -> binary().
 expand(Template, unscoped) ->
     expand_with_template(
@@ -194,8 +197,10 @@ expand_with_template(Template, Vars) ->
         {error, _} = Err -> error({bad_template, Err})
     end.
 
-%% @doc Classify a bind target without doing any URI work. Useful for
-%% callers that already hold the parsed values.
+-doc """
+Classify a bind target without doing any URI work. Useful for
+callers that already hold the parsed values.
+""".
 -spec classify(bind_match() | bind_target()) -> unscoped | scoped.
 classify(#{bind := B}) -> B;
 classify(unscoped) -> unscoped;
@@ -205,10 +210,12 @@ classify({_, _}) -> scoped.
 %% Connect-UDP-Bind header (RFC 9651 Boolean)
 %%====================================================================
 
-%% @doc Read the `Connect-UDP-Bind' field from a Headers list.
-%% Per draft-11, invalid value types are treated as absent (the
-%% library returns `invalid' so the caller can choose to log or
-%% reject; the dispatch path treats `invalid' the same as `absent').
+-doc """
+Read the `Connect-UDP-Bind` field from a Headers list.
+Per draft-11, invalid value types are treated as absent (the
+library returns `invalid` so the caller can choose to log or
+reject; the dispatch path treats `invalid` the same as `absent`).
+""".
 -spec parse_bind_header([{binary(), binary()}]) -> bind_header_value().
 parse_bind_header(Headers) when is_list(Headers) ->
     case header_value(?MASQUE_HF_CONNECT_UDP_BIND, Headers) of
@@ -220,8 +227,10 @@ classify_bind_value(<<"?1">>) -> bind;
 classify_bind_value(<<"?0">>) -> absent;
 classify_bind_value(_) -> invalid.
 
-%% @doc The header pair to emit for `Connect-UDP-Bind: ?1' on a
-%% request or response.
+-doc """
+The header pair to emit for `Connect-UDP-Bind: ?1` on a
+request or response.
+""".
 -spec format_bind_header() -> {binary(), binary()}.
 format_bind_header() ->
     {?MASQUE_HF_CONNECT_UDP_BIND, <<"?1">>}.
@@ -230,11 +239,13 @@ format_bind_header() ->
 %% Proxy-Public-Address header (RFC 9651 List of Strings)
 %%====================================================================
 
-%% @doc Parse the `Proxy-Public-Address' field. Distinguishes
-%% `absent', `malformed' (the field is present but does not parse as
-%% a list of `"ip:port"' strings), and `empty' (the list parses but
-%% has zero usable entries) so the bind client can fail the
-%% handshake on any of those.
+-doc """
+Parse the `Proxy-Public-Address` field. Distinguishes
+`absent`, `malformed` (the field is present but does not parse as
+a list of `"ip:port"` strings), and `empty` (the list parses but
+has zero usable entries) so the bind client can fail the
+handshake on any of those.
+""".
 -spec parse_proxy_public_address([{binary(), binary()}]) ->
     {ok, [{inet:ip_address(), inet:port_number()}]}
     | {error, proxy_public_address_error()}.
@@ -250,10 +261,12 @@ parse_proxy_public_address(Headers) when is_list(Headers) ->
             end
     end.
 
-%% @doc Render a list of `{ip, port}' tuples for emission on a
-%% response. Bracket IPv6 literals; quote each entry as a Structured
-%% Field String. Crashes on an empty list - draft-11 requires at
-%% least one valid entry on a successful bind 2xx.
+-doc """
+Render a list of `{ip, port}` tuples for emission on a
+response. Bracket IPv6 literals; quote each entry as a Structured
+Field String. Crashes on an empty list - draft-11 requires at
+least one valid entry on a successful bind 2xx.
+""".
 -spec format_proxy_public_address(
     [{inet:ip_address(), inet:port_number()}]
 ) -> binary().

@@ -1,56 +1,54 @@
-%%% @doc MASQUE handler that chains to an upstream proxy.
-%%%
-%%% Instead of opening a `gen_udp' / `gen_tcp' socket to the resolved
-%%% target (what the built-in UDP / TCP / IP proxy handlers do), this
-%%% handler opens a MASQUE client session to an upstream proxy and
-%%% relays traffic both ways. The result is a two-hop tunnel:
-%%%
-%%% ```
-%%% Client -> Ingress (this handler) -> Egress (upstream) -> Target
-%%% '''
-%%%
-%%% This is the server-side chaining pattern used by Apple Private
-%%% Relay: the client connects to the Ingress; the Ingress chains to
-%%% the Egress transparently.
-%%%
-%%% Covers all three tunnel protocols:
-%%%
-%%% <ul>
-%%%   <li>CONNECT-UDP (`protocol = udp'): packets forwarded via
-%%%       `masque:send/2' both ways.</li>
-%%%   <li>CONNECT-TCP (`protocol = tcp'): bytes forwarded via
-%%%       `masque:send/2' both ways.</li>
-%%%   <li>CONNECT-IP (`protocol = ip'): IP packets forwarded via
-%%%       `masque:send_ip_packet/2'; ROUTE_ADVERTISEMENT and
-%%%       unprompted ADDRESS_ASSIGN (request_id 0) from the upstream
-%%%       are forwarded to the client. A client ADDRESS_REQUEST is
-%%%       forwarded upstream with fresh request ids and the upstream
-%%%       ADDRESS_ASSIGN answer is relayed back under the client's
-%%%       ids.</li>
-%%% </ul>
-%%%
-%%% Configure via `handler_opts':
-%%% <ul>
-%%%   <li>`upstream_proxy := binary()' - URI of the upstream proxy
-%%%       (e.g. `<<"https://egress:4434">>'). Required.</li>
-%%%   <li>`upstream_opts => map()' - options forwarded to
-%%%       `masque:connect/3' for the upstream leg (verify, transports,
-%%%       timeout, etc.). Default `#{}', which verifies the upstream
-%%%       certificate against the system CA store.</li>
-%%%   <li>`allow => fun(target()) -> boolean()' - optional policy
-%%%       gate, same as `masque_udp_proxy_handler'.</li>
-%%% </ul>
-%%%
-%%% Loop detection: every upstream request carries a `via' header
-%%% (RFC 9110 section 7.6.3) listing the hops seen so far plus this
-%%% listener's pseudonym, a random token created when the chain
-%%% listener starts (`via_token' in `handler_opts'; the per-node
-%%% {@link node_token/0} when unset). A request whose `via' already
-%%% names this listener is rejected with `loop_detected' (508,
-%%% Proxy-Status `proxy_loop_detected'), so a chain that points back
-%%% at itself fails instead of recursing, while two chain listeners
-%%% on the same node can still be chained together.
 -module(masque_chain_handler).
+-moduledoc """
+MASQUE handler that chains to an upstream proxy.
+
+Instead of opening a `gen_udp` / `gen_tcp` socket to the resolved
+target (what the built-in UDP / TCP / IP proxy handlers do), this
+handler opens a MASQUE client session to an upstream proxy and
+relays traffic both ways. The result is a two-hop tunnel:
+
+```text
+Client -> Ingress (this handler) -> Egress (upstream) -> Target
+```
+
+This is the server-side chaining pattern used by Apple Private
+Relay: the client connects to the Ingress; the Ingress chains to
+the Egress transparently.
+
+Covers all three tunnel protocols:
+
+- CONNECT-UDP (`protocol = udp`): packets forwarded via
+  `masque:send/2` both ways.
+- CONNECT-TCP (`protocol = tcp`): bytes forwarded via
+  `masque:send/2` both ways.
+- CONNECT-IP (`protocol = ip`): IP packets forwarded via
+  `masque:send_ip_packet/2`; ROUTE_ADVERTISEMENT and
+  unprompted ADDRESS_ASSIGN (request_id 0) from the upstream
+  are forwarded to the client. A client ADDRESS_REQUEST is
+  forwarded upstream with fresh request ids and the upstream
+  ADDRESS_ASSIGN answer is relayed back under the client's
+  ids.
+
+Configure via `handler_opts`:
+- `upstream_proxy := binary()` - URI of the upstream proxy
+  (e.g. `<<"https://egress:4434">>`). Required.
+- `upstream_opts => map()` - options forwarded to
+  `masque:connect/3` for the upstream leg (verify, transports,
+  timeout, etc.). Default `#{}`, which verifies the upstream
+  certificate against the system CA store.
+- `allow => fun(target()) -> boolean()` - optional policy
+  gate, same as `masque_udp_proxy_handler`.
+
+Loop detection: every upstream request carries a `via` header
+(RFC 9110 section 7.6.3) listing the hops seen so far plus this
+listener's pseudonym, a random token created when the chain
+listener starts (`via_token` in `handler_opts`; the per-node
+`node_token/0` when unset). A request whose `via` already
+names this listener is rejected with `loop_detected` (508,
+Proxy-Status `proxy_loop_detected`), so a chain that points back
+at itself fails instead of recursing, while two chain listeners
+on the same node can still be chained together.
+""".
 -behaviour(masque_handler).
 
 -export([
@@ -156,8 +154,10 @@ init(
             {stop, upstream_error(Reason)}
     end.
 
-%% @doc This node's `via' pseudonym. Created by `masque_app' at start;
-%% created on first use when the application is not running.
+-doc """
+This node's `via` pseudonym. Created by `masque_app` at start;
+created on first use when the application is not running.
+""".
 -spec node_token() -> binary().
 node_token() ->
     case persistent_term:get(?TOKEN_KEY, undefined) of
@@ -165,7 +165,9 @@ node_token() ->
         Token -> Token
     end.
 
-%% @doc Create this node's `via' pseudonym unless it already exists.
+-doc """
+Create this node's `via` pseudonym unless it already exists.
+""".
 -spec init_node_token() -> binary().
 init_node_token() ->
     case persistent_term:get(?TOKEN_KEY, undefined) of
@@ -177,8 +179,10 @@ init_node_token() ->
             Token
     end.
 
-%% @doc A fresh random `via' pseudonym. The chain listeners create one
-%% per listener and pass it as `via_token' in `handler_opts'.
+-doc """
+A fresh random `via` pseudonym. The chain listeners create one
+per listener and pass it as `via_token` in `handler_opts`.
+""".
 -spec new_token() -> binary().
 new_token() ->
     Hex = binary:encode_hex(crypto:strong_rand_bytes(8), lowercase),

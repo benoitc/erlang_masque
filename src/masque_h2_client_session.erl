@@ -1,11 +1,12 @@
-%%% @doc Client-side MASQUE CONNECT-UDP session over HTTP/2.
+%%% Client-side MASQUE CONNECT-UDP session over HTTP/2.
 %%%
-%%% Mirrors `masque_client_session' but uses `erlang_h2' as the
+%%% Mirrors `masque_client_session` but uses `erlang_h2` as the
 %%% transport. HTTP/2 has no native datagram channel, so every UDP
 %%% payload is wrapped in a DATAGRAM capsule (RFC 9297 §3.2) and
 %%% carried on the CONNECT request stream body alongside any
 %%% extension capsules.
 -module(masque_h2_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).
@@ -66,26 +67,35 @@
 %% API
 %%====================================================================
 
+-spec start_link(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
 
+-spec start(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start(Target, Opts, Owner) ->
     gen_statem:start(?MODULE, {Target, Opts, Owner}, []).
 
+-spec stop(pid()) -> ok.
 stop(Pid) -> gen_statem:call(Pid, stop, 5000).
+-spec info(pid()) -> map().
 info(Pid) -> gen_statem:call(Pid, info, 1000).
 
+-spec send(pid(), iodata()) -> ok | {error, term()}.
 send(Pid, Data) ->
     send(Pid, ?MASQUE_CONTEXT_ID_UDP, Data).
+-spec send(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send(Pid, ContextId, Data) ->
     gen_statem:call(Pid, {send, ContextId, Data}).
 
+-spec recv(pid(), non_neg_integer()) -> {ok, binary()} | {error, term()}.
 recv(Pid, Timeout) ->
     gen_statem:call(Pid, {recv, Timeout}, Timeout + 500).
 
+-spec set_mode(pid(), message | queue) -> ok | {error, term()}.
 set_mode(Pid, Mode) when Mode =:= message; Mode =:= queue ->
     gen_statem:call(Pid, {set_mode, Mode}).
 
+-spec send_capsule(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send_capsule(Pid, Type, Value) ->
     gen_statem:call(Pid, {send_capsule, Type, Value}).
 

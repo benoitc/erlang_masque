@@ -1,17 +1,18 @@
-%%% @doc Per-tunnel server session for CONNECT-IP (RFC 9484) over
+%%% Per-tunnel server session for CONNECT-IP (RFC 9484) over
 %%% HTTP/1.1.
 %%%
-%%% Spawned by `masque_h1_server' after a `GET' with
-%%% `Upgrade: connect-ip' passes validation. The session calls
-%%% `h1:accept_upgrade/3' in `init/1' so socket ownership lands on
+%%% Spawned by `masque_h1_server` after a `GET` with
+%%% `Upgrade: connect-ip` passes validation. The session calls
+%%% `h1:accept_upgrade/3` in `init/1` so socket ownership lands on
 %%% this gen_server. After the 101 response, the raw TLS socket
 %%% becomes the tunnel; datagrams and control capsules are framed
 %%% via RFC 9297 capsules on that socket.
 %%%
 %%% Wire format is identical to the h2 / h3 paths, so
-%%% `masque_ip_capsule' + `masque_datagram' are reused unchanged;
+%%% `masque_ip_capsule` + `masque_datagram` are reused unchanged;
 %%% only the transport plumbing differs.
 -module(masque_ip_h1_server_session).
+-moduledoc false.
 -behaviour(gen_server).
 
 -export([start_link/1]).

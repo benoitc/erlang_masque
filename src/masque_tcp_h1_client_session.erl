@@ -1,22 +1,23 @@
-%%% @doc Client-side MASQUE CONNECT-TCP session over HTTP/1.1.
+%%% Client-side MASQUE CONNECT-TCP session over HTTP/1.1.
 %%%
 %%% Classic HTTP CONNECT (RFC 9110 §9.3.6 / RFC 9112 §3.2.3). This is
 %%% the method every HTTPS proxy has spoken for decades: the client
-%%% writes `CONNECT host:port HTTP/1.1' with a `Host' header, the
-%%% server replies `200 Connection Established', and the raw TLS
+%%% writes `CONNECT host:port HTTP/1.1` with a `Host` header, the
+%%% server replies `200 Connection Established`, and the raw TLS
 %%% socket then carries arbitrary TCP bytes both ways. Not Extended
-%%% CONNECT, no `:protocol', no capsules.
+%%% CONNECT, no `:protocol`, no capsules.
 %%%
-%%% Intentionally bypasses `h1_connection': after the 200, the
+%%% Intentionally bypasses `h1_connection`: after the 200, the
 %%% connection is no longer HTTP, so driving it through the h1 state
 %%% machine gains nothing and actively conflicts with the tunnel
-%%% handoff ({@link h1:accept_connect/3} is the server-side analogue
+%%% handoff (`h1:accept_connect/3` is the server-side analogue
 %%% the listener uses).
 %%%
-%%% Cleartext is out of scope: we only open `ssl:connect/4' with
-%%% ALPN `http/1.1'. This matches the TLS-only contract documented in
+%%% Cleartext is out of scope: we only open `ssl:connect/4` with
+%%% ALPN `http/1.1`. This matches the TLS-only contract documented in
 %%% the h1 fallback plan.
 -module(masque_tcp_h1_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).
@@ -53,29 +54,38 @@
 %% API
 %%====================================================================
 
+-spec start_link(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
 
+-spec start(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start(Target, Opts, Owner) ->
     gen_statem:start(?MODULE, {Target, Opts, Owner}, []).
 
+-spec stop(pid()) -> ok.
 stop(Pid) -> gen_statem:call(Pid, stop, 5000).
+-spec info(pid()) -> map().
 info(Pid) -> gen_statem:call(Pid, info, 1000).
 
+-spec send(pid(), iodata()) -> ok | {error, term()}.
 send(Pid, Data) ->
     gen_statem:call(Pid, {send, Data}).
 
+-spec recv(pid(), non_neg_integer()) -> {ok, binary()} | {error, term()}.
 recv(Pid, Timeout) ->
     gen_statem:call(Pid, {recv, Timeout}, Timeout + 500).
 
+-spec set_mode(pid(), message | queue) -> ok | {error, term()}.
 set_mode(Pid, Mode) when Mode =:= message; Mode =:= queue ->
     gen_statem:call(Pid, {set_mode, Mode}).
 
+-spec shutdown_write(pid()) -> ok | {error, term()}.
 shutdown_write(Pid) ->
     gen_statem:call(Pid, shutdown_write).
 
 %% CONNECT-TCP has no capsule channel; accept the call for API
 %% symmetry and surface a clear error.
+-spec send_capsule(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send_capsule(_Pid, _Type, _Value) ->
     {error, not_supported}.
 

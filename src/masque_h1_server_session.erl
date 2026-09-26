@@ -1,16 +1,17 @@
-%%% @doc Per-tunnel server session for HTTP/1.1 MASQUE (CONNECT-UDP).
+%%% Per-tunnel server session for HTTP/1.1 MASQUE (CONNECT-UDP).
 %%%
-%%% Spawned by the h1 request-handler after a `GET' with
-%%% `Upgrade: connect-udp' passes validation. The session itself calls
-%%% `h1:accept_upgrade/3' so that socket ownership lands on this
+%%% Spawned by the h1 request-handler after a `GET` with
+%%% `Upgrade: connect-udp` passes validation. The session itself calls
+%%% `h1:accept_upgrade/3` so that socket ownership lands on this
 %%% process (the h1 connection transfers controlling_process to the
 %%% caller of accept_upgrade).
 %%%
 %%% After the 101 response the raw TLS socket becomes the tunnel.
 %%% Datagrams flow as RFC 9297 DATAGRAM capsules; the capsule wire
-%%% format is identical to the h2 / h3 paths so `masque_datagram' and
-%%% `masque_capsule' are reused unchanged.
+%%% format is identical to the h2 / h3 paths so `masque_datagram` and
+%%% `masque_capsule` are reused unchanged.
 -module(masque_h1_server_session).
+-moduledoc false.
 -behaviour(gen_server).
 
 -export([start_link/1]).

@@ -1,22 +1,21 @@
-%%% @doc Client-side CONNECT-IP session (RFC 9484).
+%%% Client-side CONNECT-IP session (RFC 9484).
 %%%
-%%% One `gen_statem' per tunnel, transport-generic: the same module
-%%% drives both HTTP/3 (`quic_h3', QUIC DATAGRAM frames) and HTTP/2
-%%% (`erlang_h2', RFC 9297 DATAGRAM-type capsules on the stream body)
-%%% by dispatching on a `transport :: h3 | h2' field — following the
-%%% architecture already used by `masque_tcp_client_session'.
+%%% One `gen_statem` per tunnel, transport-generic: the same module
+%%% drives both HTTP/3 (`quic_h3`, QUIC DATAGRAM frames) and HTTP/2
+%%% (`erlang_h2`, RFC 9297 DATAGRAM-type capsules on the stream body)
+%%% by dispatching on a `transport :: h3 | h2` field — following the
+%%% architecture already used by `masque_tcp_client_session`.
 %%%
-%%% Owner-side events (the process that called `masque:connect/3'):
+%%% Owner-side events (the process that called `masque:connect/3`):
 %%%
-%%% <ul>
-%%%  <li>`{masque_ip_packet,           Sess, Packet}'</li>
-%%%  <li>`{masque_address_assign,      Sess, [ip_assignment()]}'</li>
-%%%  <li>`{masque_address_request,     Sess, [ip_prefix_request()]}'</li>
-%%%  <li>`{masque_route_advertisement, Sess, [ip_route()]}'</li>
-%%%  <li>`{masque_ip_error,            Sess, Reason}'</li>
-%%%  <li>`{masque_closed,              Sess, Reason}'</li>
-%%% </ul>
+%%% - `{masque_ip_packet,           Sess, Packet}`
+%%% - `{masque_address_assign,      Sess, [ip_assignment()]}`
+%%% - `{masque_address_request,     Sess, [ip_prefix_request()]}`
+%%% - `{masque_route_advertisement, Sess, [ip_route()]}`
+%%% - `{masque_ip_error,            Sess, Reason}`
+%%% - `{masque_closed,              Sess, Reason}`
 -module(masque_ip_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).
@@ -91,28 +90,34 @@
 %% API
 %%====================================================================
 
+-spec start_link(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
 
+-spec start(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start(Target, Opts, Owner) ->
     gen_statem:start(?MODULE, {Target, Opts, Owner}, []).
 
+-spec stop(pid()) -> ok.
 stop(Pid) -> gen_statem:call(Pid, stop, 5000).
+-spec info(pid()) -> map().
 info(Pid) -> gen_statem:call(Pid, info, 1000).
 
-%% @doc Send a full IP packet through the tunnel.
+%% Send a full IP packet through the tunnel.
 -spec send_ip_packet(pid(), binary()) -> ok | {error, term()}.
 send_ip_packet(Pid, Packet) when is_binary(Packet) ->
     gen_statem:call(Pid, {send_ip_packet, Packet}).
 
-%% @doc Block for the next inbound IP packet when in `queue' mode.
+%% Block for the next inbound IP packet when in `queue` mode.
+-spec recv(pid(), non_neg_integer()) -> {ok, binary()} | {error, term()}.
 recv(Pid, Timeout) ->
     gen_statem:call(Pid, {recv, Timeout}, Timeout + 500).
 
+-spec set_mode(pid(), message | queue) -> ok | {error, term()}.
 set_mode(Pid, Mode) when Mode =:= message; Mode =:= queue ->
     gen_statem:call(Pid, {set_mode, Mode}).
 
-%% @doc Send an ADDRESS_REQUEST capsule asking the server to assign
+%% Send an ADDRESS_REQUEST capsule asking the server to assign
 %% addresses matching the given prefixes. Returns the list of
 %% allocated Request IDs (strictly nonzero).
 -spec request_addresses(pid(), [{4 | 6, inet:ip_address(), non_neg_integer()}]) ->
@@ -120,7 +125,7 @@ set_mode(Pid, Mode) when Mode =:= message; Mode =:= queue ->
 request_addresses(Pid, Prefixes) ->
     gen_statem:call(Pid, {request_addresses, Prefixes}).
 
-%% @doc Send an ADDRESS_ASSIGN capsule. Nonzero Request IDs must
+%% Send an ADDRESS_ASSIGN capsule. Nonzero Request IDs must
 %% match an outstanding peer ADDRESS_REQUEST (tracked in the
 %% session's pending set); ID 0 is unprompted and always accepted.
 -spec assign_addresses(pid(), [masque_ip_capsule:address_entry()]) ->
@@ -128,7 +133,7 @@ request_addresses(Pid, Prefixes) ->
 assign_addresses(Pid, Assignments) ->
     gen_statem:call(Pid, {assign_addresses, Assignments}).
 
-%% @doc Send a ROUTE_ADVERTISEMENT capsule.
+%% Send a ROUTE_ADVERTISEMENT capsule.
 -spec advertise_routes(pid(), [masque_ip_capsule:route_entry()]) ->
     ok | {error, term()}.
 advertise_routes(Pid, Routes) ->
@@ -138,6 +143,7 @@ advertise_routes(Pid, Routes) ->
 ip_info(Pid) ->
     gen_statem:call(Pid, ip_info, 1000).
 
+-spec send_capsule(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send_capsule(Pid, Type, Value) ->
     gen_statem:call(Pid, {send_capsule, Type, Value}).
 

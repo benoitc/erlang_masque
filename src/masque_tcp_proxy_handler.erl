@@ -1,31 +1,31 @@
-%%% @doc Built-in MASQUE handler that bridges a CONNECT-TCP tunnel to
-%%% a real TCP connection on the server.
-%%%
-%%% For every accepted tunnel the handler resolves the target host,
-%%% opens a `gen_tcp' connection, and relays bytes both ways:
-%%%
-%%% <ul>
-%%%   <li>Client-to-target: `handle_data/2' writes bytes to the TCP socket.</li>
-%%%   <li>Target-to-client: `{tcp, Socket, Bytes}' messages arrive on the
-%%%       session and are emitted as `{send_data, Bytes}' actions.</li>
-%%%   <li>Client FIN: `handle_eof/1' shuts down the write side of the
-%%%       socket; target bytes keep flowing to the client.</li>
-%%%   <li>Target FIN: `{tcp_closed, Socket}' ends the stream toward the
-%%%       client with FIN; client bytes keep flowing to the target.</li>
-%%% </ul>
-%%%
-%%% The tunnel ends once both directions have seen FIN. A half-closed
-%%% tunnel with no traffic for 30 seconds ends with `eof_timeout'.
-%%%
-%%% The socket runs in `{active, N}' mode (`active_n', default 16).
-%%% After N messages it pauses; the `tcp_passive' notice is handled
-%%% only once the session has written every earlier chunk to the
-%%% tunnel, so a slow client stalls reads from the target instead of
-%%% growing the session mailbox.
-%%%
-%%% Accepts the same policy hooks as the UDP proxy (`allow', `resolver',
-%%% `family'), plus `connect_timeout' (default 5000 ms).
 -module(masque_tcp_proxy_handler).
+-moduledoc """
+Built-in MASQUE handler that bridges a CONNECT-TCP tunnel to
+a real TCP connection on the server.
+
+For every accepted tunnel the handler resolves the target host,
+opens a `gen_tcp` connection, and relays bytes both ways:
+
+- Client-to-target: `handle_data/2` writes bytes to the TCP socket.
+- Target-to-client: `{tcp, Socket, Bytes}` messages arrive on the
+  session and are emitted as `{send_data, Bytes}` actions.
+- Client FIN: `handle_eof/1` shuts down the write side of the
+  socket; target bytes keep flowing to the client.
+- Target FIN: `{tcp_closed, Socket}` ends the stream toward the
+  client with FIN; client bytes keep flowing to the target.
+
+The tunnel ends once both directions have seen FIN. A half-closed
+tunnel with no traffic for 30 seconds ends with `eof_timeout`.
+
+The socket runs in `{active, N}` mode (`active_n`, default 16).
+After N messages it pauses; the `tcp_passive` notice is handled
+only once the session has written every earlier chunk to the
+tunnel, so a slow client stalls reads from the target instead of
+growing the session mailbox.
+
+Accepts the same policy hooks as the UDP proxy (`allow`, `resolver`,
+`family`), plus `connect_timeout` (default 5000 ms).
+""".
 -behaviour(masque_handler).
 
 -export([

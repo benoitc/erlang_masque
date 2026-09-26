@@ -1,26 +1,27 @@
-%%% @doc MASQUE CONNECT-UDP proxy listener.
+%%% HTTP/3 listener for every MASQUE protocol (CONNECT-UDP, CONNECT-TCP,
+%%% CONNECT-IP, Connect-UDP-Bind).
 %%%
 %%% Two public entry points:
 %%%
-%%% <ul>
-%%%   <li>{@link start_listener/2} starts a dedicated `quic_h3' server
-%%%       that handles MASQUE end-to-end; the usual case for a pure
-%%%       MASQUE proxy.</li>
-%%%   <li>{@link h3_handlers/1} returns the `handler' and
-%%%       `connection_handler' functions that a caller can splat into
-%%%       their own `quic_h3:start_server/3' opts. This lets users who
-%%%       already run an HTTP/3 service add CONNECT-UDP support without
-%%%       giving up ownership of the listener; non-MASQUE requests can
-%%%       be routed to a `fallback' fun.</li>
-%%% </ul>
+%%% - `start_listener/2` starts a dedicated `quic_h3` server
+%%%   that handles MASQUE end-to-end; the usual case for a pure
+%%%   MASQUE proxy.
+%%% - `h3_handlers/1` returns the `handler` and
+%%%   `connection_handler` functions that a caller can splat into
+%%%   their own `quic_h3:start_server/3` opts. This lets users who
+%%%   already run an HTTP/3 service add MASQUE support without
+%%%   giving up ownership of the listener; non-MASQUE requests can
+%%%   be routed to a `fallback` fun.
 %%%
 %%% For each inbound request the handler validates the Extended
-%%% CONNECT envelope per RFC 9298, matches the `:path' against the
-%%% configured URI template, and either accepts the tunnel (2xx
+%%% CONNECT envelope, matches the `:path` against the configured URI
+%%% templates, and either starts a session through the connection's
+%%% router, `masque_server_connection` (2xx
 %%% response, stream left open for subsequent datagrams) or rejects
-%%% with the HTTP status selected by `masque_errors:handshake_status/1'
-%%% (or defers to the caller's `fallback' fun when provided).
+%%% with the HTTP status selected by `masque_errors:handshake_status/1`
+%%% (or defers to the caller's `fallback` fun when provided).
 -module(masque_server).
+-moduledoc false.
 
 -export([handler_opt_keys/0]).
 -export([
@@ -35,18 +36,8 @@
 -type listener_name() :: atom().
 -type listener_opts() :: masque:listener_opts().
 
--type h3_handler_fun() ::
-    fun(
-        (
-            Conn :: pid(),
-            StreamId :: non_neg_integer(),
-            Method :: binary(),
-            Path :: binary(),
-            Headers :: [{binary(), binary()}]
-        ) -> any()
-    ).
-
--type connection_handler_fun() :: fun((pid()) -> map()).
+-type h3_handler_fun() :: masque:h3_handler_fun().
+-type connection_handler_fun() :: masque:connection_handler_fun().
 
 -export_type([
     listener_name/0,
@@ -59,13 +50,13 @@
 %% API
 %%====================================================================
 
-%% @doc Start a MASQUE listener as a dedicated `quic_h3' server.
+%% Start a MASQUE listener as a dedicated `quic_h3` server.
 %%
-%% Required keys: `port', `cert', `key' (DER-encoded, same shape as
-%% `quic_h3:start_server/3' expects). Optional `uri_template' defaults
-%% to RFC 9298's well-known path; optional `handler' defaults to
-%% `masque_udp_proxy_handler'; optional `fallback' is invoked for
-%% requests that are not CONNECT-UDP tunnels (see `h3_handlers/1').
+%% Required keys: `port`, `cert`, `key` (DER-encoded, same shape as
+%% `quic_h3:start_server/3` expects). Optional `uri_template` defaults
+%% to RFC 9298's well-known path; optional `handler` defaults to
+%% `masque_udp_proxy_handler`; optional `fallback` is invoked for
+%% requests that are not CONNECT-UDP tunnels (see `h3_handlers/1`).
 -spec start_listener(listener_name(), listener_opts()) ->
     {ok, pid()} | {error, term()}.
 start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
@@ -102,36 +93,18 @@ build_quic_opts(Opts) ->
         false -> Base
     end.
 
-%% @doc Stop a MASQUE listener.
+%% Stop a MASQUE listener.
 -spec stop_listener(listener_name()) -> ok | {error, term()}.
 stop_listener(Name) ->
     persistent_term:erase({masque_drain, Name}),
     quic_h3:stop_server(Name).
 
-%% @doc Return the `handler' and `connection_handler' functions for a
+%% Return the `handler` and `connection_handler` functions for a
 %% MASQUE proxy, in a shape that can be dropped into a user-owned
-%% `quic_h3:start_server/3' call.
+%% `quic_h3:start_server/3` call.
 %%
-%% Accepted keys (all optional unless noted):
-%% <ul>
-%%   <li>`uri_template' - RFC 6570 template, default the RFC 9298
-%%       well-known path template.</li>
-%%   <li>`handler' - module implementing the {@link masque_handler}
-%%       behaviour, default `masque_udp_proxy_handler'.</li>
-%%   <li>`handler_opts' - arbitrary term passed to the handler module's
-%%       `init/2' callback.</li>
-%%   <li>`fallback' - `fun(Conn, StreamId, Method, Path, Headers) -> any()'
-%%       invoked when the request is not a CONNECT-UDP tunnel. Absent
-%%       → non-MASQUE requests are rejected with 405/501/404 as
-%%       appropriate.</li>
-%% </ul>
-%%
-%% Caveat: MASQUE must be the H3 connection's `owner' (HTTP Datagrams
-%% are delivered to that pid), so the returned `connection_handler'
-%% overrides the listener-wide owner. Sharing a single `quic_h3'
-%% connection with another extension that also needs the `owner' slot
-%% (e.g. WebTransport) is not supported in v0.1; run those on separate
-%% listeners.
+%% The options and the owner caveat are documented on
+%% `masque:h3_handlers/1`.
 -spec h3_handlers(map()) ->
     #{
         handler := h3_handler_fun(),
@@ -581,8 +554,8 @@ header(Name, Headers, Default) ->
         false -> Default
     end.
 
-%% @doc Listener options that every listener (h3, h2, h1) copies into
-%% `handler_opts'. A key already present in `handler_opts' wins.
+%% Listener options that every listener (h3, h2, h1) copies into
+%% `handler_opts`. A key already present in `handler_opts` wins.
 -spec handler_opt_keys() -> [atom()].
 handler_opt_keys() ->
     [

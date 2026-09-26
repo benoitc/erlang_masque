@@ -1,14 +1,15 @@
-%%% @doc Client-side MASQUE CONNECT-UDP session over HTTP/1.1.
+%%% Client-side MASQUE CONNECT-UDP session over HTTP/1.1.
 %%%
 %%% Runs the RFC 9298 handshake as an HTTP/1.1 Upgrade
-%%% (`Upgrade: connect-udp') and, after the 101 response, drives
+%%% (`Upgrade: connect-udp`) and, after the 101 response, drives
 %%% RFC 9297 capsules directly on the raw TLS socket. DATAGRAM
 %%% capsules carry the UDP payload; extension capsules are opaque.
 %%%
 %%% The on-wire shape of a DATAGRAM capsule is identical to the h2
-%%% and h3 paths, so `masque_datagram' and `masque_capsule' are
+%%% and h3 paths, so `masque_datagram` and `masque_capsule` are
 %%% reused unchanged; only the transport plumbing differs.
 -module(masque_h1_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).
@@ -68,26 +69,35 @@
 %% API
 %%====================================================================
 
+-spec start_link(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
 
+-spec start(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start(Target, Opts, Owner) ->
     gen_statem:start(?MODULE, {Target, Opts, Owner}, []).
 
+-spec stop(pid()) -> ok.
 stop(Pid) -> gen_statem:call(Pid, stop, 5000).
+-spec info(pid()) -> map().
 info(Pid) -> gen_statem:call(Pid, info, 1000).
 
+-spec send(pid(), iodata()) -> ok | {error, term()}.
 send(Pid, Data) ->
     send(Pid, ?MASQUE_CONTEXT_ID_UDP, Data).
+-spec send(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send(Pid, ContextId, Data) ->
     gen_statem:call(Pid, {send, ContextId, Data}).
 
+-spec recv(pid(), non_neg_integer()) -> {ok, binary()} | {error, term()}.
 recv(Pid, Timeout) ->
     gen_statem:call(Pid, {recv, Timeout}, Timeout + 500).
 
+-spec set_mode(pid(), message | queue) -> ok | {error, term()}.
 set_mode(Pid, Mode) when Mode =:= message; Mode =:= queue ->
     gen_statem:call(Pid, {set_mode, Mode}).
 
+-spec send_capsule(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send_capsule(Pid, Type, Value) ->
     gen_statem:call(Pid, {send_capsule, Type, Value}).
 

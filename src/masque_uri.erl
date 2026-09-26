@@ -1,17 +1,19 @@
-%%% @doc URI template handling for RFC 9298 CONNECT-UDP and the
-%%% CONNECT-TCP draft.
-%%%
-%%% RFC 9298 §3 defines the request path as the expansion of a URI
-%%% template with two variables - `target_host` and `target_port`.
-%%% `target_host` may be an IPv4 literal, an IPv6 literal, or a
-%%% registered name; colons and any non-unreserved characters are
-%%% percent-encoded on the wire.
-%%%
-%%% The template engine now lives in `masque_uri_template'; this
-%%% module is a thin UDP/TCP facade that keeps its historical public
-%%% API shape and does the UDP-specific validation (`target_host'
-%%% reg-name / IP literal rules, `target_port' integer range).
 -module(masque_uri).
+-moduledoc """
+URI template handling for RFC 9298 CONNECT-UDP and the
+CONNECT-TCP draft.
+
+RFC 9298 §3 defines the request path as the expansion of a URI
+template with two variables - `target_host` and `target_port`.
+`target_host` may be an IPv4 literal, an IPv6 literal, or a
+registered name; colons and any non-unreserved characters are
+percent-encoded on the wire.
+
+The template engine is `masque_uri_template`; this module is the
+UDP/TCP layer on top of it and does the target validation
+(`target_host` reg-name / IP literal rules, `target_port` integer
+range). It also formats and parses `host:port` authorities.
+""".
 
 -export([expand/2, match/2, to_path/1, valid_host/1]).
 -export([build_authority/2, parse_authority_form/1]).
@@ -29,10 +31,12 @@
 %% API
 %%====================================================================
 
-%% @doc Expand a URI template using `Vars'. Returns the absolute path
-%% to place in the `:path' pseudo-header. Absolute `http(s)://...'
-%% templates are accepted - only the path-and-onwards portion is
-%% expanded, mirroring what servers actually match at runtime.
+-doc """
+Expand a URI template using `Vars`. Returns the absolute path
+to place in the `:path` pseudo-header. Absolute `http(s)://...`
+templates are accepted - only the path-and-onwards portion is
+expanded, mirroring what servers actually match at runtime.
+""".
 -spec expand(template(), vars()) -> binary().
 expand(Template, Vars) when is_binary(Template), is_map(Vars) ->
     PathTpl = to_path(Template),
@@ -43,11 +47,13 @@ expand(Template, Vars) when is_binary(Template), is_map(Vars) ->
             error({bad_template, Err})
     end.
 
-%% @doc Match a request path against a template.
-%%
-%% Returns `{ok, #{target_host := Host, target_port := Port}}' on
-%% success with `Host' as a binary (percent-decoded) and `Port' as an
-%% integer in `1..65535'. Returns `{error, Reason}' otherwise.
+-doc """
+Match a request path against a template.
+
+Returns `{ok, #{target_host := Host, target_port := Port}}` on
+success with `Host` as a binary (percent-decoded) and `Port` as an
+integer in `1..65535`. Returns `{error, Reason}` otherwise.
+""".
 -spec match(template(), binary()) ->
     {ok, #{target_host := binary(), target_port := 1..65535}}
     | {error, no_match | bad_port | bad_host | bad_template}.
@@ -80,8 +86,10 @@ match_with(T, Path) ->
             {error, bad_host}
     end.
 
-%% @doc Strip an absolute `http(s)://…' template to its path portion.
-%% Path-shaped templates pass through unchanged.
+-doc """
+Strip an absolute `http(s)://…` template to its path portion.
+Path-shaped templates pass through unchanged.
+""".
 -spec to_path(binary()) -> binary().
 to_path(<<"http://", Rest/binary>>) -> drop_authority(Rest);
 to_path(<<"https://", Rest/binary>>) -> drop_authority(Rest);
@@ -96,11 +104,13 @@ drop_authority(Rest) ->
             <<"/">>
     end.
 
-%% @doc Validate `Host' as an IPv4 literal, IPv6 literal, or LDH
-%% registered name. IP literals follow {@link parse_ip_literal/1};
-%% a name whose last label looks numeric (`127.1', `0x7f.0.0.1') is
-%% rejected rather than left to a resolver that would read it as an
-%% address.
+-doc """
+Validate `Host` as an IPv4 literal, IPv6 literal, or LDH
+registered name. IP literals follow `parse_ip_literal/1`;
+a name whose last label looks numeric (`127.1`, `0x7f.0.0.1`) is
+rejected rather than left to a resolver that would read it as an
+address.
+""".
 -spec valid_host(binary()) -> boolean().
 valid_host(<<>>) ->
     false;
@@ -110,10 +120,12 @@ valid_host(Host) when is_binary(Host) ->
         error -> valid_reg_name(Host)
     end.
 
-%% @doc Parse a strict IP literal: an IPv4 dotted quad of four decimal
-%% octets without leading zeros, or an IPv6 address. Shorthand, hex and
-%% octal IPv4 forms and IPv6 zone identifiers (`fe80::1%eth0', which
-%% RFC 3986 excludes from URI host syntax) are rejected.
+-doc """
+Parse a strict IP literal: an IPv4 dotted quad of four decimal
+octets without leading zeros, or an IPv6 address. Shorthand, hex and
+octal IPv4 forms and IPv6 zone identifiers (`fe80::1%eth0`, which
+RFC 3986 excludes from URI host syntax) are rejected.
+""".
 -spec parse_ip_literal(binary()) -> {ok, inet:ip_address()} | error.
 parse_ip_literal(Bin) when is_binary(Bin) ->
     S = binary_to_list(Bin),
@@ -128,8 +140,10 @@ parse_ip_literal(Bin) when is_binary(Bin) ->
         {error, _} -> error
     end.
 
-%% @doc Parse a decimal integer in `0..Max': ASCII digits only, no
-%% sign, no leading zeros.
+-doc """
+Parse a decimal integer in `0..Max`: ASCII digits only, no
+sign, no leading zeros.
+""".
 -spec parse_uint(binary(), non_neg_integer()) -> {ok, non_neg_integer()} | error.
 parse_uint(<<"0">>, _Max) ->
     {ok, 0};
@@ -191,9 +205,11 @@ parse_port(_) ->
 %% Authority helpers (for CONNECT-TCP request-target + Host header)
 %%====================================================================
 
-%% @doc Format a `host:port' authority. IPv6 literals are wrapped in
-%% square brackets per RFC 3986 §3.2.2. Used on the client side to
-%% build the CONNECT request-target and `Host' header.
+-doc """
+Format a `host:port` authority. IPv6 literals are wrapped in
+square brackets per RFC 3986 §3.2.2. Used on the client side to
+build the CONNECT request-target and `Host` header.
+""".
 -spec build_authority(binary(), inet:port_number()) -> binary().
 build_authority(Host, Port) when is_binary(Host), is_integer(Port) ->
     HostPart =
@@ -203,10 +219,12 @@ build_authority(Host, Port) when is_binary(Host), is_integer(Port) ->
         end,
     iolist_to_binary([HostPart, ":", integer_to_binary(Port)]).
 
-%% @doc Parse the authority-form of a request-target used by classic
-%% CONNECT (RFC 9112 §3.2.3): `host:port' or `[ipv6]:port'. Strips the
-%% brackets from the IPv6 literal on the way out. Rejects malformed
-%% inputs (missing port, non-numeric port, empty host).
+-doc """
+Parse the authority-form of a request-target used by classic
+CONNECT (RFC 9112 §3.2.3): `host:port` or `[ipv6]:port`. Strips the
+brackets from the IPv6 literal on the way out. Rejects malformed
+inputs (missing port, non-numeric port, empty host).
+""".
 -spec parse_authority_form(binary()) ->
     {ok, binary(), inet:port_number()} | {error, term()}.
 parse_authority_form(<<"[", Rest/binary>>) ->

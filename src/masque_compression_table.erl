@@ -1,64 +1,60 @@
-%%% @doc Per-session Connect-UDP-Bind compression table.
-%%%
-%%% Two of these live in every bind session, one per role:
-%%% <ul>
-%%%   <li><b>own</b> table - context-IDs we have opened on the peer
-%%%       via outbound `COMPRESSION_ASSIGN'. Allocations follow the
-%%%       parity rule (client uses even IDs, proxy uses odd).</li>
-%%%   <li><b>peer</b> table - context-IDs the peer has opened on us
-%%%       via incoming `COMPRESSION_ASSIGN'. We installed them; we
-%%%       look up by ID on receipt of a datagram and by tuple when
-%%%       compressing outbound traffic to a peer we already have a
-%%%       mapping for.</li>
-%%% </ul>
-%%%
-%%% Draft-ietf-masque-connect-udp-listen-11 invariants enforced here:
-%%%
-%%% <ul>
-%%%   <li>Parity: client-even / proxy-odd context-IDs on `open'.
-%%%       Cross-parity from the peer is malformed on `install'.</li>
-%%%   <li>Duplicate context-ID is malformed.</li>
-%%%   <li>Per-tuple uniqueness with the two distinct draft-11 cases:
-%%%     <ul>
-%%%       <li>Cross-side conflict: peer ASSIGNs a tuple our side
-%%%           already opened. `install/3' (given the own table)
-%%%           returns `{conflict, close_proxy_id, Id}' so the session
-%%%           can send the matching `COMPRESSION_CLOSE'.</li>
-%%%       <li>Same-side conflict: peer ASSIGNs a tuple it already
-%%%           has open. Returned as
-%%%           `{error, malformed_duplicate_tuple}'; the session
-%%%           aborts the request stream.</li>
-%%%     </ul></li>
-%%%   <li>Uncompressed (IP Version 0) asymmetry:
-%%%     <ul>
-%%%       <li>`open_uncompressed/1' on a proxy-side own table
-%%%           returns `{error, uncompressed_only_from_client}'.</li>
-%%%       <li>The proxy-side peer table accepts an incoming version-0
-%%%           ASSIGN (the client opened it).</li>
-%%%       <li>The client-side peer table rejects an incoming
-%%%           version-0 ASSIGN (only the client may originate
-%%%           uncompressed mappings).</li>
-%%%     </ul></li>
-%%%   <li>Singleton uncompressed: at most one open IP Version 0
-%%%       mapping per session. Second `open_uncompressed/1' returns
-%%%       `{error, uncompressed_context_already_open}'; second
-%%%       incoming version-0 ASSIGN is malformed.</li>
-%%%   <li>Post-close prohibition: once the client's uncompressed
-%%%       mapping has been closed, the proxy must not open new
-%%%       compressed mappings. The proxy session reports the closure
-%%%       with `mark_uncompressed_closed/1'; `open_compressed/2' then
-%%%       returns `{error, uncompressed_closed}' on that proxy-side own
-%%%       table.</li>
-%%%   <li>Address-family gating: `open_compressed/2' for a family not
-%%%       in the advertised list returns `{error, unadvertised_family}';
-%%%       the same family check applies to `install/2'.</li>
-%%%   <li>Bounds (`max_in', `max_out') on the peer / own tables to
-%%%       limit memory in the face of a hostile peer.</li>
-%%% </ul>
-%%%
-%%% This module is pure data. No process, no I/O. Sessions thread the
-%%% returned `state()' through their gen_server state.
 -module(masque_compression_table).
+-moduledoc """
+Per-session Connect-UDP-Bind compression table.
+
+Two of these live in every bind session, one per role:
+- **own** table - context-IDs we have opened on the peer
+  via outbound `COMPRESSION_ASSIGN`. Allocations follow the
+  parity rule (client uses even IDs, proxy uses odd).
+- **peer** table - context-IDs the peer has opened on us
+  via incoming `COMPRESSION_ASSIGN`. We installed them; we
+  look up by ID on receipt of a datagram and by tuple when
+  compressing outbound traffic to a peer we already have a
+  mapping for.
+
+Draft-ietf-masque-connect-udp-listen-11 invariants enforced here:
+
+- Parity: client-even / proxy-odd context-IDs on `open`.
+  Cross-parity from the peer is malformed on `install`.
+- Duplicate context-ID is malformed.
+- Per-tuple uniqueness with the two distinct draft-11 cases:
+- Cross-side conflict: peer ASSIGNs a tuple our side
+  already opened. `install/3` (given the own table)
+  returns `{conflict, close_proxy_id, Id}` so the session
+  can send the matching `COMPRESSION_CLOSE`.
+- Same-side conflict: peer ASSIGNs a tuple it already
+  has open. Returned as
+  `{error, malformed_duplicate_tuple}`; the session
+  aborts the request stream.
+  </ul>
+- Uncompressed (IP Version 0) asymmetry:
+- `open_uncompressed/1` on a proxy-side own table
+  returns `{error, uncompressed_only_from_client}`.
+- The proxy-side peer table accepts an incoming version-0
+  ASSIGN (the client opened it).
+- The client-side peer table rejects an incoming
+  version-0 ASSIGN (only the client may originate
+  uncompressed mappings).
+  </ul>
+- Singleton uncompressed: at most one open IP Version 0
+  mapping per session. Second `open_uncompressed/1` returns
+  `{error, uncompressed_context_already_open}`; second
+  incoming version-0 ASSIGN is malformed.
+- Post-close prohibition: once the client's uncompressed
+  mapping has been closed, the proxy must not open new
+  compressed mappings. The proxy session reports the closure
+  with `mark_uncompressed_closed/1`; `open_compressed/2` then
+  returns `{error, uncompressed_closed}` on that proxy-side own
+  table.
+- Address-family gating: `open_compressed/2` for a family not
+  in the advertised list returns `{error, unadvertised_family}`;
+  the same family check applies to `install/2`.
+- Bounds (`max_in`, `max_out`) on the peer / own tables to
+  limit memory in the face of a hostile peer.
+
+This module is pure data. No process, no I/O. Sessions thread the
+returned `state()` through their gen_server state.
+""".
 
 -export([
     new_own/2,
@@ -148,10 +144,12 @@
 %% Constructors
 %%====================================================================
 
-%% @doc Build a fresh "own" table - the one that allocates outbound
-%% context-IDs. `role' decides the parity. `Opts' may set
-%% `advertised_families' (default `[4,6]') and `max_entries'
-%% (default 1024).
+-doc """
+Build a fresh "own" table - the one that allocates outbound
+context-IDs. `role` decides the parity. `Opts` may set
+`advertised_families` (default `[4,6]`) and `max_entries`
+(default 1024).
+""".
 -spec new_own(role(), map()) -> state().
 new_own(Role, Opts) ->
     #state{
@@ -163,9 +161,11 @@ new_own(Role, Opts) ->
         max_entries = maps:get(max_entries, Opts, 1024)
     }.
 
-%% @doc Build a fresh "peer" table - the one that records incoming
-%% `COMPRESSION_ASSIGN's from the peer. The peer's parity is the
-%% opposite of `Role'.
+-doc """
+Build a fresh "peer" table - the one that records incoming
+`COMPRESSION_ASSIGN`s from the peer. The peer's parity is the
+opposite of `Role`.
+""".
 -spec new_peer(role(), map()) -> state().
 new_peer(Role, Opts) ->
     #state{
@@ -181,11 +181,13 @@ new_peer(Role, Opts) ->
 %% Outbound: open
 %%====================================================================
 
-%% @doc Allocate a fresh own context-ID for a compressed
-%% (IP Version 4 / 6) mapping to the given peer tuple. Returns the
-%% new entry plus the updated state. The session emits a matching
-%% `COMPRESSION_ASSIGN' on the wire and waits for ACK before using
-%% the ID.
+-doc """
+Allocate a fresh own context-ID for a compressed
+(IP Version 4 / 6) mapping to the given peer tuple. Returns the
+new entry plus the updated state. The session emits a matching
+`COMPRESSION_ASSIGN` on the wire and waits for ACK before using
+the ID.
+""".
 -spec open_compressed(state(), peer_tuple()) ->
     {ok, #compression_entry{}, state()} | {error, open_error()}.
 open_compressed(#state{direction = peer}, _Peer) ->
@@ -222,8 +224,10 @@ open_compressed(
             end
     end.
 
-%% @doc Allocate a fresh own context-ID for an uncompressed
-%% (IP Version 0) mapping. Client-only.
+-doc """
+Allocate a fresh own context-ID for an uncompressed
+(IP Version 0) mapping. Client-only.
+""".
 -spec open_uncompressed(state()) ->
     {ok, #compression_entry{}, state()} | {error, open_error()}.
 open_uncompressed(#state{direction = peer}) ->
@@ -242,22 +246,22 @@ open_uncompressed(#state{} = S) ->
 %% Inbound: install (peer's ASSIGN)
 %%====================================================================
 
-%% @doc Record a peer-originated `COMPRESSION_ASSIGN' on the peer
-%% table.
-%%
-%% Returns:
-%% <ul>
-%%   <li>`{ok, NewState}' on a clean install.</li>
-%%   <li>`{ok, {conflict, close_proxy_id, Id}, NewState}' when the
-%%       peer's tuple matches one our own side has already opened
-%%       (the proxy must close the proxy-opened context per
-%%       draft-11). The session emits the matching CLOSE; the close
-%%       refers to the `Id' on the *own* table, not this one.</li>
-%%   <li>`{error, _}' on a malformed install.</li>
-%% </ul>
-%%
-%% `install/2' never reports the cross-side conflict: it needs the
-%% own table, see {@link install/3}.
+-doc """
+Record a peer-originated `COMPRESSION_ASSIGN` on the peer
+table.
+
+Returns:
+- `{ok, NewState}` on a clean install.
+- `{ok, {conflict, close_proxy_id, Id}, NewState}` when the
+  peer's tuple matches one our own side has already opened
+  (the proxy must close the proxy-opened context per
+  draft-11). The session emits the matching CLOSE; the close
+  refers to the `Id` on the *own* table, not this one.
+- `{error, _}` on a malformed install.
+
+`install/2` never reports the cross-side conflict: it needs the
+own table, see `install/3`.
+""".
 -spec install(state(), #compression_assign{}) ->
     install_result() | {error, install_error()}.
 install(#state{direction = own}, _Assign) ->
@@ -268,12 +272,14 @@ install(#state{} = S, #compression_assign{context_id = Id} = A) ->
         true -> install_1(S, A)
     end.
 
-%% @doc Like {@link install/2}, and also check the assigned tuple
-%% against `OwnTable' (read-only). When our side already opened the
-%% same tuple, the install succeeds with
-%% `{ok, {conflict, close_proxy_id, Id}, NewState}': `Id' is the
-%% proxy-opened context of the pair (the own entry on a proxy, the
-%% incoming one on a client), which the session closes.
+-doc """
+Like `install/2`, and also check the assigned tuple
+against `OwnTable` (read-only). When our side already opened the
+same tuple, the install succeeds with
+`{ok, {conflict, close_proxy_id, Id}, NewState}`: `Id` is the
+proxy-opened context of the pair (the own entry on a proxy, the
+incoming one on a client), which the session closes.
+""".
 -spec install(state(), #compression_assign{}, state()) ->
     install_result() | {error, install_error()}.
 install(#state{} = S, #compression_assign{} = A, #state{direction = own} = Own) ->
@@ -287,9 +293,11 @@ install(#state{} = S, #compression_assign{} = A, #state{direction = own} = Own) 
             Other
     end.
 
-%% @doc Record that the client closed its uncompressed context. On a
-%% proxy own table, later `open_compressed/2' calls fail with
-%% `{error, uncompressed_closed}'.
+-doc """
+Record that the client closed its uncompressed context. On a
+proxy own table, later `open_compressed/2` calls fail with
+`{error, uncompressed_closed}`.
+""".
 -spec mark_uncompressed_closed(state()) -> state().
 mark_uncompressed_closed(#state{} = S) ->
     S#state{uncompressed_closed = true}.
@@ -409,8 +417,10 @@ install_compressed(
 %% Inbound: install_ack (peer's ACK of our ASSIGN)
 %%====================================================================
 
-%% @doc Record a peer `COMPRESSION_ACK'. Only valid against the own
-%% table (we sent the original ASSIGN).
+-doc """
+Record a peer `COMPRESSION_ACK`. Only valid against the own
+table (we sent the original ASSIGN).
+""".
 -spec install_ack(state(), #compression_ack{}) ->
     {ok, state()} | {error, install_ack_error()}.
 install_ack(#state{direction = peer}, _Ack) ->
@@ -432,10 +442,12 @@ install_ack(#state{} = S, #compression_ack{context_id = Id}) ->
 %% Inbound: install_close (peer's CLOSE of one of its / our IDs)
 %%====================================================================
 
-%% @doc Record a peer `COMPRESSION_CLOSE'. Removes the entry from
-%% whichever table holds it. The caller is expected to dispatch by
-%% direction first - typically the session looks up the ID in both
-%% tables and calls install_close on the matching one.
+-doc """
+Record a peer `COMPRESSION_CLOSE`. Removes the entry from
+whichever table holds it. The caller is expected to dispatch by
+direction first - typically the session looks up the ID in both
+tables and calls install_close on the matching one.
+""".
 -spec install_close(state(), #compression_close{}) ->
     {ok, state()} | {error, install_close_error()}.
 install_close(#state{} = S, #compression_close{context_id = Id}) ->

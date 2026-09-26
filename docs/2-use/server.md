@@ -60,7 +60,7 @@ Opts = #{
 
 ### Where handler options go
 
-Handler policy (`allow`, `allow_private`, `family`, `connect_timeout`, `socket_opts`, `active_n`, `mtu`, `address_pool`, and so on) belongs in `handler_opts`. For convenience every listener also copies these top-level keys into `handler_opts`: `address_pool`, `routes`, `mtu`, `resolver`, `allow`, `family`, `allow_private`, `connect_timeout`, `socket_opts` and the udp-bind keys (the list is `masque_server:handler_opt_keys/0`). A key in `handler_opts` always wins.
+Handler policy (`allow`, `allow_private`, `family`, `connect_timeout`, `socket_opts`, `active_n`, `mtu`, `address_pool`, and so on) belongs in `handler_opts`. For convenience every listener also copies these top-level keys into `handler_opts`: `address_pool`, `routes`, `mtu`, `resolver`, `allow`, `family`, `allow_private`, `connect_timeout`, `socket_opts` and the udp-bind keys (the list is `handler_opt_keys/0` in `masque_server`). A key in `handler_opts` always wins.
 
 The top-level `resolver` has the listener shape (`{ok, [Address]}`). When it is copied into `handler_opts`, the UDP and TCP proxy handlers use the first address of the list.
 

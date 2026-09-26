@@ -1,12 +1,13 @@
-%%% @doc Per-H3-connection owner + router for MASQUE tunnels.
+%%% Per-H3-connection owner + router for MASQUE tunnels.
 %%%
 %%% The listener's `connection_handler` hook spawns one of these
 %%% gen_servers per accepted H3 connection and hands its pid to
-%%% `quic_h3' as the connection's `owner'. That makes it the single
+%%% `quic_h3` as the connection's `owner`. That makes it the single
 %%% receiver of all owner-addressed events (datagrams, stream-data
 %%% for non-claimed streams, etc.), which we then route to the
-%%% per-tunnel session process keyed by `StreamId'.
+%%% per-tunnel session process keyed by `StreamId`.
 -module(masque_server_connection).
+-moduledoc false.
 -behaviour(gen_server).
 
 -export([
@@ -58,27 +59,27 @@
 start_link(MaxTunnels) ->
     gen_server:start_link(?MODULE, [MaxTunnels], []).
 
-%% @doc Start a router that also monitors `QuicConn', the QUIC
+%% Start a router that also monitors `QuicConn`, the QUIC
 %% connection the listener accepted, and stops when it goes down.
 -spec start_link(non_neg_integer(), pid()) ->
     {ok, pid()} | ignore | {error, term()}.
 start_link(MaxTunnels, QuicConn) ->
     gen_server:start_link(?MODULE, [MaxTunnels, QuicConn], []).
 
-%% @doc Start a session process and register it. The router spawns the
+%% Start a session process and register it. The router spawns the
 %% session asynchronously so it stays responsive for datagram routing.
 %% The caller blocks until the session init completes.
 -spec start_session(pid(), map()) -> {ok, pid()} | {error, term()}.
 start_session(RouterPid, SessionArgs) ->
     gen_server:call(RouterPid, {start_session, SessionArgs}, 30000).
 
-%% @doc Cancel a pending session that timed out.
+%% Cancel a pending session that timed out.
 -spec cancel_pending(pid(), non_neg_integer()) ->
     ok | {error, already_activated}.
 cancel_pending(RouterPid, StreamId) ->
     gen_server:call(RouterPid, {cancel_pending, StreamId}).
 
-%% @doc Register `SessionPid` as the owner of `StreamId`'s datagrams.
+%% Register `SessionPid` as the owner of `StreamId`'s datagrams.
 -spec register_session(pid(), non_neg_integer(), pid()) -> ok.
 register_session(RouterPid, StreamId, SessionPid) ->
     gen_server:call(RouterPid, {register, StreamId, SessionPid}).
@@ -91,7 +92,7 @@ unregister_session(RouterPid, StreamId) ->
 lookup_session(RouterPid, StreamId) ->
     gen_server:call(RouterPid, {lookup, StreamId}).
 
-%% @doc Return the session module for the given args.
+%% Return the session module for the given args.
 -spec session_module(map()) -> module().
 session_module(#{protocol := tcp}) -> masque_tcp_server_session;
 session_module(#{protocol := ip}) -> masque_ip_server_session;

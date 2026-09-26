@@ -1,16 +1,17 @@
-%%% @doc Client-side MASQUE CONNECT-UDP session.
+%%% Client-side CONNECT-UDP session over HTTP/3 (h2 is
+%%% `masque_h2_client_session`, h1 `masque_h1_client_session`).
 %%%
-%%% One gen_statem per tunnel. Owns the `quic_h3' connection, sends
+%%% One gen_statem per tunnel. Owns the `quic_h3` connection, sends
 %%% the Extended CONNECT request and drives it to 2xx, then holds the
 %%% request stream open for subsequent datagrams / capsules.
 %%%
 %%% States:
-%%% <ul>
-%%%   <li>`connecting' - waiting for the CONNECT-UDP response.</li>
-%%%   <li>`open' - tunnel is live; datagram plumbing lands in Step 5.</li>
-%%%   <li>`closing' - graceful shutdown in progress.</li>
-%%% </ul>
+%%% - `connecting` - waiting for the CONNECT-UDP response.
+%%% - `failed` - the dial failed; the error waits for `handshake_await`.
+%%% - `open` - tunnel is live; datagrams and capsules flow.
+%%% - `closing` - graceful shutdown in progress.
 -module(masque_client_session).
+-moduledoc false.
 -behaviour(gen_statem).
 
 -export([start_link/3, start/3, stop/1, info/1]).
@@ -79,30 +80,39 @@
 %% API
 %%====================================================================
 
+-spec start_link(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
 
+-spec start(masque:target(), map(), pid()) -> gen_statem:start_ret().
 start(Target, Opts, Owner) ->
     gen_statem:start(?MODULE, {Target, Opts, Owner}, []).
 
+-spec stop(pid()) -> ok.
 stop(Pid) ->
     gen_statem:call(Pid, stop, 5000).
 
+-spec info(pid()) -> map().
 info(Pid) ->
     gen_statem:call(Pid, info, 1000).
 
+-spec send(pid(), iodata()) -> ok | {error, term()}.
 send(Pid, Data) ->
     send(Pid, ?MASQUE_CONTEXT_ID_UDP, Data).
 
+-spec send(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send(Pid, ContextId, Data) ->
     gen_statem:call(Pid, {send, ContextId, Data}).
 
+-spec recv(pid(), non_neg_integer()) -> {ok, binary()} | {error, term()}.
 recv(Pid, Timeout) ->
     gen_statem:call(Pid, {recv, Timeout}, Timeout + 500).
 
+-spec set_mode(pid(), message | queue) -> ok | {error, term()}.
 set_mode(Pid, Mode) when Mode =:= message; Mode =:= queue ->
     gen_statem:call(Pid, {set_mode, Mode}).
 
+-spec send_capsule(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send_capsule(Pid, Type, Value) ->
     gen_statem:call(Pid, {send_capsule, Type, Value}).
 

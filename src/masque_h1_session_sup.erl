@@ -1,10 +1,10 @@
-%%% @doc Supervisor for HTTP/1.1 MASQUE server sessions.
+%%% Supervisor for HTTP/1.1 MASQUE server sessions.
 %%%
-%%% One `simple_one_for_one' supervisor per protocol, sibling of
-%%% `masque_h2_session_sup'. For now only the UDP branch is populated;
-%%% IP and TCP variants are added by later implementation steps.
-%%% Sessions are `temporary' (not restarted on crash).
+%%% One `simple_one_for_one` supervisor per protocol, sibling of
+%%% `masque_h2_session_sup`: UDP, IP, TCP and udp-bind each have their
+%%% own instance. Sessions are `temporary` (not restarted on crash).
 -module(masque_h1_session_sup).
+-moduledoc false.
 -behaviour(supervisor).
 
 -export([
@@ -16,15 +16,19 @@
 ]).
 -export([init/1]).
 
+-spec start_link() -> supervisor:startlink_ret().
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, udp).
 
+-spec start_link_ip() -> supervisor:startlink_ret().
 start_link_ip() ->
     supervisor:start_link({local, masque_h1_ip_session_sup}, ?MODULE, ip).
 
+-spec start_link_tcp() -> supervisor:startlink_ret().
 start_link_tcp() ->
     supervisor:start_link({local, masque_h1_tcp_session_sup}, ?MODULE, tcp).
 
+-spec start_link_udp_bind() -> supervisor:startlink_ret().
 start_link_udp_bind() ->
     supervisor:start_link(
         {local, masque_h1_udp_bind_session_sup},
@@ -42,6 +46,8 @@ start_session(#{protocol := udp_bind} = Args) ->
 start_session(Args) ->
     supervisor:start_child(?MODULE, [Args]).
 
+-spec init(udp | tcp | ip | udp_bind) ->
+    {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init(udp) -> {ok, spec(masque_h1_server_session)};
 init(ip) -> {ok, spec(masque_ip_h1_server_session)};
 init(tcp) -> {ok, spec(masque_tcp_h1_server_session)};

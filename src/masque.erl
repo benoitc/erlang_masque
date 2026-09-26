@@ -1,14 +1,18 @@
-%%% @doc Public API for the `masque' library.
-%%%
-%%% `masque' implements RFC 9298 (Proxying UDP in HTTP) on top of
-%%% `erlang_quic's HTTP/3 stack. The functions in this module are the
-%%% stable surface used by applications; all other modules are internal
-%%% and may change between versions.
-%%%
-%%% The surface is filled in incrementally across the implementation
-%%% plan. Step 1 only exposes the module so the application compiles
-%%% and is loadable; the behavioural functions are added in later steps.
 -module(masque).
+-moduledoc """
+Public API for the `masque` library.
+
+`masque` tunnels UDP (RFC 9298), IP (RFC 9484) and TCP
+(draft-ietf-httpbis-connect-tcp) traffic, plus Connect-UDP-Bind, over
+HTTP/3, HTTP/2 and HTTP/1.1. Use this module to open client tunnels
+(`connect/3`, `bind_connect/3`), send and receive on them, and start,
+drain and stop proxy listeners.
+
+This module, the `masque_handler` behaviour, the built-in handlers,
+the codecs and the URI helpers are the documented surface. Modules
+that do not appear in these docs are internal and may change between
+versions.
+""".
 
 -export([version/0]).
 -export([connect/3, connect/2, close/1, info/1]).
@@ -63,7 +67,10 @@
     ip_ipproto/0,
     ip_target/0,
     request_id/0,
-    nz_request_id/0
+    nz_request_id/0,
+    %% Embedding in a user-owned quic_h3 server.
+    h3_handler_fun/0,
+    connection_handler_fun/0
 ]).
 
 %%====================================================================
@@ -71,6 +78,21 @@
 %%====================================================================
 
 -type session() :: pid().
+
+-doc "Request handler for `quic_h3:start_server/3`, from `h3_handlers/1`.".
+-type h3_handler_fun() ::
+    fun(
+        (
+            Conn :: pid(),
+            StreamId :: non_neg_integer(),
+            Method :: binary(),
+            Path :: binary(),
+            Headers :: [{binary(), binary()}]
+        ) -> any()
+    ).
+
+-doc "Connection handler for `quic_h3:start_server/3`, from `h3_handlers/1`.".
+-type connection_handler_fun() :: fun((pid()) -> map()).
 
 -type proxy_uri() :: binary() | string().
 
@@ -209,17 +231,21 @@
 %% API
 %%====================================================================
 
-%% @doc Returns the library version as declared in the application resource file.
+-doc """
+Returns the library version as declared in the application resource file.
+""".
 -spec version() -> binary().
 version() ->
     {ok, Vsn} = application:get_key(masque, vsn),
     list_to_binary(Vsn).
 
-%% @doc Dial a MASQUE proxy and open a CONNECT-UDP tunnel to `Target'.
-%%
-%% `ProxyURI' is an `https://host:port' URL identifying the proxy;
-%% `Target' is a `{Host, Port}' pair naming the UDP endpoint to reach.
-%% Returns `{ok, Session}' on 2xx, `{error, Reason}' otherwise.
+-doc """
+Dial a MASQUE proxy and open a CONNECT-UDP tunnel to `Target`.
+
+`ProxyURI` is an `https://host:port` URL identifying the proxy;
+`Target` is a `{Host, Port}` pair naming the UDP endpoint to reach.
+Returns `{ok, Session}` on 2xx, `{error, Reason}` otherwise.
+""".
 -spec connect(proxy_uri(), target(), connect_opts()) ->
     {ok, session()} | {error, term()}.
 connect(ProxyURI, Target, Opts) when is_map(Opts) ->
@@ -427,12 +453,14 @@ dedup(L) ->
         )
     ).
 
-%% @equiv connect(ProxyURI, Target, #{})
+-doc "Equivalent to `connect(ProxyURI, Target, #{})`.".
 -spec connect(proxy_uri(), target()) -> {ok, session()} | {error, term()}.
 connect(ProxyURI, Target) ->
     connect(ProxyURI, Target, #{}).
 
-%% @doc Close a MASQUE session.
+-doc """
+Close a MASQUE session.
+""".
 -spec close(session()) -> ok.
 close(Sess) when is_pid(Sess) ->
     %% All session modules export stop/1.
@@ -444,34 +472,42 @@ close(Sess) when is_pid(Sess) ->
         end),
     ok.
 
-%% @doc Return a map describing the session's current state and peers.
+-doc """
+Return a map describing the session's current state and peers.
+""".
 -spec info(session()) -> map().
 info(Sess) when is_pid(Sess) ->
     gen_statem:call(Sess, info, 1000).
 
-%% @doc Send data through the tunnel.
-%%
-%% For UDP tunnels: sends a UDP packet (context-id 0). For TCP tunnels:
-%% sends raw bytes on the stream.
+-doc """
+Send data through the tunnel.
+
+For UDP tunnels: sends a UDP packet (context-id 0). For TCP tunnels:
+sends raw bytes on the stream.
+""".
 -spec send(session(), iodata()) -> ok | {error, term()}.
 send(Sess, Data) ->
     gen_statem:call(Sess, {send, Data}).
 
-%% @doc Send data under an explicit context-id (UDP extension use).
+-doc """
+Send data under an explicit context-id (UDP extension use).
+""".
 -spec send(session(), non_neg_integer(), iodata()) ->
     ok | {error, term()}.
 send(Sess, ContextId, Data) ->
     gen_statem:call(Sess, {send, ContextId, Data}).
 
-%% @doc Block until data is received or `Timeout' ms elapses.
-%%
-%% Requires the session to be in `queue' delivery mode (see
-%% {@link set_mode/2}). The queue holds at most `rx_queue_limit'
-%% items (default 1000): datagram tunnels drop past it (counted as
-%% `rx_dropped' in {@link info/1}), a CONNECT-TCP tunnel ends with
-%% `rx_overflow'. After the peer ends the tunnel, data still queued
-%% is returned first, then `{error, closed}' (or `{error,
-%% rx_overflow}').
+-doc """
+Block until data is received or `Timeout` ms elapses.
+
+Requires the session to be in `queue` delivery mode (see
+`set_mode/2`). The queue holds at most `rx_queue_limit`
+items (default 1000): datagram tunnels drop past it (counted as
+`rx_dropped` in `info/1`), a CONNECT-TCP tunnel ends with
+`rx_overflow`. After the peer ends the tunnel, data still queued
+is returned first, then `{error, closed}` (or `{error,
+rx_overflow}`).
+""".
 -spec recv(session(), pos_integer()) ->
     {ok, binary()} | {error, timeout | term()}.
 recv(Sess, Timeout) ->
@@ -484,26 +520,32 @@ recv(Sess, Timeout) ->
         exit:{{shutdown, _}, _} -> {error, closed}
     end.
 
-%% @doc Send a capsule on the tunnel's request stream (RFC 9297 §3.2).
+-doc """
+Send a capsule on the tunnel's request stream (RFC 9297 §3.2).
+""".
 -spec send_capsule(session(), non_neg_integer(), iodata()) ->
     ok | {error, term()}.
 send_capsule(Sess, Type, Value) ->
     gen_statem:call(Sess, {send_capsule, Type, Value}).
 
-%% @doc Switch the session between `message' and `queue' delivery modes.
-%%
-%% `message' (default) delivers every incoming packet to the owner as
-%% `{masque_data, Sess, Data}'. `queue' buffers packets and requires
-%% the caller to pull them via {@link recv/2}.
+-doc """
+Switch the session between `message` and `queue` delivery modes.
+
+`message` (default) delivers every incoming packet to the owner as
+`{masque_data, Sess, Data}`. `queue` buffers packets and requires
+the caller to pull them via `recv/2`.
+""".
 -spec set_mode(session(), message | queue) -> ok.
 set_mode(Sess, Mode) ->
     gen_statem:call(Sess, {set_mode, Mode}).
 
-%% @doc Half-close the write side of a TCP tunnel.
-%%
-%% Sends END_STREAM and prevents further writes. The session stays
-%% open for receiving data. Returns `{error, not_supported}' on UDP
-%% sessions. Returns `{error, not_ready}' if still connecting.
+-doc """
+Half-close the write side of a TCP tunnel.
+
+Sends END_STREAM and prevents further writes. The session stays
+open for receiving data. Returns `{error, not_supported}` on UDP
+sessions. Returns `{error, not_ready}` if still connecting.
+""".
 -spec shutdown_write(session()) -> ok | {error, term()}.
 shutdown_write(Sess) when is_pid(Sess) ->
     gen_statem:call(Sess, shutdown_write).
@@ -512,14 +554,18 @@ shutdown_write(Sess) when is_pid(Sess) ->
 %% CONNECT-IP client API (RFC 9484)
 %%====================================================================
 
-%% @doc Send a full IP packet (starting at the IP header) through a
-%% CONNECT-IP tunnel. Rejects packets larger than the session's MTU.
+-doc """
+Send a full IP packet (starting at the IP header) through a
+CONNECT-IP tunnel. Rejects packets larger than the session's MTU.
+""".
 -spec send_ip_packet(session(), binary()) -> ok | {error, term()}.
 send_ip_packet(Sess, Packet) when is_pid(Sess), is_binary(Packet) ->
     masque_ip_client_session:send_ip_packet(Sess, Packet).
 
-%% @doc Send an ADDRESS_REQUEST capsule asking the peer to assign
-%% one or more addresses. Returns the allocated Request IDs.
+-doc """
+Send an ADDRESS_REQUEST capsule asking the peer to assign
+one or more addresses. Returns the allocated Request IDs.
+""".
 -spec request_addresses(
     session(),
     [{ip_version(), inet:ip_address(), non_neg_integer()}]
@@ -528,20 +574,26 @@ send_ip_packet(Sess, Packet) when is_pid(Sess), is_binary(Packet) ->
 request_addresses(Sess, Prefixes) when is_pid(Sess) ->
     masque_ip_client_session:request_addresses(Sess, Prefixes).
 
-%% @doc Send an ADDRESS_ASSIGN capsule. Non-zero Request IDs must
-%% match an outstanding peer ADDRESS_REQUEST; ID 0 is always
-%% accepted (unprompted, RFC 9484 §4.7.1).
+-doc """
+Send an ADDRESS_ASSIGN capsule. Non-zero Request IDs must
+match an outstanding peer ADDRESS_REQUEST; ID 0 is always
+accepted (unprompted, RFC 9484 §4.7.1).
+""".
 -spec assign_addresses(session(), [ip_assignment()]) ->
     ok | {error, term()}.
 assign_addresses(Sess, Entries) when is_pid(Sess) ->
     masque_ip_client_session:assign_addresses(Sess, Entries).
 
-%% @doc Send a ROUTE_ADVERTISEMENT capsule.
+-doc """
+Send a ROUTE_ADVERTISEMENT capsule.
+""".
 -spec advertise_routes(session(), [ip_route()]) -> ok | {error, term()}.
 advertise_routes(Sess, Routes) when is_pid(Sess) ->
     masque_ip_client_session:advertise_routes(Sess, Routes).
 
-%% @doc Inspect the CONNECT-IP session state.
+-doc """
+Inspect the CONNECT-IP session state.
+""".
 -spec ip_info(session()) ->
     #{
         assigned := [ip_assignment()],
@@ -557,11 +609,13 @@ ip_info(Sess) when is_pid(Sess) ->
 %% (draft-ietf-masque-connect-udp-listen-11)
 %%====================================================================
 
-%% @doc Open a Connect-UDP-Bind tunnel to `ProxyURI'. `Target' is
-%% either `unscoped' (the bind socket on the proxy can talk to any
-%% peer the proxy's policy allows) or `{Host, Port}' for a scoped
-%% bind. The session emits `{masque_bind_packet, _, Peer, Bytes}'
-%% messages to the owner; use `send_to/3' to send.
+-doc """
+Open a Connect-UDP-Bind tunnel to `ProxyURI`. `Target` is
+either `unscoped` (the bind socket on the proxy can talk to any
+peer the proxy's policy allows) or `{Host, Port}` for a scoped
+bind. The session emits `{masque_bind_packet, _, Peer, Bytes}`
+messages to the owner; use `send_to/3` to send.
+""".
 -spec bind_connect(
     proxy_uri(),
     unscoped | {binary() | inet:hostname(), 1..65535},
@@ -581,10 +635,12 @@ bind_connect(ProxyURI, Target, Opts) when is_map(Opts) ->
             Err
     end.
 
-%% @doc Send a UDP payload to `Peer' via the bind tunnel. The session
-%% picks a context-id from the compression table; if none exists it
-%% falls back to the uncompressed-context channel if open, otherwise
-%% returns `{error, no_compression_context}'.
+-doc """
+Send a UDP payload to `Peer` via the bind tunnel. The session
+picks a context-id from the compression table; if none exists it
+falls back to the uncompressed-context channel if open, otherwise
+returns `{error, no_compression_context}`.
+""".
 -spec send_to(
     session(),
     {inet:ip_address(), inet:port_number()},
@@ -596,10 +652,12 @@ send_to(Sess, Peer, Bytes) when
     Mod = bind_session_module(Sess),
     Mod:send_to(Sess, Peer, Bytes).
 
-%% @doc Open an outbound compressed context for `Peer'. Returns the
-%% allocated Context ID; the mapping is safe to use on send once the
-%% matching `{masque_compression_acked, _, ContextId}' message
-%% arrives.
+-doc """
+Open an outbound compressed context for `Peer`. Returns the
+allocated Context ID; the mapping is safe to use on send once the
+matching `{masque_compression_acked, _, ContextId}` message
+arrives.
+""".
 -spec assign_compression(
     session(),
     {inet:ip_address(), inet:port_number()}
@@ -609,15 +667,19 @@ assign_compression(Sess, Peer) when is_pid(Sess) ->
     Mod = bind_session_module(Sess),
     Mod:assign_compression(Sess, Peer).
 
-%% @doc Open the singleton uncompressed (IP Version 0) context.
-%% Client-only per draft-11.
+-doc """
+Open the singleton uncompressed (IP Version 0) context.
+Client-only per draft-11.
+""".
 -spec open_uncompressed_context(session()) ->
     {ok, pos_integer()} | {error, term()}.
 open_uncompressed_context(Sess) when is_pid(Sess) ->
     Mod = bind_session_module(Sess),
     Mod:open_uncompressed_context(Sess).
 
-%% @doc Retire a compression context.
+-doc """
+Retire a compression context.
+""".
 -spec close_compression(session(), pos_integer()) ->
     ok | {error, term()}.
 close_compression(Sess, Id) when
@@ -626,8 +688,10 @@ close_compression(Sess, Id) when
     Mod = bind_session_module(Sess),
     Mod:close_compression(Sess, Id).
 
-%% @doc Read the parsed `Proxy-Public-Address' list the proxy
-%% advertised on the bind 2xx response.
+-doc """
+Read the parsed `Proxy-Public-Address` list the proxy
+advertised on the bind 2xx response.
+""".
 -spec proxy_public_address(session()) ->
     {ok, [{inet:ip_address(), inet:port_number()}]} | {error, term()}.
 proxy_public_address(Sess) when is_pid(Sess) ->
@@ -677,57 +741,69 @@ start_listener_h1(Name, Opts) ->
 stop_listener_h1(Ref) ->
     masque_h1_server:stop_listener(Ref).
 
-%% @doc Stop accepting new tunnels but let existing ones finish.
+-doc """
+Stop accepting new tunnels but let existing ones finish.
+""".
 -spec drain_listener(atom()) -> ok.
 drain_listener(Name) ->
     persistent_term:put({masque_drain, Name}, true),
     ok.
 
-%% @doc Re-enable new tunnels after draining.
+-doc """
+Re-enable new tunnels after draining.
+""".
 -spec undrain_listener(atom()) -> ok.
 undrain_listener(Name) ->
     persistent_term:erase({masque_drain, Name}),
     ok.
 
-%% @doc Check if a listener is draining.
+-doc """
+Check if a listener is draining.
+""".
 -spec is_draining(atom() | undefined) -> boolean().
 is_draining(undefined) -> false;
 is_draining(Name) -> persistent_term:get({masque_drain, Name}, false).
 
-%% @doc Start a chaining (two-hop) listener on HTTP/3.
-%%
-%% Convenience wrapper: starts an h3 listener with
-%% `masque_chain_handler' wired up for all three tunnel protocols
-%% (UDP, TCP, IP). Every accepted tunnel is relayed to the upstream
-%% proxy specified in `handler_opts.upstream_proxy'.
-%%
-%% Callers that want only a subset of protocols to chain can still
-%% call {@link start_listener/2} directly and set `handler',
-%% `tcp_handler', `ip_handler' individually.
-%%
-%% See {@link start_chain_listener_h2/2} and
-%% {@link start_chain_listener_h1/2} for the HTTP/2 and HTTP/1.1
-%% siblings. A full Apple-Private-Relay-shaped ingress runs all three
-%% so the client can race them.
+-doc """
+Start a chaining (two-hop) listener on HTTP/3.
+
+Convenience wrapper: starts an h3 listener with
+`masque_chain_handler` wired up for all three tunnel protocols
+(UDP, TCP, IP). Every accepted tunnel is relayed to the upstream
+proxy specified in `handler_opts.upstream_proxy`.
+
+Callers that want only a subset of protocols to chain can still
+call `start_listener/2` directly and set `handler`,
+`tcp_handler`, `ip_handler` individually.
+
+See `start_chain_listener_h2/2` and
+`start_chain_listener_h1/2` for the HTTP/2 and HTTP/1.1
+siblings. A full Apple-Private-Relay-shaped ingress runs all three
+so the client can race them.
+""".
 -spec start_chain_listener(atom(), map()) -> {ok, pid()} | {error, term()}.
 start_chain_listener(Name, Opts) ->
     start_listener(Name, chain_all(Opts)).
 
-%% @doc Start a chaining (two-hop) listener on HTTP/2.
-%%
-%% Same shape as {@link start_chain_listener/2}; only the outer
-%% transport differs. All three tunnel protocols chain; upstream
-%% proxy URI goes in `handler_opts.upstream_proxy'.
+-doc """
+Start a chaining (two-hop) listener on HTTP/2.
+
+Same shape as `start_chain_listener/2`; only the outer
+transport differs. All three tunnel protocols chain; upstream
+proxy URI goes in `handler_opts.upstream_proxy`.
+""".
 -spec start_chain_listener_h2(atom(), map()) ->
     {ok, h2:server_ref()} | {error, term()}.
 start_chain_listener_h2(Name, Opts) ->
     start_listener_h2(Name, chain_all(Opts)).
 
-%% @doc Start a chaining (two-hop) listener on HTTP/1.1.
-%%
-%% Same shape as {@link start_chain_listener/2}; only the outer
-%% transport differs. All three tunnel protocols chain; upstream
-%% proxy URI goes in `handler_opts.upstream_proxy'.
+-doc """
+Start a chaining (two-hop) listener on HTTP/1.1.
+
+Same shape as `start_chain_listener/2`; only the outer
+transport differs. All three tunnel protocols chain; upstream
+proxy URI goes in `handler_opts.upstream_proxy`.
+""".
 -spec start_chain_listener_h1(atom(), map()) ->
     {ok, h1:server_ref()} | {error, term()}.
 start_chain_listener_h1(Name, Opts) ->
@@ -762,16 +838,25 @@ chain_all(Opts) ->
 h2_handlers(Opts) ->
     masque_h2_server:h2_handlers(Opts).
 
-%% @doc Return the `handler' and `connection_handler' funs needed to
-%% run MASQUE inside a user-owned `quic_h3:start_server/3' call.
-%%
-%% See {@link masque_server:h3_handlers/1} for the accepted option
-%% keys (including the `fallback' hook that routes non-MASQUE requests
-%% to the caller's own handler).
+-doc """
+Return the `handler` and `connection_handler` funs needed to
+run MASQUE inside a user-owned `quic_h3:start_server/3` call.
+
+`Opts` takes the listener options of `start_listener/2` that shape
+request handling (templates, handlers, `handler_opts`, `accept_bind`,
+`resolver`), plus `fallback`:
+`fun(Conn, StreamId, Method, Path, Headers) -> any()`, called for
+requests that are not MASQUE. Without it those requests are rejected.
+
+MASQUE must be the h3 connection's owner (HTTP Datagrams are delivered
+to that pid), so the returned `connection_handler` takes the owner
+slot. Another extension that also needs it cannot share the connection;
+run it on a separate listener.
+""".
 -spec h3_handlers(map()) ->
     #{
-        handler := masque_server:h3_handler_fun(),
-        connection_handler := masque_server:connection_handler_fun()
+        handler := h3_handler_fun(),
+        connection_handler := connection_handler_fun()
     }.
 h3_handlers(Opts) ->
     masque_server:h3_handlers(Opts).
