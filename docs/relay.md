@@ -82,6 +82,31 @@ for the wrapper shape.
 Clients race the three listener ports with a `transports => [h3, h2,
 h1]` connect call. The first 2xx wins.
 
+The upstream leg verifies the egress certificate by default (system
+CAs, hostname check, SNI), so `cacerts` is only needed for a private
+PKI.
+
+### Loop detection
+
+Each chain listener adds a random token to the `via` header of its
+upstream requests. If a request comes back carrying that token, the
+ingress answers 508 with Proxy-Status `proxy_loop_detected` instead
+of dialing itself again. An upstream 508 reaches the client as 508.
+
+The chain listeners create one token per listener. To treat the h3,
+h2 and h1 listeners of one ingress as a single hop, give them the
+same token:
+
+```erlang
+Token = masque_chain_handler:new_token(),
+HOpts = maps:get(handler_opts, IngressOpts),
+IngressOpts1 = IngressOpts#{handler_opts => HOpts#{via_token => Token}}.
+```
+
+If you write your own wrapper handler (as below) and do not use the
+`start_chain_listener*` helpers, set `via_token` yourself; otherwise
+the node-wide `masque_chain_handler:node_token/0` is used.
+
 ## 3. Egress listener
 
 The egress is a regular MASQUE proxy - built-in handlers do what a
@@ -95,7 +120,8 @@ EgressOpts = #{
     handler      => masque_udp_proxy_handler,
     tcp_handler  => masque_tcp_proxy_handler,
     ip_handler   => masque_ip_proxy_handler,
-    handler_opts => #{allow_private => false},
+    handler_opts => #{allow_private => false,  %% default
+                      mtu => 1500},            %% default, CONNECT-IP
     %% Global DNS resolution hook; runs before the ingress's
     %% accept/1 (decision #3 in the handler lifecycle).
     resolver     => fun my_resolver:lookup/1,
@@ -107,9 +133,11 @@ EgressOpts = #{
 ```
 
 `masque_ip_proxy_handler` handles the RFC 9484 bits (address pool
-allocation, ROUTE_ADVERTISEMENT, BCP-38 filter) with a
-`forward_fun` extension point for your own kernel-side IP
-pipeline.
+allocation, ROUTE_ADVERTISEMENT, BCP-38 filter, TTL decrement and
+ICMP errors, MTU) with a `forward_fun` extension point for your own
+kernel-side IP pipeline. With `allow_private => false` it refuses
+`'*'` and private targets, and keeps each tunnel inside its target
+(see [connect_ip.md](connect_ip.md#target-scoping)).
 
 ## 4. Authentication on the ingress
 
@@ -205,7 +233,14 @@ same egress.
 Concurrency cap: the pooled owner reads the peer's h2 `SETTINGS`
 (`MAX_CONCURRENT_STREAMS`) on cold dial. For h3 it is `dynamic`
 (bounded by QUIC `MAX_STREAMS_BIDI`). Operators who want a hard
-cap can set `upstream_pool_opts => #{max_streams => N}`.
+cap can set `upstream_pool_opts => #{max_streams => N}`. When every
+pooled connection to an egress is full, the pool dials another one.
+
+A checkout that cannot get a connection returns an error instead of
+exiting: `{error, timeout}` after `checkout_timeout_ms` (default
+60 s, in `upstream_pool_opts`), `{error, {dial_failed, Reason}}` or
+`{error, {dial_crashed, {Class, Reason}}}`. The ingress rejects the
+tunnel and later tunnels dial again.
 
 ## 6. Drain and rolling restarts
 
@@ -289,8 +324,11 @@ What to verify before pointing traffic at your relay:
       expect more than a few concurrent tunnels per egress.
 - [ ] `resolver` on the egress short-circuits DNS so `accept/1`
       sees resolved addresses for SSRF checks.
-- [ ] `allow_private => false` on the egress to keep RFC 1918
-      destinations out (unless you have a legitimate use).
+- [ ] `allow_private` left at its default (`false`) on the egress to
+      keep RFC 1918 destinations out (unless you have a legitimate use).
+- [ ] Ingress upstream TLS verifies the egress (default); `cacerts`
+      set if the egress uses a private CA.
+- [ ] A loop test: point the ingress at itself and check for 508.
 - [ ] `max_tunnels_per_connection` on the egress so a single
       ingress cannot saturate it.
 - [ ] Drain wired to SIGTERM / systemd `ExecStop` on both sides.

@@ -168,6 +168,65 @@ dial_failure_replies_to_all_waiters() ->
         persistent_term:erase({?MOCK, connect_result})
     end.
 
+throwing_dial_does_not_poison_fingerprint_test_() ->
+    {setup, fun setup/0, fun cleanup/1, fun throwing_dial_does_not_poison_fingerprint/0}.
+
+throwing_dial_does_not_poison_fingerprint() ->
+    FP = ?M:fingerprint(<<"throw">>, 443, h2, #{}),
+    persistent_term:put({?MOCK, connect_result}, {raise, throw, boom}),
+    ?assertMatch({error, {dial_crashed, {throw, boom}}}, ?M:checkout(FP, pool_opts(h2))),
+    persistent_term:put({?MOCK, connect_result}, {raise, error, badarg}),
+    ?assertMatch({error, {dial_crashed, {error, badarg}}}, ?M:checkout(FP, pool_opts(h2))),
+    persistent_term:put({?MOCK, connect_result}, auto),
+    ?assertMatch({ok, _}, ?M:checkout(FP, pool_opts(h2))).
+
+owner_killed_while_dialing_fails_waiters_test_() ->
+    {setup, fun setup/0, fun cleanup/1, fun owner_killed_while_dialing_fails_waiters/0}.
+
+owner_killed_while_dialing_fails_waiters() ->
+    Self = self(),
+    persistent_term:put({?MOCK, connect_result}, {notify, Self, {delay, 5000, auto}}),
+    FP = ?M:fingerprint(<<"killed">>, 443, h2, #{}),
+    Pids = [spawn_checkout(FP, pool_opts(h2)) || _ <- lists:seq(1, 3)],
+    Dialer =
+        receive
+            {mock_connected, P} -> P
+        after 1000 -> error(no_dial)
+        end,
+    exit(Dialer, kill),
+    [?assertEqual({error, {dial_failed, killed}}, recv_result(P, 1000)) || P <- Pids],
+    persistent_term:put({?MOCK, connect_result}, auto),
+    ?assertMatch({ok, _}, ?M:checkout(FP, pool_opts(h2))).
+
+checkout_timeout_returns_error_test_() ->
+    {setup, fun setup/0, fun cleanup/1, fun checkout_timeout_returns_error/0}.
+
+checkout_timeout_returns_error() ->
+    persistent_term:put({?MOCK, connect_result}, {delay, 500, auto}),
+    FP = ?M:fingerprint(<<"slow">>, 443, h2, #{}),
+    Opts = (pool_opts(h2))#{checkout_timeout_ms => 50},
+    ?assertEqual({error, timeout}, ?M:checkout(FP, Opts)).
+
+%%====================================================================
+%% Stream capacity
+%%====================================================================
+
+full_owner_triggers_second_owner_test_() ->
+    ?setup(fun full_owner_triggers_second_owner/0).
+
+full_owner_triggers_second_owner() ->
+    FP = ?M:fingerprint(<<"full">>, 443, h2, #{}),
+    Opts = (pool_opts(h2))#{max_streams => 1},
+    {ok, O1} = ?M:checkout(FP, Opts),
+    {ok, Sid, _} = masque_upstream_owner:acquire_stream(O1, [], self(), #{}),
+    {ok, O2} = ?M:checkout(FP, Opts),
+    ?assertNotEqual(O1, O2),
+    %% Releasing the stream frees the first owner again.
+    ok = masque_upstream_owner:release_stream(O1, Sid),
+    _ = masque_upstream_owner:info(O1),
+    timer:sleep(20),
+    ?assertEqual({ok, O1}, ?M:checkout(FP, Opts)).
+
 %%====================================================================
 %% Owner death eviction
 %%====================================================================

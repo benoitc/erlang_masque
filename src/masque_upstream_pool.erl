@@ -15,7 +15,13 @@
 %%%
 %%% The registry itself never blocks on a handshake; the async
 %%% spawn of the owner process handles that. A slow upstream only
-%%% stalls callers on its own key.
+%%% stalls callers on its own key. The registry monitors each owner
+%%% from the moment it is spawned, so a dial that crashes fails its
+%%% waiters instead of leaving the key stuck in the dialing state.
+%%%
+%%% Owners tell the registry when they reach or leave their stream
+%%% limit. Checkout skips full owners and dials another connection
+%%% for the same fingerprint when every cached owner is full.
 %%%
 %%% h1 is not handled here - the pool is opt-in for h2 / h3 only.
 %%% Callers that want to pool an h1 upstream receive `{error,
@@ -48,14 +54,23 @@
 
 -record(entry, {
     owner :: pid(),
-    mon_ref :: reference()
+    mon_ref :: reference(),
+    full = false :: boolean()
+}).
+
+-record(dial, {
+    owner :: pid(),
+    mon_ref :: reference(),
+    waiters = [] :: [gen_server:from()]
 }).
 
 -record(state, {
     cache = #{} :: #{fingerprint() => [#entry{}]},
-    dialing = #{} :: #{fingerprint() => [gen_server:from()]},
+    dialing = #{} :: #{fingerprint() => #dial{}},
     owner_ix = #{} :: #{reference() => fingerprint()}
 }).
+
+-define(CHECKOUT_TIMEOUT, 60000).
 
 %%====================================================================
 %% API
@@ -71,11 +86,18 @@ start_link() ->
 %%
 %% `Opts' carries everything the owner needs to dial: `host', `port',
 %% `connect_opts', optional `transport_mod' (for tests), plus any
-%% owner-level tuning (`idle_timeout_ms', `max_streams').
+%% owner-level tuning (`idle_timeout_ms', `max_streams'). A dial
+%% that does not finish within `checkout_timeout_ms' (default 60 s)
+%% returns `{error, timeout}'.
 -spec checkout(fingerprint(), map()) ->
     {ok, pid()} | {error, term()}.
 checkout(FP, Opts) ->
-    gen_server:call(?MODULE, {checkout, FP, Opts}, 60000).
+    Timeout = maps:get(checkout_timeout_ms, Opts, ?CHECKOUT_TIMEOUT),
+    try
+        gen_server:call(?MODULE, {checkout, FP, Opts}, Timeout)
+    catch
+        exit:{Reason, {gen_server, call, _}} -> {error, Reason}
+    end.
 
 %% @doc Tear down every pooled owner. Used on application shutdown
 %% and in tests. Safe to call while callers are in flight - they
@@ -124,7 +146,7 @@ handle_call({checkout, FP, Opts}, From, S) ->
             {reply, {ok, Owner}, S};
         none ->
             case maps:find(FP, S#state.dialing) of
-                {ok, Waiters} ->
+                {ok, #dial{waiters = Waiters} = Dial} ->
                     %% A dial is already in flight for this FP; join
                     %% the queue. Caller will be replied to when the
                     %% dial completes.
@@ -132,22 +154,23 @@ handle_call({checkout, FP, Opts}, From, S) ->
                         dialing =
                             maps:put(
                                 FP,
-                                [From | Waiters],
+                                Dial#dial{waiters = [From | Waiters]},
                                 S#state.dialing
                             )
                     }};
                 error ->
-                    %% Cold key: spawn a self-dialing owner. Registry
-                    %% never blocks on the handshake.
-                    _ = masque_upstream_owner:start_for_pool(
+                    %% Cold key, or every cached owner is full: spawn
+                    %% a self-dialing owner. Registry never blocks on
+                    %% the handshake; the monitor catches a dial that
+                    %% dies without reporting.
+                    Owner = masque_upstream_owner:start_for_pool(
                         self(), FP, Opts
                     ),
+                    MRef = erlang:monitor(process, Owner),
+                    Dial = #dial{owner = Owner, mon_ref = MRef, waiters = [From]},
                     {noreply, S#state{
-                        dialing = maps:put(
-                            FP,
-                            [From],
-                            S#state.dialing
-                        )
+                        dialing = maps:put(FP, Dial, S#state.dialing),
+                        owner_ix = maps:put(MRef, FP, S#state.owner_ix)
                     }}
             end
     end;
@@ -165,36 +188,45 @@ handle_call(_Req, _From, S) ->
 handle_cast(_, S) -> {noreply, S}.
 
 handle_info({dial_result, FP, {ok, Owner}}, S) ->
-    MRef = erlang:monitor(process, Owner),
-    Entry = #entry{owner = Owner, mon_ref = MRef},
-    S1 = S#state{
-        cache = maps:update_with(
-            FP,
-            fun(L) -> [Entry | L] end,
-            [Entry],
-            S#state.cache
-        ),
-        owner_ix = maps:put(MRef, FP, S#state.owner_ix)
-    },
-    S2 = reply_dialing(FP, {ok, Owner}, S1),
-    {noreply, S2};
+    case maps:find(FP, S#state.dialing) of
+        {ok, #dial{owner = Owner, mon_ref = MRef}} ->
+            Entry = #entry{owner = Owner, mon_ref = MRef},
+            S1 = S#state{
+                cache = maps:update_with(
+                    FP,
+                    fun(L) -> L ++ [Entry] end,
+                    [Entry],
+                    S#state.cache
+                )
+            },
+            {noreply, reply_dialing(FP, {ok, Owner}, S1)};
+        _ ->
+            %% Not the dial we are waiting for (e.g. after close_all).
+            exit(Owner, shutdown),
+            {noreply, S}
+    end;
 handle_info({dial_result, FP, {error, _} = Err}, S) ->
-    S1 = reply_dialing(FP, Err, S),
-    {noreply, S1};
-handle_info({'DOWN', MRef, process, _Pid, _Reason}, S) ->
+    case maps:find(FP, S#state.dialing) of
+        {ok, #dial{mon_ref = MRef}} ->
+            _ = erlang:demonitor(MRef, [flush]),
+            S1 = S#state{owner_ix = maps:remove(MRef, S#state.owner_ix)},
+            {noreply, reply_dialing(FP, Err, S1)};
+        error ->
+            {noreply, S}
+    end;
+handle_info({owner_capacity, Owner, Full}, S) ->
+    {noreply, set_full(Owner, Full, S)};
+handle_info({'DOWN', MRef, process, _Pid, Reason}, S) ->
     case maps:take(MRef, S#state.owner_ix) of
         {FP, Ix2} ->
-            Cache2 =
-                case maps:find(FP, S#state.cache) of
-                    {ok, Entries} ->
-                        case [E || E <- Entries, E#entry.mon_ref =/= MRef] of
-                            [] -> maps:remove(FP, S#state.cache);
-                            Left -> maps:put(FP, Left, S#state.cache)
-                        end;
-                    error ->
-                        S#state.cache
-                end,
-            {noreply, S#state{cache = Cache2, owner_ix = Ix2}};
+            case maps:find(FP, S#state.dialing) of
+                {ok, #dial{mon_ref = MRef}} ->
+                    %% The owner died before reporting its dial.
+                    S1 = S#state{owner_ix = Ix2},
+                    {noreply, reply_dialing(FP, {error, {dial_failed, Reason}}, S1)};
+                _ ->
+                    {noreply, evict(FP, MRef, S#state{owner_ix = Ix2})}
+            end;
         error ->
             {noreply, S}
     end;
@@ -219,20 +251,52 @@ code_change(_, S, _) -> {ok, S}.
 %% Internal
 %%====================================================================
 
+%% First cached owner that is alive and below its stream limit;
+%% `none' makes the caller dial another connection.
 pick_owner(FP, #state{cache = Cache}) ->
-    case maps:find(FP, Cache) of
-        {ok, [#entry{owner = O} | _]} when is_pid(O) ->
-            case erlang:is_process_alive(O) of
-                true -> {ok, O};
-                false -> none
-            end;
-        _ ->
-            none
+    Entries = maps:get(FP, Cache, []),
+    case
+        [
+            O
+         || #entry{owner = O, full = false} <- Entries,
+            erlang:is_process_alive(O)
+        ]
+    of
+        [O | _] -> {ok, O};
+        [] -> none
     end.
+
+evict(FP, MRef, S) ->
+    Cache2 =
+        case maps:find(FP, S#state.cache) of
+            {ok, Entries} ->
+                case [E || E <- Entries, E#entry.mon_ref =/= MRef] of
+                    [] -> maps:remove(FP, S#state.cache);
+                    Left -> maps:put(FP, Left, S#state.cache)
+                end;
+            error ->
+                S#state.cache
+        end,
+    S#state{cache = Cache2}.
+
+set_full(Owner, Full, #state{cache = Cache} = S) ->
+    Cache2 = maps:map(
+        fun(_FP, Entries) ->
+            [
+                case E of
+                    #entry{owner = Owner} -> E#entry{full = Full};
+                    _ -> E
+                end
+             || E <- Entries
+            ]
+        end,
+        Cache
+    ),
+    S#state{cache = Cache2}.
 
 reply_dialing(FP, Reply, S) ->
     case maps:take(FP, S#state.dialing) of
-        {Waiters, Dialing1} ->
+        {#dial{waiters = Waiters}, Dialing1} ->
             [gen_server:reply(From, Reply) || From <- lists:reverse(Waiters)],
             S#state{dialing = Dialing1};
         error ->
@@ -241,7 +305,9 @@ reply_dialing(FP, Reply, S) ->
 
 reply_all_dialing(Reply, #state{dialing = D}) ->
     maps:foreach(
-        fun(_FP, Waiters) ->
+        fun(_FP, #dial{owner = Owner, mon_ref = MRef, waiters = Waiters}) ->
+            _ = erlang:demonitor(MRef, [flush]),
+            exit(Owner, shutdown),
             [gen_server:reply(From, Reply) || From <- Waiters]
         end,
         D

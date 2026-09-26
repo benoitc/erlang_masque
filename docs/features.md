@@ -25,7 +25,40 @@ Current coverage of the `masque` library against the relevant RFCs.
 | Apple-style transport race | h3 -> h2 -> h1 with staggered head-starts (`prefer_timeout_ms`, `h1_prefer_timeout_ms`) | Implemented (`masque_racer`) |
 | Upstream connection pooling | Opt-in `upstream_pool => true`; one pooled h2 / QUIC conn carries many tunnels as streams; fingerprinted by `verify` / `cacerts` / `ssl_opts` / `alpn`; h1 bypasses | Implemented (`masque_upstream_pool`, `masque_upstream_owner`) |
 | Client-side request headers | `connect_opts()` `request_headers` for auth schemes that ride on the handshake (Privacy Pass `Authorization: PrivateToken ...`, proxy metadata) | Implemented across all six session modules |
+| 9484 - Forwarding duties | TTL / hop-limit decrement, ICMP Time Exceeded, Packet Too Big / Fragmentation Needed above `mtu`; no ICMP error in reply to an ICMP error | Implemented (`masque_ip_proxy_handler`, `masque_ip_packet`, `masque_icmp`) |
+| 9110 §7.6.3 - `via` loop detection | Chain hops add a per-listener `via` token; a request that already names the listener gets 508 with Proxy-Status `proxy_loop_detected` | Implemented (`masque_chain_handler`) |
+| draft-ietf-httpbis-connect-tcp raw-byte mode | No `capsule-protocol` header; peer FIN half-closes the tunnel; errors reset the stream with `H3_CONNECT_ERROR` / `CONNECT_ERROR` | Implemented (`masque_tcp_*_session`, `masque_tcp_proxy_handler`) |
 | Server-side rejection challenge | `{reject, Error, ExtraHeaders}` return from `accept/1` attaches `WWW-Authenticate` / `Retry-After` / custom headers to the HTTP response | Implemented (all three server modules) |
+
+## Unreleased
+
+- **Secure defaults**: clients verify the proxy certificate
+  (`verify_peer`, system CAs, hostname check, SNI) on every
+  transport. CONNECT-IP rejects `'*'` and private prefixes, and
+  udp-bind drops loopback and private peers, unless the listener
+  sets `allow_private` (and `allow_loopback` for udp-bind).
+- **CONNECT-IP scoping**: prefix targets filter private
+  destinations per packet, hostname targets only reach advertised
+  routes, sources must fall inside the assigned prefix, and the
+  allocator never hands out an address another session holds.
+- **CONNECT-IP forwarding**: TTL / hop-limit decrement, ICMP Time
+  Exceeded, Packet Too Big / Fragmentation Needed above `mtu`
+  (default 1500), `ttl_zero` / `mtu_exceeded` counters. Chains
+  round-trip ADDRESS_REQUEST.
+- **Lifecycle**: sessions and upstream sockets end on connection
+  close, GOAWAY, stream reset and clean FIN; bytes sent before the
+  stream is claimed and handler output produced before the 2xx are
+  kept.
+- **Backpressure**: proxy sockets use `{active, N}` (`active_n`);
+  client receive queues are bounded by `rx_queue_limit`.
+- **Errors instead of crashes**: failed dials return
+  `{error, Reason}`; pool checkout returns `{error, _}` on timeout
+  or dial failure.
+- **Relay loops**: chain listeners detect loops through `via` and
+  answer 508.
+- **udp-bind**: works over h2, bounds pending compression responses
+  (`max_pending_compression_responses`), counts drops in
+  `masque_metrics:bind_drop_count/1`.
 
 ## Delivered in v0.7
 
@@ -40,8 +73,8 @@ Current coverage of the `masque` library against the relevant RFCs.
   socket per tunnel, advertises one or more public addresses on
   the response via `Proxy-Public-Address` (RFC 9651 list of String
   IP-port tuples), gates inbound packets via a `peer_filter_fun`
-  hook (default rejects RFC 1918 / link-local / multicast,
-  loopback allowed for testability), and runs an optional
+  hook (default now `masque_ip:is_public/1`; loopback needs
+  `allow_loopback`, other private peers `allow_private`), and runs an optional
   `scrub_fun` policy hook for DDoS / per-packet filtering (default
   identity).
 - **Compression Contexts** capsules (provisional IANA codes 0x11 /
@@ -210,6 +243,9 @@ Current coverage of the `masque` library against the relevant RFCs.
 - Client validates the handshake response: a 2xx carrying
   `content-length` or `content-type` is rejected as malformed per
   RFC 9297 §3.4.
+- Unreleased: clients verify proxy certificates by default,
+  CONNECT-IP and udp-bind refuse non-public destinations and peers
+  unless `allow_private` is set, and chains reject relay loops.
 
 ## Deferred to follow-up releases
 
@@ -217,9 +253,9 @@ Current coverage of the `masque` library against the relevant RFCs.
   beyond `accept/1` (e.g. Privacy Pass token verification).
 - **Client-side proxy chaining** - client controls both hops via a
   virtual-transport adapter (server-side chaining is done in v0.3).
-- **CONNECT-IP TUN device integration** - phase 2 wires
+- **CONNECT-IP TUN device integration** - a follow-up wires
   `erlang-tun` as an optional dep so a proxy can bridge tunnels to a
-  real kernel routing table. The phase-1 default handler exposes a
+  real kernel routing table. The default handler exposes a
   `forward_fun` seam; `masque_ip_tun_proxy_handler` takes over from
   there without API change.
 - **Private Relay-style relay** - separate application on top of

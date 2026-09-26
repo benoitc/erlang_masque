@@ -32,13 +32,15 @@
 -export([
     initial_route_advertisement_forwarded/1,
     upstream_failure_returns_reject/1,
-    unprompted_address_assign_forwarded/1
+    unprompted_address_assign_forwarded/1,
+    chained_address_request_answered/1
 ]).
 
 all() ->
     [
         initial_route_advertisement_forwarded,
         unprompted_address_assign_forwarded,
+        chained_address_request_answered,
         upstream_failure_returns_reject
     ].
 
@@ -90,6 +92,7 @@ init_per_testcase(Case, Config) ->
         key => maps:get(key, Ctx),
         ip_handler => EgressHandler,
         handler_opts => #{
+            allow_private => true,
             address_pool => #ip_route{
                 version = 4,
                 start_addr = {10, 77, 0, 1},
@@ -178,6 +181,19 @@ unprompted_address_assign_forwarded(Config) ->
     {ok, Assign} = recv_assign(Sess, 3000),
     #ip_assignment{request_id = 0, version = 4, address = {10, 77, 0, 1}} =
         Assign,
+    ok = masque:close(Sess).
+
+chained_address_request_answered(Config) ->
+    %% The ingress forwards ADDRESS_REQUEST to the egress, which
+    %% allocates from its pool; the answer comes back under the
+    %% client's own request ids.
+    {ok, Sess} = connect_ip(?config(ingress_port, Config)),
+    {ok, [Id1]} = masque:request_addresses(Sess, [{4, {0, 0, 0, 0}, 32}]),
+    {ok, A1} = recv_assign(Sess, 3000),
+    #ip_assignment{request_id = Id1, version = 4, address = {10, 77, 0, 1}} = A1,
+    {ok, [Id2]} = masque:request_addresses(Sess, [{4, {0, 0, 0, 0}, 32}]),
+    {ok, A2} = recv_assign(Sess, 3000),
+    #ip_assignment{request_id = Id2, address = {10, 77, 0, 2}} = A2,
     ok = masque:close(Sess).
 
 %% Drain owner messages until an `ADDRESS_ASSIGN' arrives. Discards

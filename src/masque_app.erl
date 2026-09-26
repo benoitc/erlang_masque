@@ -7,6 +7,7 @@
 start(_StartType, _StartArgs) ->
     {ok, Pid} = masque_sup:start_link(),
     masque_metrics:setup(),
+    _ = masque_chain_handler:init_node_token(),
     {ok, Pid}.
 
 stop(_State) ->

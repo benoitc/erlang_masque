@@ -28,10 +28,43 @@ masque:start_listener(my_relay, #{
         public_addresses  => [{{198,51,100,1}, 4433}],  %% required
                                                         %% if bind_address
                                                         %% is wildcard
-        peer_filter_fun   => fun custom_egress_policy/2 %% optional
+        peer_filter_fun   => fun custom_egress_policy/2, %% optional
+        allow_loopback    => false,                     %% default
+        allow_private     => false,                     %% default
+        max_pending_compression_responses => 16         %% default
     }
 }).
 ```
+
+The same options work on `masque:start_listener_h2/2` and
+`masque:start_listener_h1/2`.
+
+### Peer filter
+
+Without `peer_filter_fun`, the proxy only exchanges packets with
+public peers (`masque_ip:is_public/1`). Loopback peers need
+`allow_loopback => true`; other private, link-local, CGNAT,
+multicast or broadcast peers need `allow_private => true`.
+IPv4-mapped IPv6 peers (`::ffff:a.b.c.d`) are checked as IPv4.
+
+For a local test setup:
+
+```erlang
+handler_opts => #{bind_address => {127,0,0,1}, allow_loopback => true}
+```
+
+### Limits and drop counters
+
+The proxy keeps at most `max_pending_compression_responses`
+COMPRESSION_ASSIGN capsules waiting for an ACK. Past that, and for
+other dropped packets, it bumps a counter you can read:
+
+```erlang
+[{R, masque_metrics:bind_drop_count(R)} || R <- masque_metrics:bind_drop_reasons()].
+```
+
+Reasons: `context_zero`, `unknown_context`, `malformed`,
+`peer_filter`, `pending_limit`, `uncompressed_closed`, `other`.
 
 `bind_handler` defaults to `masque_udp_bind_proxy_handler`. To
 plug in your own handler, set
@@ -42,6 +75,7 @@ plug in your own handler, set
 ```erlang
 %% Unscoped: bind socket on the proxy can talk to any peer the
 %% operator's policy allows. The client sends to any (IP, Port).
+%% `transports => [h3, h2]' races both; h1 is also supported.
 {ok, Sess} = masque:bind_connect(<<"https://relay.example:4433">>,
                                   unscoped,
                                   #{transports => [h3]}).
@@ -63,7 +97,8 @@ plug in your own handler, set
 %% Wait for the ACK message to arrive before sending data on it.
 receive {masque_compression_acked, Sess, _} -> ok end.
 
-%% Now send to a peer.
+%% Now send to a peer. send_to/3 uses the client's own
+%% uncompressed context.
 ok = masque:send_to(Sess, {{203,0,113,1}, 53},
                     <<"hello">>).
 
@@ -89,6 +124,12 @@ A bind session emits the following messages to the owner pid
 - `{masque_compression_closed, Sess, ContextId}` - a mapping was
   retired (by either side).
 - `{masque_closed, Sess, Reason}` - tunnel teardown.
+
+`bind_connect/3` verifies the proxy certificate by default (system
+CAs, hostname check, SNI) on h1, h2 and h3; pass
+`verify => verify_none` or `cacerts` for a self-signed proxy. A dial
+failure returns `{error, Reason}`. Closing the session also closes
+the connection it opened.
 
 ## Wire format
 

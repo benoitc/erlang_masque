@@ -30,6 +30,7 @@
     handshake_rejected_no_capsule_protocol/1,
     handshake_rejected_wrong_upgrade/1,
     handshake_rejected_no_host_header/1,
+    handshake_rejected_without_connection_upgrade/1,
     init_handler_stop_produces_502_not_101/1,
     idle_timeout_closes_tunnel/1,
     drain_flag_rejects_new_tunnels/1,
@@ -48,6 +49,7 @@ all() ->
         handshake_rejected_no_capsule_protocol,
         handshake_rejected_wrong_upgrade,
         handshake_rejected_no_host_header,
+        handshake_rejected_without_connection_upgrade,
         init_handler_stop_produces_502_not_101,
         idle_timeout_closes_tunnel,
         drain_flag_rejects_new_tunnels,
@@ -269,6 +271,22 @@ handshake_rejected_no_host_header(Config) ->
             ]
         )
     ).
+
+handshake_rejected_without_connection_upgrade(Config) ->
+    %% RFC 9298 sec 3.2: the upgrade request carries `Connection:
+    %% Upgrade'; without it the request is not an upgrade.
+    Port = ?config(port, Config),
+    Status = direct_request(
+        Port,
+        <<"GET">>,
+        <<"/.well-known/masque/udp/127.0.0.1/5353/">>,
+        [
+            {<<"host">>, <<"localhost">>},
+            {<<"upgrade">>, <<"connect-udp">>},
+            {<<"capsule-protocol">>, <<"?1">>}
+        ]
+    ),
+    ?assertNotEqual(101, Status).
 
 init_handler_stop_produces_502_not_101(Config) ->
     %% A handler that refuses in `init/2' must reach the client as a

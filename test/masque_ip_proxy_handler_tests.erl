@@ -386,3 +386,299 @@ terminate_releases_assignments_test() ->
     %% (a release through a no-op registry doesn't bump). The test
     %% does not require the registry to be active.
     ?assert(masque_metrics:ip_released_count() >= Before).
+
+%%====================================================================
+%% Target scoping
+%%====================================================================
+
+accept_req(Target, Resolved, HOpts) ->
+    #{ip_target => Target, resolved_addresses => Resolved, handler_opts => HOpts}.
+
+accept_wildcard_needs_allow_private_test() ->
+    ?assertEqual(
+        {reject, forbidden},
+        masque_ip_proxy_handler:accept(accept_req('*', [], #{}))
+    ),
+    ?assertEqual(
+        accept,
+        masque_ip_proxy_handler:accept(accept_req('*', [], #{allow_private => true}))
+    ).
+
+accept_private_prefix_rejected_test() ->
+    ?assertEqual(
+        {reject, forbidden},
+        masque_ip_proxy_handler:accept(accept_req({4, {10, 0, 0, 0}, 8}, [], #{}))
+    ),
+    ?assertEqual(
+        {reject, forbidden},
+        masque_ip_proxy_handler:accept(accept_req({4, {0, 0, 0, 0}, 0}, [], #{}))
+    ),
+    ?assertEqual(
+        {reject, forbidden},
+        masque_ip_proxy_handler:accept(accept_req({6, {16#FD00, 0, 0, 0, 0, 0, 0, 0}, 8}, [], #{}))
+    ),
+    ?assertEqual(
+        accept,
+        masque_ip_proxy_handler:accept(accept_req({4, {8, 8, 8, 0}, 24}, [], #{}))
+    ).
+
+accept_hostname_checks_resolved_test() ->
+    ?assertEqual(
+        {reject, forbidden},
+        masque_ip_proxy_handler:accept(accept_req(<<"internal">>, [{127, 0, 0, 1}], #{}))
+    ),
+    ?assertEqual(
+        accept,
+        masque_ip_proxy_handler:accept(accept_req(<<"example.com">>, [{93, 184, 216, 34}], #{}))
+    ).
+
+%% forward_fun that reports the packets it sees.
+forward_probe() ->
+    Self = self(),
+    fun(Pkt, St) ->
+        Self ! {forwarded, Pkt},
+        {forward, St}
+    end.
+
+%% The handler forwards the packet with its TTL decremented.
+assert_forwarded(Pkt) ->
+    {ok, Fwd} = masque_ip_packet:decrement_ttl(Pkt),
+    receive
+        {forwarded, Fwd} -> ok
+    after 100 -> ct:fail("packet not forwarded")
+    end.
+
+assert_not_forwarded() ->
+    receive
+        {forwarded, _} -> ct:fail("packet forwarded")
+    after 50 -> ok
+    end.
+
+%% Assign 10.0.0.0/30 through the allocator.
+assigned_state(Req, Opts) ->
+    S0 = init_with(Req, Opts#{
+        address_pool => {4, {10, 0, 0, 0}, 24},
+        min_assignable_prefix => #{4 => 30}
+    }),
+    Reqs = [
+        #ip_prefix_request{
+            request_id = 1,
+            version = 4,
+            address = {0, 0, 0, 0},
+            prefix_len = 30
+        }
+    ],
+    {ok, S1, [{assign, [#ip_assignment{address = {10, 0, 0, 0}, prefix_len = 30}]}]} =
+        masque_ip_proxy_handler:handle_address_request(Reqs, S0),
+    S1.
+
+hostname_off_route_dropped_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    Req = #{
+        ip_target => <<"example.com">>,
+        ip_ipproto => '*',
+        resolved_addresses => [{93, 184, 216, 34}]
+    },
+    S = assigned_state(Req, #{forward_fun => forward_probe()}),
+    Before = masque_metrics:ip_drop_count(scope_target),
+    Off = v4_packet(10, 0, 0, 1, 8, 8, 8, 8, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Off, S),
+    assert_not_forwarded(),
+    ?assertEqual(Before + 1, masque_metrics:ip_drop_count(scope_target)),
+    On = v4_packet(10, 0, 0, 1, 93, 184, 216, 34, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(On, S),
+    assert_forwarded(On).
+
+prefix_target_private_destination_dropped_test() ->
+    drain(),
+    %% 8.0.0.0/5 starts and ends public but covers 10.0.0.0/8.
+    Req = #{ip_target => {4, {8, 0, 0, 0}, 5}, ip_ipproto => '*'},
+    S = assigned_state(Req, #{forward_fun => forward_probe()}),
+    Priv = v4_packet(10, 0, 0, 1, 10, 1, 1, 1, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Priv, S),
+    assert_not_forwarded(),
+    Pub = v4_packet(10, 0, 0, 1, 8, 8, 8, 8, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Pub, S),
+    assert_forwarded(Pub).
+
+unassigned_source_dropped_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    Req = #{ip_target => {8, 8, 8, 8}, ip_ipproto => '*'},
+    S = init_with(Req, #{forward_fun => forward_probe()}),
+    Before = masque_metrics:ip_drop_count(bcp38),
+    Pkt = v4_packet(10, 0, 0, 1, 8, 8, 8, 8, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    assert_not_forwarded(),
+    ?assertEqual(Before + 1, masque_metrics:ip_drop_count(bcp38)).
+
+prefix_assigned_source_passes_test() ->
+    drain(),
+    Req = #{ip_target => {8, 8, 8, 8}, ip_ipproto => '*'},
+    S = assigned_state(Req, #{forward_fun => forward_probe()}),
+    %% 10.0.0.2 is inside the assigned 10.0.0.0/30.
+    In = v4_packet(10, 0, 0, 2, 8, 8, 8, 8, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(In, S),
+    assert_forwarded(In),
+    Out = v4_packet(10, 0, 0, 4, 8, 8, 8, 8, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Out, S),
+    assert_not_forwarded().
+
+%%====================================================================
+%% Router duties: TTL and MTU
+%%====================================================================
+
+router_state(Opts) ->
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    init_with(Req, Opts#{allow_private => true, forward_fun => forward_probe()}).
+
+v4_packet_ttl(TTL, Size) ->
+    Payload = binary:copy(<<0>>, Size - 20),
+    Hdr0 = <<16#45, 0, Size:16, 0:16, 2#010:3, 0:13, TTL, 17, 0:16, 10, 0, 0, 1, 8, 8, 8, 8>>,
+    Csum = masque_ip_packet:checksum(Hdr0),
+    <<16#45, 0, Size:16, 0:16, 2#010:3, 0:13, TTL, 17, Csum:16, 10, 0, 0, 1, 8, 8, 8, 8,
+        Payload/binary>>.
+
+v6_packet_hl(HopLimit, Size) ->
+    Plen = Size - 40,
+    <<6:4, 0:8, 0:20, Plen:16, 17, HopLimit, 16#2001:16, 16#DB8:16, 0:80, 1:16, 16#2606:16,
+        16#4700:16, 0:80, 1:16, (binary:copy(<<0>>, Plen))/binary>>.
+
+ttl_decremented_on_forward_test() ->
+    drain(),
+    S = router_state(#{}),
+    Pkt = v4_packet_ttl(64, 40),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    receive
+        {forwarded, <<_:8/binary, 63, _:8, Csum:16, _/binary>> = Fwd} ->
+            <<Hdr:20/binary, _/binary>> = Fwd,
+            %% A valid header sums to zero.
+            ?assertEqual(0, masque_ip_packet:checksum(Hdr)),
+            ?assertNotEqual(0, Csum)
+    after 100 -> ct:fail("packet not forwarded")
+    end.
+
+ttl_one_yields_time_exceeded_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    S = router_state(#{}),
+    Before = masque_metrics:ip_drop_count(ttl_zero),
+    Pkt = v4_packet_ttl(1, 40),
+    {ok, _, [{send_ip_packet, Icmp}]} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    assert_not_forwarded(),
+    %% IPv4 + ICMP type 11 code 0.
+    ?assertMatch(<<4:4, _:68, 1, _:80, 11, 0, _/binary>>, Icmp),
+    ?assertEqual(Before + 1, masque_metrics:ip_drop_count(ttl_zero)).
+
+hop_limit_one_yields_time_exceeded_test() ->
+    drain(),
+    S = router_state(#{}),
+    Pkt = v6_packet_hl(1, 60),
+    {ok, _, [{send_ip_packet, Icmp}]} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    assert_not_forwarded(),
+    %% IPv6 next header 58 (ICMPv6), type 3 code 0.
+    ?assertMatch(<<6:4, _:44, 58, _:8, _:256, 3, 0, _/binary>>, Icmp).
+
+oversize_v6_yields_packet_too_big_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    S = router_state(#{mtu => 1280}),
+    Before = masque_metrics:ip_drop_count(mtu_exceeded),
+    Pkt = v6_packet_hl(64, 1300),
+    {ok, _, [{send_ip_packet, Icmp}]} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    assert_not_forwarded(),
+    %% ICMPv6 type 2 code 0 carrying the MTU.
+    ?assertMatch(<<6:4, _:44, 58, _:8, _:256, 2, 0, _:16, 1280:32, _/binary>>, Icmp),
+    ?assertEqual(Before + 1, masque_metrics:ip_drop_count(mtu_exceeded)),
+    %% At the MTU it goes through.
+    Fits = v6_packet_hl(64, 1280),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Fits, S),
+    assert_forwarded(Fits).
+
+oversize_v4_yields_frag_needed_test() ->
+    drain(),
+    S = router_state(#{mtu => 576}),
+    Pkt = v4_packet_ttl(64, 600),
+    {ok, _, [{send_ip_packet, Icmp}]} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    assert_not_forwarded(),
+    %% ICMP type 3 code 4, next-hop MTU in the low 16 bits.
+    ?assertMatch(<<4:4, _:68, 1, _:80, 3, 4, _:16, 0:16, 576:16, _/binary>>, Icmp).
+
+icmp_v4_packet(TTL, Type, Size) ->
+    Payload = <<Type, 0, (binary:copy(<<0>>, Size - 22))/binary>>,
+    Hdr0 = <<16#45, 0, Size:16, 0:16, 0:16, TTL, 1, 0:16, 10, 0, 0, 1, 8, 8, 8, 8>>,
+    Csum = masque_ip_packet:checksum(Hdr0),
+    <<16#45, 0, Size:16, 0:16, 0:16, TTL, 1, Csum:16, 10, 0, 0, 1, 8, 8, 8, 8, Payload/binary>>.
+
+icmp_v6_packet(HopLimit, Type, Size) ->
+    Plen = Size - 40,
+    <<6:4, 0:8, 0:20, Plen:16, 58, HopLimit, 16#2001:16, 16#DB8:16, 0:80, 1:16, 16#2606:16,
+        16#4700:16, 0:80, 1:16, Type, 0, (binary:copy(<<0>>, Plen - 2))/binary>>.
+
+%% RFC 1122 §3.2.2: no ICMP error in reply to an ICMP error; the drop
+%% is still counted.
+icmp_v4_error_gets_no_time_exceeded_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    S = router_state(#{}),
+    Before = masque_metrics:ip_drop_count(ttl_zero),
+    [
+        ?assertMatch({ok, _}, masque_ip_proxy_handler:handle_ip_packet(icmp_v4_packet(1, T, 60), S))
+     || T <- [3, 4, 5, 11, 12]
+    ],
+    assert_not_forwarded(),
+    ?assertEqual(Before + 5, masque_metrics:ip_drop_count(ttl_zero)),
+    %% An echo request is not an error message and still gets one.
+    ?assertMatch(
+        {ok, _, [{send_ip_packet, _}]},
+        masque_ip_proxy_handler:handle_ip_packet(icmp_v4_packet(1, 8, 60), S)
+    ).
+
+%% RFC 4443 §2.4 (e): same rule for ICMPv6 error messages (type < 128).
+icmp_v6_error_gets_no_time_exceeded_test() ->
+    drain(),
+    S = router_state(#{}),
+    [
+        ?assertMatch({ok, _}, masque_ip_proxy_handler:handle_ip_packet(icmp_v6_packet(1, T, 80), S))
+     || T <- [1, 2, 3, 4]
+    ],
+    assert_not_forwarded(),
+    ?assertMatch(
+        {ok, _, [{send_ip_packet, _}]},
+        masque_ip_proxy_handler:handle_ip_packet(icmp_v6_packet(1, 128, 80), S)
+    ).
+
+icmp_v6_error_gets_no_packet_too_big_test() ->
+    ok = masque_metrics:setup_ip_counters(),
+    drain(),
+    S = router_state(#{mtu => 1280}),
+    Before = masque_metrics:ip_drop_count(mtu_exceeded),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(icmp_v6_packet(64, 2, 1300), S),
+    assert_not_forwarded(),
+    ?assertEqual(Before + 1, masque_metrics:ip_drop_count(mtu_exceeded)).
+
+peer_capsules_recorded_test() ->
+    drain(),
+    Self = self(),
+    Hook = fun(E, D) -> Self ! {hook, E, D} end,
+    S0 = router_state(#{lifecycle_fun => Hook}),
+    Route = #ip_route{
+        version = 4,
+        start_addr = {192, 0, 2, 0},
+        end_addr = {192, 0, 2, 255},
+        ip_protocol = 0
+    },
+    {ok, _} = masque_ip_proxy_handler:handle_route_advertisement([Route], S0),
+    receive
+        {hook, peer_routes_advertised, #{routes := [Route]}} -> ok
+    after 100 -> ct:fail("no peer_routes_advertised")
+    end,
+    Assign = #ip_assignment{
+        request_id = 0, version = 4, address = {192, 0, 2, 1}, prefix_len = 32
+    },
+    {ok, _} = masque_ip_proxy_handler:handle_address_assign([Assign], S0),
+    receive
+        {hook, peer_address_assigned, #{entries := [Assign]}} -> ok
+    after 100 -> ct:fail("no peer_address_assigned")
+    end.

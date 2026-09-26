@@ -206,16 +206,16 @@ connection_closed_broadcasts_to_all_sessions_test() ->
     end,
     {ok, _S2, _} =
         ?M:acquire_stream(Owner, sample_headers(), OtherSession, #{}),
-    %% Simulate conn close: owner receives `{h2, Conn, closed}'
-    ?MOCK:simulate(Mock, {send_to_owner, Owner, {h2, Mock, closed}}),
-    %% Our test process should see `{h2, _, closed}' and the spawned
+    %% Simulate conn close: owner receives `{h2, Conn, {closed, Reason}}'
+    ?MOCK:simulate(Mock, {send_to_owner, Owner, {h2, Mock, {closed, normal}}}),
+    %% Our test process should see `{h2, _, {closed, _}}' and the spawned
     %% session should too.
     receive
-        {h2, _, closed} -> ok
+        {h2, _, {closed, _}} -> ok
     after 1000 -> ct:fail(no_closed_to_self)
     end,
     receive
-        {other_got, {h2, _, closed}} -> ok
+        {other_got, {h2, _, {closed, _}}} -> ok
     after 1000 -> ct:fail(no_closed_to_other)
     end,
     %% Owner should be stopping (normal).
@@ -230,7 +230,7 @@ conn_death_stops_owner_test() ->
     true = wait_dead(Owner, 1000),
     %% Our session received the closed notification.
     receive
-        {h2, _, closed} -> ok
+        {h2, _, {closed, _}} -> ok
     after 1000 -> ct:fail(no_closed_on_conn_death)
     end.
 

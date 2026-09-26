@@ -33,7 +33,11 @@
     cap_fin_seen = false :: boolean(),
     %% Actions from handler init, applied after finalize
     pending_actions :: [term()] | undefined,
-    start_time :: integer() | undefined
+    router_ref :: reference(),
+    start_time :: integer() | undefined,
+    %% Handler messages that arrived before finalize, newest first.
+    %% Replayed once the 2xx is sent.
+    early = [] :: [term()]
 }).
 
 %%====================================================================
@@ -58,7 +62,7 @@ init(#{
 }) ->
     process_flag(trap_exit, true),
     %% Monitor router so we stop if it dies during or after init.
-    erlang:monitor(process, Router),
+    RouterRef = erlang:monitor(process, Router),
     %% RFC 9298 §3: a 2xx response means the tunnel is set up and the
     %% proxy is ready to forward UDP. So the user's `init/2' (which
     %% for the built-in proxy opens the gen_udp socket and validates
@@ -82,7 +86,8 @@ init(#{
                 h_state = HState,
                 req = Req,
                 max_cap = MaxCap,
-                pending_actions = Actions
+                pending_actions = Actions,
+                router_ref = RouterRef
             },
             {ok, State};
         {stop, Reason} ->
@@ -92,65 +97,80 @@ init(#{
 response_headers() ->
     [{<<"capsule-protocol">>, <<"?1">>}].
 
-claim_stream(
-    #state{
-        conn = Conn,
-        stream_id = StreamId,
-        cap_buf = Buf
-    } = S
-) ->
-    case quic_h3:set_stream_handler(Conn, StreamId, self()) of
-        ok ->
-            {ok, S};
-        {ok, Chunks} ->
-            More = iolist_to_binary([D || {D, _Fin} <- Chunks]),
-            {ok, S#state{cap_buf = <<Buf/binary, More/binary>>}};
-        {error, _} = Err ->
-            Err
+%% `drain_buffer => false' makes quic_h3 replay bytes that arrived
+%% before the claim as ordinary `{data, _, _, Fin}' messages, ahead of
+%% any later data, so they go through the normal decode path.
+claim_stream(#state{conn = Conn, stream_id = StreamId} = S) ->
+    case
+        quic_h3:set_stream_handler(Conn, StreamId, self(), #{
+            drain_buffer => false
+        })
+    of
+        {error, _} = Err -> Err;
+        _ -> {ok, S}
     end.
 
-handle_call(
-    finalize,
-    _From,
-    #state{
-        pending_actions = Actions,
-        conn = Conn,
-        stream_id = StreamId
-    } = S
-) when
-    Actions =/= undefined
-->
-    case
-        quic_h3:send_response(
-            Conn,
-            StreamId,
-            200,
-            response_headers()
-        )
-    of
+%% Send the 2xx, claim the stream, run the handler's init actions,
+%% then replay the handler messages that arrived meanwhile.
+finalize(#state{pending_actions = Actions, conn = Conn, stream_id = StreamId} = S) ->
+    case quic_h3:send_response(Conn, StreamId, 200, response_headers()) of
         ok ->
             case claim_stream(S#state{pending_actions = undefined}) of
                 {ok, State} ->
                     masque_metrics:tunnel_opened(
                         #{protocol => udp, transport => h3}
                     ),
-                    {reply, ok,
-                        run_init_actions(
-                            Actions,
-                            State#state{
-                                start_time =
-                                    erlang:monotonic_time(millisecond)
-                            }
-                        )};
+                    S1 = run_init_actions(
+                        Actions,
+                        State#state{
+                            start_time = erlang:monotonic_time(millisecond)
+                        }
+                    ),
+                    replay_early(lists:reverse(S1#state.early), S1#state{early = []});
                 {error, _} ->
-                    {reply, {error, stream_dead}, S}
+                    {error, S}
             end;
         {error, _} ->
-            {reply, {error, stream_dead}, S}
+            {error, S}
+    end.
+
+replay_early([], S) ->
+    {ok, S};
+replay_early([Msg | Rest], S) ->
+    case handle_info(Msg, S) of
+        {noreply, S2} -> replay_early(Rest, S2);
+        {stop, Reason, S2} -> {stop, Reason, S2}
+    end.
+
+handle_call(finalize, _From, #state{pending_actions = Actions} = S) when
+    Actions =/= undefined
+->
+    case finalize(S) of
+        {ok, S2} -> {reply, ok, S2};
+        {stop, Reason, S2} -> {stop, Reason, ok, S2};
+        {error, S2} -> {reply, {error, stream_dead}, S2}
     end;
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
+%% Asynchronous finalize from the router: run the same steps as the
+%% `finalize' call and report back; the session stops if the stream
+%% could not be opened.
+handle_cast({finalize, Router}, #state{pending_actions = Actions} = S) when
+    Actions =/= undefined
+->
+    Result = finalize(S),
+    Reply =
+        case Result of
+            {error, _} -> {error, stream_dead};
+            _ -> ok
+        end,
+    Router ! {masque_finalized, S#state.stream_id, self(), Reply},
+    case Result of
+        {ok, S2} -> {noreply, S2};
+        {stop, Reason, S2} -> {stop, Reason, S2};
+        {error, S2} -> {stop, stream_dead, S2}
+    end;
 handle_cast(connection_closed, S) ->
     {stop, connection_closed, S};
 handle_cast(_Msg, S) ->
@@ -193,9 +213,22 @@ handle_info(
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
-handle_info({'DOWN', _MRef, process, _Pid, _Reason}, S) ->
+%% Once the stream is claimed, quic_h3 reports resets to us directly.
+handle_info(
+    {quic_h3, _Conn, {stream_reset, StreamId, _ErrorCode}},
+    #state{stream_id = StreamId} = S
+) ->
+    {stop, peer_reset, S};
+handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
     %% Router died - clean up
     {stop, router_gone, S};
+handle_info(Msg, #state{pending_actions = Actions, early = Early} = S) when
+    Actions =/= undefined
+->
+    %% Not finalized yet: nothing may be written to the stream before
+    %% the 2xx, so keep the message for `finalize'. The target socket's
+    %% `{active, N}' window bounds how many pile up.
+    {noreply, S#state{early = [Msg | Early]}};
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
@@ -437,6 +470,10 @@ drain_capsules(Buf, Fin, S) ->
         {more, _} when Fin, Buf =/= <<>> ->
             %% Stream closed mid-capsule — truncated.
             reset_and_stop(truncated_capsule, S);
+        {more, _} when Fin ->
+            %% Clean FIN on a capsule boundary: the client ended the
+            %% tunnel. terminate/2 sends our FIN back.
+            {stop, normal, S#state{cap_buf = <<>>}};
         {more, _} ->
             {noreply, S#state{cap_buf = Buf}};
         {error, _Reason} ->

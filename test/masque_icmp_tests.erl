@@ -117,6 +117,16 @@ apply_action_packet_too_big_test() ->
     Via = masque_icmp:apply_action(packet_too_big, 1500, Invoking),
     ?assertEqual(Direct, Via).
 
+v4_frag_needed_test() ->
+    Invoking = sample_v4_packet(),
+    Pkt = masque_icmp:frag_needed(1400, Invoking),
+    <<Header:20/binary, Icmp/binary>> = Pkt,
+    ?assertEqual(0, verify_checksum(Header)),
+    ?assertEqual(0, verify_checksum(Icmp)),
+    %% Type 3 code 4, unused 16 bits, next-hop MTU (RFC 1191 sec 4).
+    ?assertMatch(<<3:8, 4:8, _:16, 0:16, 1400:16, _/binary>>, Icmp),
+    ?assertEqual(Pkt, masque_icmp:apply_action(frag_needed, 1400, Invoking)).
+
 %%====================================================================
 %% Internal
 %%====================================================================
@@ -142,3 +152,26 @@ finish(Sum) ->
     S = (Sum band 16#FFFF) + (Sum bsr 16),
     S2 = (S band 16#FFFF) + (S bsr 16),
     (bnot S2) band 16#FFFF.
+
+%%====================================================================
+%% is_error/1
+%%====================================================================
+
+is_error_v4_types_test() ->
+    [?assert(masque_icmp:is_error(icmp4(T))) || T <- [3, 4, 5, 11, 12]],
+    [?assertNot(masque_icmp:is_error(icmp4(T))) || T <- [0, 8, 13]].
+
+is_error_v6_types_test() ->
+    [?assert(masque_icmp:is_error(icmp6(T))) || T <- [1, 2, 3, 4, 127]],
+    [?assertNot(masque_icmp:is_error(icmp6(T))) || T <- [128, 129, 135]].
+
+is_error_not_icmp_test() ->
+    Udp = <<16#45, 0, 28:16, 0:16, 0:16, 64, 17, 0:16, 10, 0, 0, 1, 8, 8, 8, 8, 3, 0, 0:48>>,
+    ?assertNot(masque_icmp:is_error(Udp)),
+    ?assertNot(masque_icmp:is_error(<<"garbage">>)).
+
+icmp4(Type) ->
+    <<16#45, 0, 28:16, 0:16, 0:16, 64, 1, 0:16, 10, 0, 0, 1, 8, 8, 8, 8, Type, 0, 0:48>>.
+
+icmp6(Type) ->
+    <<6:4, 0:8, 0:20, 8:16, 58, 64, 0:128, 0:128, Type, 0, 0:48>>.

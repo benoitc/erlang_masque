@@ -16,6 +16,8 @@ decode_truncated_value_test() ->
     Bin = <<0, 4, 1, 2>>,
     ?assertMatch({more, _}, masque_capsule:decode(Bin)).
 
-no_types_known_by_default_test() ->
-    ?assertNot(masque_capsule:known(0)),
-    ?assertNot(masque_capsule:known(16#ff37a0)).
+implemented_types_are_known_test() ->
+    [?assert(masque_capsule:known(T)) || T <- [0, 1, 2, 3, 16#11, 16#12, 16#13]].
+
+other_types_are_unknown_test() ->
+    [?assertNot(masque_capsule:known(T)) || T <- [4, 16#10, 16#14, 16#ff37a0]].

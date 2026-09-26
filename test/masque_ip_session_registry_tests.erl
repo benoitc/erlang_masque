@@ -1,6 +1,7 @@
 -module(masque_ip_session_registry_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+-include("masque_ip.hrl").
 
 %%====================================================================
 %% Module-level fixture: one registry instance shared across all
@@ -16,7 +17,9 @@ registry_test_() ->
             {"overlapping prefix rejected", fun overlapping_prefix_rejected/0},
             {"release clears lookup", fun release_clears_lookup/0},
             {"down pid releases entries", fun down_pid_releases_entries/0},
-            {"ipv6 lookup", fun ipv6_lookup/0}
+            {"ipv6 lookup", fun ipv6_lookup/0},
+            {"release ignores other pid's entry", fun release_other_pid_is_noop/0},
+            {"shared pool gives distinct addresses", fun shared_pool_distinct_addresses/0}
         ]
     end}.
 
@@ -167,6 +170,80 @@ ipv6_lookup() ->
             {16#2001, 16#DB8, 0, 0, 16#1234, 0, 0, 1}
         )
     ).
+
+release_other_pid_is_noop() ->
+    clear(),
+    Owner = self(),
+    ok = masque_ip_session_registry:register(
+        4, {10, 0, 0, 9}, 32, Owner, 0
+    ),
+    Other = spawn(fun() -> ok end),
+    ok = masque_ip_session_registry:release(4, {10, 0, 0, 9}, 32, Other),
+    ?assertEqual(
+        {ok, Owner, 0},
+        masque_ip_session_registry:lookup({10, 0, 0, 9})
+    ),
+    %% release/3 releases on behalf of the caller.
+    ok = masque_ip_session_registry:release(4, {10, 0, 0, 9}, 32),
+    ?assertEqual(
+        not_found,
+        masque_ip_session_registry:lookup({10, 0, 0, 9})
+    ).
+
+%% Two proxy-handler sessions allocating from the same pool must not
+%% hand out the same address, and ending one keeps the other routable.
+shared_pool_distinct_addresses() ->
+    clear(),
+    Self = self(),
+    Pool = {4, {10, 9, 0, 0}, 30},
+    Start = fun() ->
+        spawn(fun() -> handler_session(Self, Pool) end)
+    end,
+    A = Start(),
+    AddrA = receive_assigned(A),
+    B = Start(),
+    AddrB = receive_assigned(B),
+    ?assertNotEqual(AddrA, AddrB),
+    ?assertMatch({ok, A, _}, masque_ip_session_registry:lookup(AddrA)),
+    ?assertMatch({ok, B, _}, masque_ip_session_registry:lookup(AddrB)),
+    A ! {stop, Self},
+    receive
+        {stopped, A} -> ok
+    after 1000 -> ct:fail("session A did not stop")
+    end,
+    ?assertEqual(not_found, masque_ip_session_registry:lookup(AddrA)),
+    ?assertMatch({ok, B, _}, masque_ip_session_registry:lookup(AddrB)),
+    B ! {stop, Self},
+    receive
+        {stopped, B} -> ok
+    after 1000 -> ct:fail("session B did not stop")
+    end.
+
+handler_session(Parent, Pool) ->
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    {ok, S0} = masque_ip_proxy_handler:init(Req, #{address_pool => Pool}),
+    Reqs = [
+        #ip_prefix_request{
+            request_id = 1,
+            version = 4,
+            address = {0, 0, 0, 0},
+            prefix_len = 32
+        }
+    ],
+    {ok, S1, [{assign, [#ip_assignment{address = Addr}]}]} =
+        masque_ip_proxy_handler:handle_address_request(Reqs, S0),
+    Parent ! {assigned, self(), Addr},
+    receive
+        {stop, From} ->
+            ok = masque_ip_proxy_handler:terminate(normal, S1),
+            From ! {stopped, self()}
+    end.
+
+receive_assigned(Pid) ->
+    receive
+        {assigned, Pid, Addr} -> Addr
+    after 1000 -> ct:fail("no address assigned")
+    end.
 
 wait_for(Pred, Until) ->
     case Pred() of

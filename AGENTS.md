@@ -9,8 +9,8 @@ Instructions for AI coding agents working on this project.
 variant, carried over HTTP/3, HTTP/2, and HTTP/1.1. It is built on
 [`erlang_quic`](https://github.com/benoitc/erlang_quic) (`quic_h3`),
 [`erlang_h2`](https://github.com/benoitc/erlang_h2), and
-[`erlang_h1`](https://github.com/benoitc/erlang_h1). Requires Erlang/OTP 26.0+
-(the floor set by `quic`) and rebar3.
+[`erlang_h1`](https://github.com/benoitc/erlang_h1). Requires Erlang/OTP 29
+and rebar3.
 
 ## Required Checks
 

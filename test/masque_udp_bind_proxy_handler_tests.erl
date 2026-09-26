@@ -86,7 +86,7 @@ init_uses_public_address_fun_test() ->
 
 handle_bind_packet_loopback_passes_test() ->
     {Listener, ListenerSock, ListenerPort} = open_listener(),
-    Opts = #{bind_address => {127, 0, 0, 1}},
+    Opts = #{bind_address => {127, 0, 0, 1}, allow_loopback => true},
     {ok, State, _} = masque_udp_bind_proxy_handler:init(req(), Opts),
     {ok, _NewState} =
         masque_udp_bind_proxy_handler:handle_bind_packet(
@@ -111,6 +111,37 @@ handle_bind_packet_private_address_filtered_by_default_test() ->
     ),
     cleanup(State).
 
+%% The scrub_fun runs after the peer filter, so `{drop, scrubbed, _}'
+%% means the filter let the peer through.
+filter_verdict(Peer, Extra) ->
+    Scrub = fun(_Pkt, US) -> {drop, scrubbed, US} end,
+    Opts = maps:merge(#{bind_address => {127, 0, 0, 1}, scrub_fun => Scrub}, Extra),
+    {ok, State, _} = masque_udp_bind_proxy_handler:init(req(), Opts),
+    {drop, Reason, _} =
+        masque_udp_bind_proxy_handler:handle_bind_packet({Peer, 1234}, <<"x">>, State),
+    cleanup(State),
+    Reason.
+
+default_filter_drops_loopback_test() ->
+    ?assertEqual(peer_filter, filter_verdict({127, 0, 0, 1}, #{})),
+    ?assertEqual(peer_filter, filter_verdict({0, 0, 0, 0, 0, 0, 0, 1}, #{})),
+    ?assertEqual(scrubbed, filter_verdict({127, 0, 0, 1}, #{allow_loopback => true})).
+
+default_filter_unwraps_mapped_v6_test() ->
+    Mapped = fun({A, B, C, D}) -> {0, 0, 0, 0, 0, 16#FFFF, (A bsl 8) bor B, (C bsl 8) bor D} end,
+    ?assertEqual(peer_filter, filter_verdict(Mapped({127, 0, 0, 1}), #{})),
+    ?assertEqual(peer_filter, filter_verdict(Mapped({10, 0, 0, 1}), #{})),
+    ?assertEqual(scrubbed, filter_verdict(Mapped({8, 8, 8, 8}), #{})).
+
+default_filter_drops_cgnat_and_broadcast_test() ->
+    ?assertEqual(peer_filter, filter_verdict({100, 64, 0, 1}, #{})),
+    ?assertEqual(peer_filter, filter_verdict({255, 255, 255, 255}, #{})),
+    ?assertEqual(scrubbed, filter_verdict({8, 8, 8, 8}, #{})).
+
+allow_private_passes_everything_test() ->
+    ?assertEqual(scrubbed, filter_verdict({10, 0, 0, 1}, #{allow_private => true})),
+    ?assertEqual(scrubbed, filter_verdict({127, 0, 0, 1}, #{allow_private => true})).
+
 %% Custom peer_filter_fun overrides the default.
 handle_bind_packet_custom_filter_test() ->
     DenyAll = fun(_IP, _Port) -> {drop, my_reason} end,
@@ -133,7 +164,7 @@ handle_bind_packet_custom_filter_test() ->
 
 scrub_fun_can_drop_packets_test() ->
     Drop = fun(_Pkt, US) -> {drop, scrubbed, US} end,
-    Opts = #{bind_address => {127, 0, 0, 1}, scrub_fun => Drop},
+    Opts = #{bind_address => {127, 0, 0, 1}, allow_loopback => true, scrub_fun => Drop},
     {ok, State, _} = masque_udp_bind_proxy_handler:init(req(), Opts),
     ?assertMatch(
         {drop, scrubbed, _},
@@ -146,7 +177,7 @@ scrub_fun_can_drop_packets_test() ->
 scrub_fun_can_rewrite_payload_test() ->
     {Listener, Sock, Port} = open_listener(),
     Rewrite = fun(_Pkt, US) -> {pass, <<"REWRITTEN">>, US} end,
-    Opts = #{bind_address => {127, 0, 0, 1}, scrub_fun => Rewrite},
+    Opts = #{bind_address => {127, 0, 0, 1}, allow_loopback => true, scrub_fun => Rewrite},
     {ok, State, _} = masque_udp_bind_proxy_handler:init(req(), Opts),
     {ok, _} =
         masque_udp_bind_proxy_handler:handle_bind_packet(

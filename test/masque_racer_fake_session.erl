@@ -19,6 +19,11 @@
 %%%
 %%% Top-level `fake_result' / `fake_delay_ms' keys act as the default
 %%% for transports not listed in `fake_by_transport'.
+%%%
+%%% `fake_notify => Pid' reports `{fake_started, Transport, Session}'
+%%% to `Pid' from `init/1'. `fake_event => true' makes a session that
+%%% resolves `ok' send `{fake_event, Session}' to its owner right away,
+%%% through `masque_client_owner' like the real sessions.
 -module(masque_racer_fake_session).
 -behaviour(gen_statem).
 
@@ -30,7 +35,8 @@
     result :: ok | {error, term()},
     delay_ms :: non_neg_integer(),
     handshake_from :: undefined | gen_statem:from(),
-    owner :: pid()
+    owner :: pid(),
+    event :: boolean()
 }).
 
 start(_Target, Opts, Owner) ->
@@ -42,11 +48,17 @@ stop(Pid) ->
 callback_mode() -> state_functions.
 
 init({Opts, Owner}) ->
+    ok = masque_client_owner:init(Opts),
+    case maps:get(fake_notify, Opts, undefined) of
+        undefined -> ok;
+        Notify -> Notify ! {fake_started, maps:get(transport, Opts, undefined), self()}
+    end,
     {Result, Delay} = resolve_tuning(Opts),
     Data = #data{
         result = Result,
         delay_ms = Delay,
-        owner = Owner
+        owner = Owner,
+        event = maps:get(fake_event, Opts, false)
     },
     {ok, connecting, Data, [{state_timeout, Delay, resolve}]}.
 
@@ -66,6 +78,7 @@ connecting(state_timeout, resolve, #data{result = Result} = D) ->
     case Result of
         ok ->
             _ = reply_handshake(D, ok),
+            ok = maybe_event(D),
             {next_state, open, D#data{handshake_from = undefined}};
         {error, _} = Err ->
             _ = reply_handshake(D, Err),
@@ -74,14 +87,14 @@ connecting(state_timeout, resolve, #data{result = Result} = D) ->
 connecting({call, From}, handshake_await, D) ->
     {keep_state, D#data{handshake_from = From}};
 connecting({call, From}, {set_owner, NewOwner}, D) ->
-    {keep_state, D#data{owner = NewOwner}, [{reply, From, ok}]};
+    {keep_state, set_owner(NewOwner, D), [{reply, From, ok}]};
 connecting({call, From}, stop, D) ->
     {stop_and_reply, normal, [{reply, From, ok}], D}.
 
 open({call, From}, handshake_await, D) ->
     {keep_state, D, [{reply, From, ok}]};
 open({call, From}, {set_owner, NewOwner}, D) ->
-    {keep_state, D#data{owner = NewOwner}, [{reply, From, ok}]};
+    {keep_state, set_owner(NewOwner, D), [{reply, From, ok}]};
 open({call, From}, stop, D) ->
     {stop_and_reply, normal, [{reply, From, ok}], D}.
 
@@ -91,3 +104,12 @@ code_change(_OldVsn, State, D, _Extra) -> {ok, State, D}.
 
 reply_handshake(#data{handshake_from = undefined}, _Reply) -> ok;
 reply_handshake(#data{handshake_from = From}, Reply) -> gen_statem:reply(From, Reply).
+
+set_owner(NewOwner, D) ->
+    ok = masque_client_owner:release(NewOwner),
+    D#data{owner = NewOwner}.
+
+maybe_event(#data{event = true, owner = Owner}) ->
+    masque_client_owner:send(Owner, {fake_event, self()});
+maybe_event(_D) ->
+    ok.

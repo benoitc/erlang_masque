@@ -239,33 +239,43 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
                     udp_bind -> BindHandler
                 end,
             Req1 = Req0#{handler_opts => HandlerOpts},
-            case resolve_target(Protocol, Req1, Resolver) of
+            case masque_ip:resolve_target(Protocol, Req1, Resolver) of
                 {ok, Req} ->
                     MaxT = maps:get(max_tunnels, Dispatch, 0),
                     case accept_request(HandlerMod, Req) of
                         accept when MaxT > 0 ->
                             case try_reserve_tunnel(Conn, MaxT) of
                                 true ->
-                                    spawn_session(
-                                        Conn,
-                                        StreamId,
-                                        Protocol,
-                                        HandlerMod,
-                                        HandlerOpts,
-                                        Req
-                                    );
+                                    case
+                                        spawn_session(
+                                            Conn,
+                                            StreamId,
+                                            Protocol,
+                                            HandlerMod,
+                                            HandlerOpts,
+                                            Req
+                                        )
+                                    of
+                                        ok ->
+                                            ok;
+                                        {error, _} ->
+                                            %% No session: give the
+                                            %% slot back.
+                                            release_tunnel(Conn)
+                                    end;
                                 false ->
                                     reject(Conn, StreamId, overload)
                             end;
                         accept ->
-                            spawn_session(
+                            _ = spawn_session(
                                 Conn,
                                 StreamId,
                                 Protocol,
                                 HandlerMod,
                                 HandlerOpts,
                                 Req
-                            );
+                            ),
+                            ok;
                         {reject, Reason} ->
                             reject(Conn, StreamId, Reason);
                         {reject, Reason, Extra} when is_list(Extra) ->
@@ -283,23 +293,6 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
             end
     end.
 
-%% RFC 9484 §4.7.1 — hostname targets resolved before accept/1
-resolve_target(ip, #{ip_target := Target} = Req, Resolver) when
-    is_binary(Target)
-->
-    case Resolver(Target) of
-        {ok, Addrs} -> {ok, Req#{resolved_addresses => Addrs}};
-        {error, _} -> {error, resolution_failed}
-    end;
-resolve_target(ip, #{ip_target := {_, _, _, _} = A} = Req, _Resolver) ->
-    {ok, Req#{resolved_addresses => [A]}};
-resolve_target(ip, #{ip_target := {_, _, _, _, _, _, _, _} = A} = Req, _Resolver) ->
-    {ok, Req#{resolved_addresses => [A]}};
-resolve_target(ip, Req, _Resolver) ->
-    {ok, Req#{resolved_addresses => []}};
-resolve_target(_, Req, _Resolver) ->
-    {ok, Req}.
-
 spawn_session(Conn, StreamId, Protocol, Handler, HOpts, Req) ->
     Args = #{
         conn => Conn,
@@ -311,8 +304,11 @@ spawn_session(Conn, StreamId, Protocol, Handler, HOpts, Req) ->
         req => Req
     },
     case masque_h2_session_sup:start_session(Args) of
-        {ok, _Pid} -> ok;
-        {error, Reason} -> reject(Conn, StreamId, map_init_error(Reason))
+        {ok, _Pid} ->
+            ok;
+        {error, Reason} = Err ->
+            reject(Conn, StreamId, map_init_error(Reason)),
+            Err
     end.
 
 map_init_error({resolution_failed, _}) -> resolution_failed;
@@ -511,7 +507,11 @@ header(Name, Headers) ->
 
 -spec try_reserve_tunnel(pid(), pos_integer()) -> boolean().
 try_reserve_tunnel(Conn, Max) ->
-    _ = ets:insert_new(masque_h2_tunnel_counts, {Conn, 0}),
+    _ =
+        case ets:insert_new(masque_h2_tunnel_counts, {Conn, 0}) of
+            true -> watch_conn(Conn);
+            false -> ok
+        end,
     New = ets:update_counter(masque_h2_tunnel_counts, Conn, {2, 1}),
     case New > Max of
         true ->
@@ -530,3 +530,22 @@ release_tunnel(Conn) ->
             error:badarg -> ok
         end,
     ok.
+
+%% Drop the connection's counter row once the h2 connection is gone,
+%% so the table does not grow with every connection ever served.
+watch_conn(Conn) ->
+    spawn(fun() ->
+        MRef = erlang:monitor(process, Conn),
+        receive
+            {'DOWN', MRef, process, Conn, _} ->
+                _ =
+                    (try
+                        ets:delete(masque_h2_tunnel_counts, Conn)
+                    catch
+                        error:badarg -> ok
+                    end),
+                ok
+        after infinity ->
+            ok
+        end
+    end).

@@ -21,7 +21,10 @@
 %%%       default `inet:getaddr/2' resolver.</li>
 %%%   <li>`family => inet | inet6 | auto' (default `auto').</li>
 %%%   <li>`socket_opts => [gen_udp:option()]' - extra options merged on
-%%%       top of `[binary, {active, true}]'.</li>
+%%%       top of `[binary, {active, N}]'.</li>
+%%%   <li>`active_n => pos_integer()' - datagrams the socket delivers
+%%%       before it pauses until the session has relayed them, which
+%%%       bounds the session mailbox. Default `32'.</li>
 %%%   <li>`port => inet:port_number()' - bind the local UDP socket to
 %%%       a fixed port. Default `0' (kernel-assigned ephemeral).
 %%%       Useful for firewall rules; conflicts with concurrent tunnels
@@ -32,10 +35,13 @@
 
 -export([accept/1, init/2, handle_packet/2, handle_info/2, terminate/2]).
 
+-define(DEFAULT_ACTIVE_N, 32).
+
 -record(state, {
     socket :: gen_udp:socket(),
     target_ip :: inet:ip_address(),
-    target_port :: 1..65535
+    target_port :: 1..65535,
+    active_n = ?DEFAULT_ACTIVE_N :: pos_integer()
 }).
 
 %%====================================================================
@@ -55,9 +61,10 @@ accept(#{target_host := Host, target_port := Port} = Req) ->
 init(#{target_host := Host, target_port := Port} = Req, Opts) ->
     ResolverFun = maps:get(resolver, Opts, fun default_resolver/1),
     Family = pick_family(maps:get(family, Opts, auto), Host),
+    ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
     SocketOpts = [
         binary,
-        {active, true}
+        {active, ActiveN}
         | maps:get(socket_opts, Opts, [])
     ],
     BindPort = maps:get(port, Opts, 0),
@@ -68,7 +75,7 @@ init(#{target_host := Host, target_port := Port} = Req, Opts) ->
                 false ->
                     {stop, {resolution_failed, private_address}};
                 true ->
-                    open_udp(IP, Port, BindPort, BindFamily, SocketOpts)
+                    open_udp(IP, Port, BindPort, BindFamily, SocketOpts, ActiveN)
             end;
         {error, Reason} ->
             _ = Req,
@@ -112,9 +119,9 @@ handle_info(
 ) ->
     %% Source mismatch - drop silently.
     {ok, State};
-handle_info({udp_passive, Socket}, #state{socket = Socket} = State) ->
-    %% Only hit if the user passed `{active, N}` in socket_opts.
-    _ = inet:setopts(Socket, [{active, true}]),
+handle_info({udp_passive, Socket}, #state{socket = Socket, active_n = N} = State) ->
+    %% Every datagram delivered before this message has been relayed.
+    _ = inet:setopts(Socket, [{active, N}]),
     {ok, State};
 handle_info({udp_error, Socket, Reason}, #state{socket = Socket} = State) ->
     {stop, {target_socket_error, Reason}, State};
@@ -148,7 +155,7 @@ default_resolver(Host) when is_list(Host) ->
             end
     end.
 
-open_udp(IP, Port, BindPort, BindFamily, SocketOpts) ->
+open_udp(IP, Port, BindPort, BindFamily, SocketOpts, ActiveN) ->
     case gen_udp:open(BindPort, [BindFamily | SocketOpts]) of
         {ok, Socket} ->
             case gen_udp:connect(Socket, IP, Port) of
@@ -156,7 +163,8 @@ open_udp(IP, Port, BindPort, BindFamily, SocketOpts) ->
                     {ok, #state{
                         socket = Socket,
                         target_ip = IP,
-                        target_port = Port
+                        target_port = Port,
+                        active_n = ActiveN
                     }};
                 {error, CReason} ->
                     _ = gen_udp:close(Socket),

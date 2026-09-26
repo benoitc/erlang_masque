@@ -23,14 +23,20 @@
 -export([
     chain_h3_listener_echo/1,
     chain_h2_listener_echo/1,
-    chain_h1_listener_echo/1
+    chain_h1_listener_echo/1,
+    chain_h3_self_loop_detected/1,
+    chain_h1_own_via_rejected/1,
+    chain_h3_two_listeners_same_node/1
 ]).
 
 all() ->
     [
         chain_h3_listener_echo,
         chain_h2_listener_echo,
-        chain_h1_listener_echo
+        chain_h1_listener_echo,
+        chain_h3_self_loop_detected,
+        chain_h1_own_via_rejected,
+        chain_h3_two_listeners_same_node
     ].
 
 init_per_suite(Config) ->
@@ -175,12 +181,139 @@ chain_h1_listener_echo(Config) ->
     Config1 = [{ingress_h1_keeper, Keeper} | Config],
     exchange_echo_through(h1, IngressPort, Config1).
 
+%% An h3 chain listener whose upstream is itself: the second hop sees
+%% its own `via' entry and answers 508 instead of dialing again.
+chain_h3_self_loop_detected(Config) ->
+    Certs = ?config(certs, Config),
+    {ok, Probe} = gen_udp:open(0, [{ip, {127, 0, 0, 1}}]),
+    {ok, Port} = inet:port(Probe),
+    ok = gen_udp:close(Probe),
+    Name = unique_name("chain_h3_loop"),
+    Opts = #{
+        port => Port,
+        cert => maps:get(cert, Certs),
+        key => maps:get(key, Certs),
+        handler_opts => #{
+            upstream_proxy => upstream_uri(Port),
+            upstream_opts => #{verify => verify_none, transports => [h3]}
+        }
+    },
+    {ok, _} = masque:start_chain_listener(Name, Opts),
+    try
+        ?assertEqual(
+            {error, {handshake_rejected, 508}},
+            loop_connect(h3, Port, ?config(udp_port, Config))
+        )
+    after
+        _ = masque:stop_listener(Name)
+    end.
+
+%% A request that already names this listener in `via' is refused by
+%% an h1 chain listener with 508 and the matching Proxy-Status.
+chain_h1_own_via_rejected(Config) ->
+    Certs = ?config(certs, Config),
+    Name = unique_name("chain_h1_loop"),
+    Opts = #{
+        port => 0,
+        cert => maps:get(cert_file, Certs),
+        key => maps:get(key_file, Certs),
+        handler_opts => #{
+            upstream_proxy => upstream_uri(?config(egress_port, Config)),
+            upstream_opts => #{verify => verify_none, transports => [h3]},
+            via_token => <<"masque-h1-loop-test">>
+        }
+    },
+    Parent = self(),
+    Keeper = erlang:spawn(fun() ->
+        {ok, R} = masque:start_chain_listener_h1(Name, Opts),
+        Parent ! {self(), started, h1:server_port(R)},
+        receive
+            stop -> _ = masque:stop_listener_h1(Name)
+        end
+    end),
+    Port =
+        receive
+            {Keeper, started, P} -> P
+        after 5000 -> ct:fail(h1_keeper_timeout)
+        end,
+    try
+        {ok, Sock} = ssl:connect(
+            "127.0.0.1",
+            Port,
+            [binary, {active, false}, {verify, verify_none}],
+            5000
+        ),
+        Path = iolist_to_binary([
+            "/.well-known/masque/udp/127.0.0.1/",
+            integer_to_list(?config(udp_port, Config)),
+            "/"
+        ]),
+        Via = <<"1.1 masque-h1-loop-test">>,
+        ok = ssl:send(Sock, [
+            <<"GET ">>,
+            Path,
+            <<" HTTP/1.1\r\nhost: localhost\r\nconnection: Upgrade\r\n">>,
+            <<"upgrade: connect-udp\r\ncapsule-protocol: ?1\r\nvia: ">>,
+            Via,
+            <<"\r\n\r\n">>
+        ]),
+        {ok, Resp} = ssl:recv(Sock, 0, 5000),
+        _ = ssl:close(Sock),
+        ?assertMatch(<<"HTTP/1.1 508", _/binary>>, Resp),
+        ?assertNotEqual(nomatch, binary:match(Resp, <<"proxy_loop_detected">>))
+    after
+        Keeper ! stop
+    end.
+
+%% Two chain listeners on the same node chained together (client ->
+%% A -> B -> egress) are a legit multi-hop: each listener has its own
+%% `via' token, so B does not mistake A's entry for a loop.
+chain_h3_two_listeners_same_node(Config) ->
+    Certs = ?config(certs, Config),
+    EgressPort = ?config(egress_port, Config),
+    UpOpts = #{verify => verify_none, transports => [h3], alpn => [<<"h3">>]},
+    NameB = unique_name("chain_h3_b"),
+    {ok, _} = masque:start_chain_listener(NameB, #{
+        port => 0,
+        cert => maps:get(cert, Certs),
+        key => maps:get(key, Certs),
+        handler_opts => #{
+            upstream_proxy => upstream_uri(EgressPort),
+            upstream_opts => UpOpts
+        }
+    }),
+    {ok, PortB} = quic:get_server_port(NameB),
+    NameA = unique_name("chain_h3_a"),
+    {ok, _} = masque:start_chain_listener(NameA, #{
+        port => 0,
+        cert => maps:get(cert, Certs),
+        key => maps:get(key, Certs),
+        handler_opts => #{
+            upstream_proxy => upstream_uri(PortB),
+            upstream_opts => UpOpts
+        }
+    }),
+    {ok, PortA} = quic:get_server_port(NameA),
+    try
+        exchange_echo_through(h3, PortA, Config)
+    after
+        _ = masque:stop_listener(NameA),
+        _ = masque:stop_listener(NameB)
+    end.
+
 %%====================================================================
 %% Helpers
 %%====================================================================
 
+loop_connect(Transport, Port, UdpPort) ->
+    masque:connect(
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+        {<<"127.0.0.1">>, UdpPort},
+        #{transports => [Transport], verify => verify_none, timeout => 8000}
+    ).
+
 upstream_uri(Port) ->
-    iolist_to_binary(["https://localhost:", integer_to_list(Port)]).
+    iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]).
 
 unique_name(Prefix) ->
     list_to_atom(

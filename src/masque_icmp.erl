@@ -21,10 +21,12 @@
 -export([
     dest_unreachable/3,
     packet_too_big/2,
+    frag_needed/2,
     time_exceeded/2
 ]).
 
 -export([apply_action/3]).
+-export([is_error/1]).
 
 %% Limits.
 -define(V4_INVOKING_CAP, 548).
@@ -37,6 +39,26 @@
 %%====================================================================
 %% API
 %%====================================================================
+
+%% @doc True when `Packet' is an ICMP error message: ICMPv4 types 3,
+%% 4, 5, 11 and 12, or an ICMPv6 type below 128. RFC 1122 §3.2.2 and
+%% RFC 4443 §2.4 (e) forbid answering those with another ICMP error.
+-spec is_error(binary()) -> boolean().
+is_error(Packet) ->
+    case masque_ip_packet:upper_layer(Packet) of
+        {ok, 1, <<Type:8, _/binary>>} ->
+            %% A non-initial fragment does not start with the ICMP
+            %% header; its type byte is not meaningful.
+            first_fragment(Packet) andalso lists:member(Type, [3, 4, 5, 11, 12]);
+        {ok, 58, <<Type:8, _/binary>>} ->
+            <<6:4, _/bitstring>> = Packet,
+            Type < 128;
+        _ ->
+            false
+    end.
+
+first_fragment(<<4:4, _:4, _:8, _:16, _:16, _:3, Offset:13, _/binary>>) -> Offset =:= 0;
+first_fragment(_) -> true.
 
 %% @doc Build a Destination Unreachable ICMP packet.
 %% Code maps to the RFC type/code tables.
@@ -57,6 +79,13 @@ dest_unreachable(v6, Code, Invoking) ->
 packet_too_big(Mtu, Invoking) ->
     build_v6(2, 0, <<Mtu:32>>, Invoking).
 
+%% @doc Build an IPv4 Destination Unreachable, Fragmentation Needed
+%% and DF Set (type 3 code 4) carrying the next-hop `Mtu' (RFC 1191
+%% sec 4). The IPv4 counterpart of `packet_too_big/2'.
+-spec frag_needed(0..16#FFFF, binary()) -> binary().
+frag_needed(Mtu, Invoking) ->
+    build_v4(3, 4, <<0:16, Mtu:16>>, Invoking).
+
 %% @doc Build a Time Exceeded ICMP packet. `Code' is 0 (TTL/HL
 %% exceeded in transit) or 1 (fragment reassembly timeout).
 -spec time_exceeded(v4 | v6, non_neg_integer(), binary()) -> binary().
@@ -74,6 +103,7 @@ time_exceeded(v6, Invoking) -> time_exceeded(v6, 0, Invoking).
 %% <ul>
 %%  <li>`{dest_unreachable, v4|v6, Code}'</li>
 %%  <li>`{packet_too_big, Mtu}'  (IPv6 only)</li>
+%%  <li>`{frag_needed, Mtu}'  (IPv4 only)</li>
 %%  <li>`{time_exceeded,   v4|v6}'</li>
 %% </ul>
 -spec apply_action(atom(), term(), binary()) -> binary().
@@ -81,6 +111,8 @@ apply_action(dest_unreachable, {V, Code}, Invoking) ->
     dest_unreachable(V, Code, Invoking);
 apply_action(packet_too_big, Mtu, Invoking) ->
     packet_too_big(Mtu, Invoking);
+apply_action(frag_needed, Mtu, Invoking) ->
+    frag_needed(Mtu, Invoking);
 apply_action(time_exceeded, {V, Code}, Invoking) ->
     time_exceeded(V, Code, Invoking);
 apply_action(time_exceeded, V, Invoking) when V =:= v4; V =:= v6 ->
@@ -153,15 +185,5 @@ ip6_bin({A, B, C, D, E, F, G, H}) ->
 clamp(Bin, Max) when byte_size(Bin) =< Max -> Bin;
 clamp(Bin, Max) -> binary:part(Bin, 0, Max).
 
-%% Standard 16-bit one's-complement Internet checksum.
 inet_checksum(Bin) ->
-    finish_csum(sum_words(Bin, 0)).
-
-sum_words(<<A:16, Rest/binary>>, Acc) -> sum_words(Rest, Acc + A);
-sum_words(<<A:8>>, Acc) -> Acc + (A bsl 8);
-sum_words(<<>>, Acc) -> Acc.
-
-finish_csum(Sum) ->
-    S = (Sum band 16#FFFF) + (Sum bsr 16),
-    S2 = (S band 16#FFFF) + (S bsr 16),
-    (bnot S2) band 16#FFFF.
+    masque_ip_packet:checksum(Bin).

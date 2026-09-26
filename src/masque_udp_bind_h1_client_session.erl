@@ -18,7 +18,7 @@
 -export([send_capsule/3]).
 
 -export([init/1, callback_mode/0, terminate/3, code_change/4]).
--export([connecting/3, open/3, closing/3]).
+-export([connecting/3, failed/3, open/3, closing/3, closed/3]).
 
 -include("masque.hrl").
 -include("masque_udp_bind.hrl").
@@ -34,9 +34,14 @@
     bind_scope :: scoped | unscoped,
     socket :: ssl:sslsocket() | undefined,
     handshake_from :: gen_statem:from() | undefined,
+    %% Dial error parked in the `failed' state.
+    failure :: term(),
     mode :: message | queue,
     rx_buf :: queue:queue({inet:ip_address(), inet:port_number(), binary()}),
     rx_waiters :: queue:queue({gen_statem:from(), reference()}),
+    %% Bound on `rx_buf' (`rx_queue_limit') and datagrams dropped past it.
+    rx_limit = ?MASQUE_DEFAULT_RX_QUEUE_LIMIT :: pos_integer(),
+    rx_dropped = 0 :: non_neg_integer(),
     cap_buf = <<>> :: binary(),
     max_cap :: pos_integer(),
     extra_headers = [] :: [{binary(), binary()}],
@@ -46,6 +51,8 @@
 }).
 
 -define(CLIENT_ROLE, client).
+%% Cap on the 101 response head, same as the CONNECT-TCP h1 client.
+-define(MAX_RESPONSE_HEADER, 65536).
 
 start_link(Target, Opts, Owner) ->
     gen_statem:start_link(?MODULE, {Target, Opts, Owner}, []).
@@ -85,6 +92,7 @@ init({Target, Opts, Owner}) ->
     process_flag(trap_exit, true),
     {ProxyHost, ProxyPort} = maps:get(proxy, Opts),
     MRef = erlang:monitor(process, Owner),
+    ok = masque_client_owner:init(Opts),
     Mode = maps:get(mode, Opts, message),
     MaxCap = maps:get(
         max_capsule_size,
@@ -99,6 +107,7 @@ init({Target, Opts, Owner}) ->
     Data = #data{
         owner = Owner,
         owner_ref = MRef,
+        rx_limit = masque_client_rx:limit(Opts),
         proxy_host = to_bin(ProxyHost),
         proxy_port = ProxyPort,
         bind_target = Target,
@@ -117,7 +126,7 @@ init({Target, Opts, Owner}) ->
 %%====================================================================
 
 connecting(internal, {do_handshake, Opts}, Data) ->
-    case do_connect(Data, Opts) of
+    case masque_client_failed:guard(fun() -> do_connect(Data, Opts) end) of
         {ok, Socket, Buffer, RespHeaders} ->
             case validate_response(RespHeaders) of
                 {ok, Addrs} ->
@@ -128,7 +137,7 @@ connecting(internal, {do_handshake, Opts}, Data) ->
                     TableOpts = #{advertised_families => Families},
                     Data1 = Data#data{
                         socket = Socket,
-                        cap_buf = Buffer,
+                        cap_buf = <<>>,
                         public_addresses = Addrs,
                         own_table = masque_compression_table:new_own(
                             ?CLIENT_ROLE, TableOpts
@@ -139,7 +148,7 @@ connecting(internal, {do_handshake, Opts}, Data) ->
                     },
                     _ = setopts_active_once(Socket),
                     reply_handshake(Data, ok),
-                    {next_state, open, Data1};
+                    {next_state, open, Data1, drain_leftover(Socket, Buffer)};
                 {error, Reason} ->
                     _ =
                         (try
@@ -147,15 +156,17 @@ connecting(internal, {do_handshake, Opts}, Data) ->
                         catch
                             _:_ -> ok
                         end),
-                    reply_handshake(Data, {error, Reason}),
-                    {stop, {handshake_failed, Reason}}
+                    {next_state, failed, Data#data{failure = Reason},
+                        masque_client_failed:enter(Opts)}
             end;
         {error, Reason} ->
-            reply_handshake(Data, {error, Reason}),
-            {stop, {handshake_failed, Reason}}
+            %% The caller's `handshake_await' is not processed yet.
+            {next_state, failed, Data#data{failure = Reason}, masque_client_failed:enter(Opts)}
     end;
 connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
+connecting({call, From}, {set_owner, NewOwner}, Data) ->
+    {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 connecting({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
 connecting(
@@ -171,8 +182,17 @@ connecting(info, _Msg, Data) ->
 %% State: open
 %%====================================================================
 
+%%====================================================================
+%% State: failed (dial error parked for `handshake_await')
+%%====================================================================
+
+failed(Type, Event, #data{failure = Reason, owner_ref = Ref}) ->
+    masque_client_failed:handle(Type, Event, Reason, Ref).
+
 open({call, From}, handshake_await, Data) ->
     {keep_state, Data, [{reply, From, ok}]};
+open({call, From}, {set_owner, NewOwner}, Data) ->
+    {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 open({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, open)}]};
 open({call, From}, {send_to, Peer, Bytes}, Data) ->
@@ -206,10 +226,10 @@ open(
         true -> {stop, capsule_buffer_overflow};
         false -> drain_capsules(New, Data)
     end;
-open(info, {ssl_closed, Sock}, #data{socket = Sock}) ->
-    {stop, peer_closed};
-open(info, {ssl_error, Sock, Reason}, #data{socket = Sock}) ->
-    {stop, {ssl_error, Reason}};
+open(info, {ssl_closed, Sock}, #data{socket = Sock} = Data) ->
+    end_tunnel({stop, peer_closed}, Data);
+open(info, {ssl_error, Sock, Reason}, #data{socket = Sock} = Data) ->
+    end_tunnel({stop, {ssl_error, Reason}}, Data);
 open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
 open(
@@ -237,6 +257,18 @@ closing(internal, do_close, #data{socket = Socket} = Data) ->
 closing(_, _, Data) ->
     {keep_state, Data}.
 
+%%====================================================================
+%% State: closed (peer ended the tunnel, queue-mode data unread)
+%%====================================================================
+
+closed({call, From}, info, Data) ->
+    {keep_state_and_data, [{reply, From, session_info(Data, closed)}]};
+closed(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
+    masque_client_rx:closed(Type, Event, Buf, Ref, {bind, fun(B) -> Data#data{rx_buf = B} end}).
+
+%% A parked dial error was already returned to `handshake_await'.
+terminate(_Reason, failed, _Data) ->
+    ok;
 terminate(Reason, _State, #data{
     owner = Owner,
     mode = message,
@@ -253,7 +285,7 @@ terminate(Reason, _State, #data{
                     _:_ -> ok
                 end
         end,
-    Owner ! {masque_closed, self(), Reason},
+    masque_client_owner:send(Owner, {masque_closed, self(), Reason}),
     ok;
 terminate(_Reason, _State, #data{socket = Socket}) ->
     _ =
@@ -300,7 +332,15 @@ handle_send_to({IP, Port}, Bytes, Data) ->
             try_uncompressed_fallback(Tuple, Bytes, Data)
     end.
 
+%% No context for this peer: use our own uncompressed context when it
+%% is installed, else one the proxy opened.
 try_uncompressed_fallback(Tuple, Bytes, Data) ->
+    case find_own_uncompressed(Data#data.own_table) of
+        {ok, _} -> send_uncompressed(Tuple, Bytes, Data);
+        not_found -> try_peer_uncompressed(Tuple, Bytes, Data)
+    end.
+
+try_peer_uncompressed(Tuple, Bytes, Data) ->
     case find_peer_uncompressed(Data#data.peer_table) of
         {ok, Id} ->
             case
@@ -486,10 +526,12 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_ASSIGN, Body, Data) ->
             of
                 {ok, T2} ->
                     Owner = Data#data.owner,
-                    Owner !
+                    masque_client_owner:send(
+                        Owner,
                         {masque_compression_assigned, self(), A#compression_assign.context_id, {
                             A#compression_assign.address, A#compression_assign.port
-                        }},
+                        }}
+                    ),
                     %% Send ACK
                     Bytes = iolist_to_binary(
                         masque_compression_capsule:encode(
@@ -516,8 +558,10 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_ACK, Body, Data) ->
                 )
             of
                 {ok, T2} ->
-                    Data#data.owner !
-                        {masque_compression_acked, self(), Ack#compression_ack.context_id},
+                    masque_client_owner:send(
+                        Data#data.owner,
+                        {masque_compression_acked, self(), Ack#compression_ack.context_id}
+                    ),
                     {ok, Data#data{own_table = T2}};
                 {error, _} ->
                     {stop, malformed_capsule}
@@ -535,8 +579,9 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_CLOSE, Body, Data) ->
                 )
             of
                 {ok, T2} ->
-                    Data#data.owner !
-                        {masque_compression_closed, self(), Id},
+                    masque_client_owner:send(
+                        Data#data.owner, {masque_compression_closed, self(), Id}
+                    ),
                     {ok, Data#data{peer_table = T2}};
                 {error, unknown_context} ->
                     case
@@ -545,8 +590,9 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_CLOSE, Body, Data) ->
                         )
                     of
                         {ok, T2} ->
-                            Data#data.owner !
-                                {masque_compression_closed, self(), Id},
+                            masque_client_owner:send(
+                                Data#data.owner, {masque_compression_closed, self(), Id}
+                            ),
                             {ok, Data#data{own_table = T2}};
                         {error, _} ->
                             {stop, malformed_capsule}
@@ -587,12 +633,39 @@ handle_known_context(Ctx, Inner, Data) ->
             Data
     end.
 
+%% The peer ended the tunnel. Queue-mode data the owner has not read
+%% yet stays available to `recv/2' (see `masque_client_rx');
+%% otherwise return `Result'.
+end_tunnel(Result, #data{mode = Mode, rx_buf = Buf, socket = Socket} = Data) ->
+    case masque_client_rx:keep_unread(Mode, Buf) of
+        true ->
+            _ =
+                case Socket of
+                    undefined ->
+                        ok;
+                    _ ->
+                        try
+                            ssl:close(Socket)
+                        catch
+                            _:_ -> ok
+                        end
+                end,
+            {next_state, closed,
+                Data#data{
+                    socket = undefined,
+                    rx_buf = masque_client_rx:close_queue(Buf, closed)
+                },
+                masque_client_rx:closed_enter()};
+        false ->
+            Result
+    end.
+
 deliver_bind_packet(
     Peer,
     Bytes,
     #data{mode = message, owner = Owner} = Data
 ) ->
-    Owner ! {masque_bind_packet, self(), Peer, Bytes},
+    masque_client_owner:send(Owner, {masque_bind_packet, self(), Peer, Bytes}),
     Data;
 deliver_bind_packet(
     Peer,
@@ -609,7 +682,10 @@ deliver_bind_packet(
             gen_statem:reply(From, {ok, Peer, Bytes}),
             Data#data{rx_waiters = Ws2};
         {empty, _} ->
-            Data#data{rx_buf = queue:in({Peer, Bytes}, Q)}
+            case masque_client_rx:is_full(Q, Data#data.rx_limit) of
+                false -> Data#data{rx_buf = queue:in({Peer, Bytes}, Q)};
+                true -> Data#data{rx_dropped = Data#data.rx_dropped + 1}
+            end
     end.
 
 %%====================================================================
@@ -649,15 +725,18 @@ drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->
 %%====================================================================
 
 do_connect(Data, Opts) ->
-    SslOpts = build_ssl_opts(Opts),
+    %% One deadline covers connect, TLS and the Upgrade exchange.
+    Timeout = maps:get(timeout, Opts, 5000),
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    SslOpts = masque_tls:client_opts(Data#data.proxy_host, Opts),
     Host = binary_to_list(Data#data.proxy_host),
     Port = Data#data.proxy_port,
-    case ssl:connect(Host, Port, SslOpts) of
+    case ssl:connect(Host, Port, SslOpts, Timeout) of
         {ok, Socket} ->
             ReqBin = build_request(Data),
             case ssl:send(Socket, ReqBin) of
                 ok ->
-                    case read_response(Socket) of
+                    case read_response(Socket, Deadline) of
                         {ok, RespHeaders, Buffer} ->
                             {ok, Socket, Buffer, RespHeaders};
                         {error, R} ->
@@ -671,15 +750,6 @@ do_connect(Data, Opts) ->
         {error, R} ->
             {error, R}
     end.
-
-build_ssl_opts(Opts) ->
-    Defaults = [
-        {verify, verify_none},
-        {active, false},
-        {alpn_advertised_protocols, [<<"http/1.1">>]}
-    ],
-    Custom = maps:get(ssl_opts, Opts, []),
-    lists:keymerge(1, Custom, Defaults).
 
 build_request(Data) ->
     Path = expand_path(Data#data.bind_target),
@@ -713,16 +783,23 @@ expand_path({Host, Port}) ->
         {Host, Port}
     ).
 
-read_response(Socket) ->
-    read_response_lines(Socket, <<>>).
+read_response(Socket, Deadline) ->
+    read_response_lines(Socket, <<>>, Deadline).
 
-read_response_lines(Socket, Acc) ->
-    case ssl:recv(Socket, 0, 5000) of
+read_response_lines(_Socket, Acc, _Deadline) when byte_size(Acc) > ?MAX_RESPONSE_HEADER ->
+    {error, headers_too_large};
+read_response_lines(Socket, Acc, Deadline) ->
+    Remaining = Deadline - erlang:monotonic_time(millisecond),
+    case Remaining > 0 andalso ssl:recv(Socket, 0, Remaining) of
+        false ->
+            {error, handshake_timeout};
+        {error, timeout} ->
+            {error, handshake_timeout};
         {ok, Bytes} ->
             New = <<Acc/binary, Bytes/binary>>,
             case binary:match(New, <<"\r\n\r\n">>) of
                 nomatch ->
-                    read_response_lines(Socket, New);
+                    read_response_lines(Socket, New, Deadline);
                 {Pos, 4} ->
                     Header = binary:part(New, 0, Pos),
                     Buffer = binary:part(
@@ -747,7 +824,10 @@ parse_response_header(HeaderBin, Buffer) ->
                      || L <- HdrLines,
                         L =/= <<>>
                     ],
-                    {ok, Headers, Buffer};
+                    case is_upgrade_ack(Headers) of
+                        true -> {ok, Headers, Buffer};
+                        false -> {error, bad_upgrade_response}
+                    end;
                 {ok, S} ->
                     {error, {bad_status, S}};
                 {error, R} ->
@@ -757,10 +837,30 @@ parse_response_header(HeaderBin, Buffer) ->
             {error, malformed_response}
     end.
 
-parse_status(<<"HTTP/1.1 ", Status:3/binary, _/binary>>) ->
-    {ok, binary_to_integer(Status)};
+parse_status(<<"HTTP/1.1 ", D1, D2, D3, Rest/binary>>) when
+    D1 >= $1,
+    D1 =< $5,
+    D2 >= $0,
+    D2 =< $9,
+    D3 >= $0,
+    D3 =< $9,
+    (Rest =:= <<>> orelse binary_part(Rest, 0, 1) =:= <<" ">>)
+->
+    {ok, (D1 - $0) * 100 + (D2 - $0) * 10 + (D3 - $0)};
 parse_status(_) ->
     {error, bad_status_line}.
+
+%% RFC 9110 section 7.8: a 101 names the protocol switched to in
+%% `Upgrade' and carries `Connection: upgrade'.
+is_upgrade_ack(Headers) ->
+    Upgrade = proplists:get_value(<<"upgrade">>, Headers, <<>>),
+    Connection = proplists:get_value(<<"connection">>, Headers, <<>>),
+    Tokens = [
+        string:trim(T)
+     || T <- binary:split(string:lowercase(Connection), <<",">>, [global])
+    ],
+    string:lowercase(Upgrade) =:= <<"connect-udp">> andalso
+        lists:member(<<"upgrade">>, Tokens).
 
 parse_header_line(Line) ->
     case binary:split(Line, <<":">>) of
@@ -805,9 +905,18 @@ family_of({_, _, _, _, _, _, _, _}) -> 6.
 reply_handshake(#data{handshake_from = undefined}, _Reply) -> ok;
 reply_handshake(#data{handshake_from = From}, Reply) -> gen_statem:reply(From, Reply).
 
-session_info(#data{bind_scope = Scope}, State) ->
+%% Used by the transport racer to flip ownership from the race worker
+%% to the real caller after a winning handshake.
+swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
+    _ = erlang:demonitor(OldRef, [flush]),
+    NewRef = erlang:monitor(process, NewOwner),
+    ok = masque_client_owner:release(NewOwner),
+    Data#data{owner = NewOwner, owner_ref = NewRef}.
+
+session_info(#data{bind_scope = Scope, rx_dropped = Dropped}, State) ->
     #{
         state => State,
+        rx_dropped => Dropped,
         protocol => udp_bind,
         transport => h1,
         bind => Scope
@@ -830,3 +939,11 @@ build_authority(Host, Port) ->
 
 to_bin(B) when is_binary(B) -> B;
 to_bin(L) when is_list(L) -> iolist_to_binary(L).
+
+%% Capsules the proxy sent right behind the 101 arrive in the upgrade
+%% leftover; feed them through the `open' decode path immediately
+%% instead of waiting for the next socket read.
+drain_leftover(_Socket, <<>>) ->
+    [];
+drain_leftover(Socket, Buffer) ->
+    [{next_event, info, {ssl, Socket, Buffer}}].

@@ -338,3 +338,42 @@ reject_requests_v6_test() ->
         ],
         masque_ip:reject_requests([R])
     ).
+
+%% The protocol-0 overlap check is a sweep, not a pairwise scan: a
+%% large advertisement validates quickly.
+route_advertisement_large_list_is_fast_test() ->
+    N = 20000,
+    Zeros = [
+        #ip_route{
+            version = 4,
+            start_addr = {10, I div 256, I rem 256, 0},
+            end_addr = {10, I div 256, I rem 256, 127},
+            ip_protocol = 0
+        }
+     || I <- lists:seq(0, N - 1)
+    ],
+    NonZeros = [
+        #ip_route{
+            version = 4,
+            start_addr = {10, I div 256, I rem 256, 128},
+            end_addr = {10, I div 256, I rem 256, 255},
+            ip_protocol = 6
+        }
+     || I <- lists:seq(0, N - 1)
+    ],
+    Es = Zeros ++ NonZeros,
+    {Micros, Body} = timer:tc(fun() -> masque_ip_capsule:encode_route_advertisement(Es) end),
+    ?assertEqual({ok, Es}, masque_ip_capsule:decode_route_advertisement(Body)),
+    ?assert(Micros < 2000000),
+    %% One overlapping nonzero route at the end is still caught.
+    Bad =
+        Es ++
+            [
+                #ip_route{
+                    version = 4,
+                    start_addr = {10, 50, 7, 5},
+                    end_addr = {10, 50, 7, 5},
+                    ip_protocol = 17
+                }
+            ],
+    ?assertError(proto_zero_overlap, masque_ip_capsule:encode_route_advertisement(Bad)).

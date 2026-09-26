@@ -45,7 +45,8 @@
     | zero_context_id
     | trailing_bytes
     | bad_ip_address
-    | bad_udp_port.
+    | bad_udp_port
+    | unknown_capsule_type.
 
 -export_type([capsule_record/0, decode_error/0]).
 
@@ -161,8 +162,8 @@ decode_body(?MASQUE_CAPSULE_COMPRESSION_ACK, Body) ->
 decode_body(?MASQUE_CAPSULE_COMPRESSION_CLOSE, Body) ->
     decode_close(Body);
 decode_body(_Type, _Body) ->
-    %% caller should not have routed here
-    {error, bad_ip_version}.
+    %% Not a Compression Context capsule.
+    {error, unknown_capsule_type}.
 
 -spec decode_assign(binary()) ->
     {ok, #compression_assign{}} | {error, decode_error()}.

@@ -36,6 +36,15 @@ Private Relay:
 This gives h3 a head start on networks where QUIC works, while
 falling back to h2 in ~250 ms on networks that block UDP.
 
+Every transport verifies the proxy certificate by default
+(`verify_peer`, system CA store, hostname check, SNI). The examples
+below pass `verify => verify_none` for a self-signed test proxy; in
+production drop it or pass your own `cacerts`.
+
+If no transport succeeds, `connect/3` returns `{error, Reason}` with
+the real cause (for example `{connect, econnrefused}` or a TLS
+alert); it does not exit the caller.
+
 ```erlang
 %% Default: race both (recommended for production)
 {ok, Sess} = masque:connect(ProxyURI, Target, #{verify => verify_none}).
@@ -110,9 +119,25 @@ handle_info({masque_data, Sess, Data}, State = #{sess := Sess}) ->
     {noreply, State#{last_reply := Data}}.
 ```
 
+The queue holds at most `rx_queue_limit` items (default 1000). Past
+that, datagram sessions drop new items and count them in
+`rx_dropped` (see `masque:info/1`); a CONNECT-TCP session ends with
+`{error, rx_overflow}` because it cannot lose bytes.
+
+```erlang
+{ok, Sess} = masque:connect(ProxyURI, Target,
+                            #{mode => queue, rx_queue_limit => 10000}).
+```
+
 Both modes also surface closure:
 
-- `{masque_closed, Sess, Reason}` - peer reset or abrupt close (message mode).
+- `{masque_closed, Sess, Reason}` in message mode. `Reason` is
+  `peer_reset`, `goaway` (the proxy is shutting the connection down),
+  `normal`, or `peer_fin` on CONNECT-TCP when the peer finished
+  sending but the tunnel is still writable.
+- In queue mode, `recv/2` returns the data still buffered, then
+  `{error, closed}`. A closed session keeps its queue for at most
+  30 s.
 - The session process terminates (monitor for `{'DOWN', _, process, Sess, _}`).
 
 ---
@@ -144,9 +169,11 @@ Notes:
 
 - Each session keeps its own QUIC connection open; this costs one
   handshake per tunnel and is the simplest model.
-- If you need many tunnels *through the same* QUIC connection to the
-  proxy (sharing a single handshake), that's a phase-2 feature - the
-  public API does not expose it today.
+- To run many tunnels through one connection to the proxy, pass
+  `upstream_pool => true` (h2 and h3). The pool opens another
+  connection when the current ones reach `max_streams`, and a
+  checkout that cannot finish within `checkout_timeout_ms` (in
+  `upstream_pool_opts`, default 60 s) returns `{error, timeout}`.
 
 ---
 
@@ -266,8 +293,8 @@ are optional except in the way documented.
 
 | Callback | Fires when… | Returns |
 | --- | --- | --- |
-| `accept/1` | Handshake received, before any 2xx response. | `accept` or `{reject, masque_errors:handshake_error()}`. Optional - default is `accept`. |
-| `init/2` | Tunnel is accepted, session process starts. | `{ok, State}` \| `{ok, State, [action()]}` \| `{stop, Reason}`. |
+| `accept/1` | Handshake received, before any 2xx response. | `accept` or `{reject, masque_errors:handshake_error()}`. Optional - default is `accept`. An unknown reject reason becomes 502. |
+| `init/2` | Tunnel is accepted, session process starts. | `{ok, State}` \| `{ok, State, [action()]}` \| `{stop, Reason}`. Output produced before the 2xx is sent (for example from an early `handle_info/2`) is held and sent after it, in order. |
 | `handle_packet/2` | Inbound UDP payload arrives (context 0). | `{ok, State}` \| `{ok, State, [action()]}` \| `{stop, Reason, State}`. |
 | `handle_capsule/3` | Inbound capsule arrives on the request body stream. | same as `handle_packet`. |
 | `handle_info/2` | Any other Erlang message arrives (e.g. `{udp, Socket, …}`). | same as `handle_packet`. |
@@ -455,6 +482,9 @@ handle_capsule(Type, Value, State) ->
     {ok, State, [{send_capsule, Type, Value}]}.
 ```
 
+CONNECT-TCP tunnels carry raw bytes only: `send_capsule/3` returns
+`{error, not_supported}` on them.
+
 Malformed capsule bytes on the wire cause the session to close with
 reason `malformed_capsule`. Unknown capsule types are handed to the
 handler module as-is; RFC 9297 §3.3 recommends ignoring any type you
@@ -477,11 +507,12 @@ RFC 9298 failure modes are rendered as HTTP status codes by
 | `resolution_failed` | 502 | DNS/resolver hook returned an error. |
 | `upstream_timeout` | 504 | target did not respond in time. |
 | `forbidden` | 403 | denied by the handler's `accept/1` or the `allow` policy. |
-| `loop_detected` | 508 | proxy loop (reserved for phase-2 proxy chaining). |
+| `loop_detected` | 508 | proxy loop, detected by `masque_chain_handler` through the `via` header. |
 | `overload` | 503 | proxy-shed load. |
 | `{other, N}` | N | escape hatch for any 4xx/5xx status. |
 
-`{reject, Reason}` from `accept/1` uses the same atoms.
+`{reject, Reason}` from `accept/1` uses the same atoms. Any other
+reason maps to 502.
 
 ---
 
@@ -527,6 +558,21 @@ chained upstream. The egress on the other end runs the regular
 See `examples/two_hop_relay.erl` for a standalone runnable version
 that spins up an ingress + egress on loopback with self-signed
 certs and round-trips a UDP / TCP payload through the chain.
+
+The upstream leg verifies the egress certificate by default. For a
+private PKI pass `cacerts` (or `verify => verify_none` in tests) in
+`upstream_opts`.
+
+Each chain listener adds its own token to a `via` header on the
+upstream request. A request that already carries the token is a
+loop and gets 508 with Proxy-Status `proxy_loop_detected`, so a
+chain pointed at itself fails fast. Set `via_token` in
+`handler_opts` to share one token across listeners of the same hop:
+
+```erlang
+Token = masque_chain_handler:new_token(),
+HOpts = #{upstream_proxy => Egress, via_token => Token}.
+```
 
 Authentication (Privacy Pass, mTLS, etc.) is layered on top by
 replacing or wrapping the chain handler's `accept/1`; that is an
@@ -609,7 +655,9 @@ the node. `instrument` is in the supervision tree via the
   capsules on a TCP stream, so they gain ordering and reliability
   that raw UDP lacks. Applications depending on packet loss or
   reordering semantics should force `transports => [h3]`.
-- **HTTP/1.1 Upgrade not supported.** RFC 9298 also defines an
-  HTTP/1.1 path; this library covers h3 and h2 only.
-- **RFC 9484 (Proxying IP)** lives in a separate library on top of
-  `masque`, not here.
+- **No half-close on HTTP/1.1.** OTP `ssl` drops the connection on
+  the peer's TLS `close_notify`, so a FIN in either direction ends an
+  h1 CONNECT-TCP tunnel.
+- **h1-to-h1 self-loop reports 502.** A chain that loops back to
+  itself over h1 on both legs surfaces as 502 instead of 508,
+  because the h1 client exits when the server closes.

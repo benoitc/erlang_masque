@@ -21,9 +21,9 @@
 %%%   <li>Per-tuple uniqueness with the two distinct draft-11 cases:
 %%%     <ul>
 %%%       <li>Cross-side conflict: peer ASSIGNs a tuple our side
-%%%           already opened. The table emits
-%%%           `{conflict, close_proxy_id}' so the session can send
-%%%           the matching `COMPRESSION_CLOSE'.</li>
+%%%           already opened. `install/3' (given the own table)
+%%%           returns `{conflict, close_proxy_id, Id}' so the session
+%%%           can send the matching `COMPRESSION_CLOSE'.</li>
 %%%       <li>Same-side conflict: peer ASSIGNs a tuple it already
 %%%           has open. Returned as
 %%%           `{error, malformed_duplicate_tuple}'; the session
@@ -43,12 +43,12 @@
 %%%       mapping per session. Second `open_uncompressed/1' returns
 %%%       `{error, uncompressed_context_already_open}'; second
 %%%       incoming version-0 ASSIGN is malformed.</li>
-%%%   <li>Post-close prohibition: once the proxy-side own
-%%%       uncompressed mapping has been closed, the proxy must not
-%%%       open new compressed mappings - the client could not deliver
-%%%       payloads that need the uncompressed channel. `open_compressed/2'
-%%%       returns `{error, uncompressed_closed}' on a proxy-side own
-%%%       table after the closure.</li>
+%%%   <li>Post-close prohibition: once the client's uncompressed
+%%%       mapping has been closed, the proxy must not open new
+%%%       compressed mappings. The proxy session reports the closure
+%%%       with `mark_uncompressed_closed/1'; `open_compressed/2' then
+%%%       returns `{error, uncompressed_closed}' on that proxy-side own
+%%%       table.</li>
 %%%   <li>Address-family gating: `open_compressed/2' for a family not
 %%%       in the advertised list returns `{error, unadvertised_family}';
 %%%       the same family check applies to `install/2'.</li>
@@ -66,6 +66,8 @@
     open_compressed/2,
     open_uncompressed/1,
     install/2,
+    install/3,
+    mark_uncompressed_closed/1,
     install_ack/2,
     install_close/2,
     lookup_by_id/2,
@@ -95,6 +97,8 @@
     by_tuple = #{} :: #{peer_tuple() => pos_integer()},
     %% Tracks the singleton-uncompressed invariant.
     uncompressed_id = undefined :: undefined | pos_integer(),
+    %% Proxy own table: the client closed its uncompressed context.
+    uncompressed_closed = false :: boolean(),
     max_entries :: pos_integer()
 }).
 
@@ -103,11 +107,14 @@
 -type open_error() ::
     uncompressed_only_from_client
     | uncompressed_context_already_open
+    | uncompressed_closed
     | unadvertised_family
+    | malformed_duplicate_tuple
     | table_full.
 
 -type install_error() ::
     bad_parity
+    | bad_ip_version
     | duplicate_context_id
     | uncompressed_only_from_client
     | uncompressed_context_already_open
@@ -183,6 +190,8 @@ new_peer(Role, Opts) ->
     {ok, #compression_entry{}, state()} | {error, open_error()}.
 open_compressed(#state{direction = peer}, _Peer) ->
     erlang:error(open_on_peer_table);
+open_compressed(#state{role = proxy, uncompressed_closed = true}, _Peer) ->
+    {error, uncompressed_closed};
 open_compressed(
     #state{advertised_families = Fams} = S,
     {V, IP, Port} = Peer
@@ -247,11 +256,8 @@ open_uncompressed(#state{} = S) ->
 %%   <li>`{error, _}' on a malformed install.</li>
 %% </ul>
 %%
-%% The own table is passed in too because the cross-side conflict
-%% rule needs visibility into our own allocations. `OwnTable' is
-%% read-only; the conflict resolution itself happens in the session,
-%% which removes the conflicted entry from the own table after
-%% sending CLOSE.
+%% `install/2' never reports the cross-side conflict: it needs the
+%% own table, see {@link install/3}.
 -spec install(state(), #compression_assign{}) ->
     install_result() | {error, install_error()}.
 install(#state{direction = own}, _Assign) ->
@@ -260,6 +266,45 @@ install(#state{} = S, #compression_assign{context_id = Id} = A) ->
     case parity_ok(S, Id) of
         false -> {error, bad_parity};
         true -> install_1(S, A)
+    end.
+
+%% @doc Like {@link install/2}, and also check the assigned tuple
+%% against `OwnTable' (read-only). When our side already opened the
+%% same tuple, the install succeeds with
+%% `{ok, {conflict, close_proxy_id, Id}, NewState}': `Id' is the
+%% proxy-opened context of the pair (the own entry on a proxy, the
+%% incoming one on a client), which the session closes.
+-spec install(state(), #compression_assign{}, state()) ->
+    install_result() | {error, install_error()}.
+install(#state{} = S, #compression_assign{} = A, #state{direction = own} = Own) ->
+    case install(S, A) of
+        {ok, S2} ->
+            case own_conflict(S, A, Own) of
+                none -> {ok, S2};
+                ProxyId -> {ok, {conflict, close_proxy_id, ProxyId}, S2}
+            end;
+        Other ->
+            Other
+    end.
+
+%% @doc Record that the client closed its uncompressed context. On a
+%% proxy own table, later `open_compressed/2' calls fail with
+%% `{error, uncompressed_closed}'.
+-spec mark_uncompressed_closed(state()) -> state().
+mark_uncompressed_closed(#state{} = S) ->
+    S#state{uncompressed_closed = true}.
+
+own_conflict(_S, #compression_assign{ip_version = 0}, _Own) ->
+    none;
+own_conflict(
+    #state{role = Role},
+    #compression_assign{context_id = Id, ip_version = V, address = A, port = P},
+    #state{by_tuple = T}
+) ->
+    case maps:get({V, A, P}, T, undefined) of
+        undefined -> none;
+        OwnId when Role =:= proxy -> OwnId;
+        _ -> Id
     end.
 
 install_1(#state{entries = E}, #compression_assign{context_id = Id}) when
@@ -279,8 +324,8 @@ install_1(
         true -> install_compressed(S, A)
     end;
 install_1(_S, _A) ->
-    %% defensive; draft only allows 0 / 4 / 6
-    {error, bad_parity}.
+    %% the draft only allows 0 / 4 / 6
+    {error, bad_ip_version}.
 
 install_uncompressed(#state{role = client}, _A) ->
     {error, uncompressed_only_from_client};

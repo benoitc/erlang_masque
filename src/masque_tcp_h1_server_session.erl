@@ -252,11 +252,18 @@ apply_actions_noreply(Actions, State) ->
 do_actions([], S) ->
     {ok, S};
 do_actions([{send_data, Bytes} | Rest], S) ->
-    _ = proxy_send(S, Bytes),
-    do_actions(Rest, S);
-do_actions([{send_data, Bytes, _Fin} | Rest], S) ->
-    _ = proxy_send(S, Bytes),
-    do_actions(Rest, S);
+    do_actions([{send_data, Bytes, false} | Rest], S);
+do_actions([{send_data, Bytes, Fin} | Rest], S) ->
+    %% A tunnel write either lands or stops the session: handlers
+    %% (e.g. the TCP proxy's `{active, N}' re-arm) rely on every
+    %% earlier write having succeeded.
+    case proxy_send(S, Bytes) of
+        %% OTP `ssl' drops the connection on the peer's close_notify,
+        %% so a TLS tunnel cannot half-close: FIN ends it.
+        ok when Fin -> {stop, normal, S};
+        ok -> do_actions(Rest, S);
+        {error, Reason} -> {stop, {tunnel_send_failed, Reason}, S}
+    end;
 do_actions([close_session | _Rest], S) ->
     {stop, normal, S};
 do_actions([_Unknown | Rest], S) ->

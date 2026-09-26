@@ -1,4 +1,4 @@
-%%% @doc Unit tests for `masque_tls:client_opts/2'.
+%%% @doc Unit tests for `masque_tls:client_opts/2,3'.
 %%%
 %%% Covers the safe-by-default surface: verify_peer, cacerts, hostname
 %%% check, ALPN, SNI (omitted for IP literals), and caller override
@@ -76,3 +76,15 @@ accepts_list_host_test() ->
         "proxy.example",
         proplists:get_value(server_name_indication, Opts)
     ).
+
+explicit_alpn_test() ->
+    Opts = masque_tls:client_opts(<<"proxy.example">>, #{}, [<<"h2">>]),
+    ?assertEqual(
+        [<<"h2">>],
+        proplists:get_value(alpn_advertised_protocols, Opts)
+    ),
+    ?assertEqual(verify_peer, proplists:get_value(verify, Opts)).
+
+caller_cacerts_win_test() ->
+    Opts = masque_tls:client_opts(<<"proxy.example">>, #{cacerts => [<<"ca">>]}),
+    ?assertEqual([<<"ca">>], proplists:get_value(cacerts, Opts)).

@@ -19,7 +19,7 @@
 
 -export([parse_absolute/1, parse_pattern/1]).
 -export([expand/2, match/2]).
--export([authority/1, is_absolute/1]).
+-export([authority/1, is_absolute/1, var_names/1]).
 
 -export_type([template/0, segment/0, vars/0, parse_error/0]).
 
@@ -99,6 +99,18 @@ is_absolute(#tpl{absolute = A}) -> A.
 -spec authority(template()) -> binary() | undefined.
 authority(#tpl{authority = A}) -> A.
 
+%% @doc Every variable the template references, path and query.
+-spec var_names(template()) -> [atom()].
+var_names(#tpl{segments = Segments}) ->
+    lists:append([
+        case Seg of
+            {var, N} -> [N];
+            {query, Ns} -> Ns;
+            {literal, _} -> []
+        end
+     || Seg <- Segments
+    ]).
+
 %%====================================================================
 %% Expansion and matching
 %%====================================================================
@@ -171,7 +183,9 @@ split_authority(Scheme, Rest) ->
 parse_path_query(Bin) ->
     try
         ok = check_ascii(Bin),
-        {ok, parse_segments(Bin, <<>>, [])}
+        Segments = parse_segments(Bin, <<>>, []),
+        ok = check_matchable(Segments),
+        {ok, Segments}
     catch
         throw:bad_template -> {error, bad_template};
         throw:bad_segment -> {error, bad_segment}
@@ -259,6 +273,16 @@ ascii_varchars(<<C, Rest/binary>>) when
     ascii_varchars(Rest);
 ascii_varchars(_) ->
     false.
+
+%% `match/2' needs a literal after every path variable except the
+%% last, and the query form only at the end: reject adjacent
+%% variables (`{a}{b}'), a variable right before the query form
+%% (`{a}{?b}') and a query form followed by anything.
+check_matchable([]) -> ok;
+check_matchable([{var, _}, {var, _} | _]) -> throw(bad_template);
+check_matchable([{var, _}, {query, _} | _]) -> throw(bad_template);
+check_matchable([{query, _}, _ | _]) -> throw(bad_template);
+check_matchable([_ | Rest]) -> check_matchable(Rest).
 
 emit_literal(<<>>, Out) -> Out;
 emit_literal(Bin, Out) -> [{literal, Bin} | Out].
@@ -351,21 +375,18 @@ match_segments([{var, Name}, {literal, NextLit} | Rest], Path, Acc) ->
         _ ->
             nomatch
     end;
-match_segments([{var, _} | _], _, _) ->
-    %% Two adjacent vars — ambiguous.
-    throw(bad_template);
 match_segments([{query, Names}], Path, Acc) ->
-    %% Query-form segment consumes the rest of the path and the
-    %% query string. Path portion must be empty (or have already
-    %% been matched by earlier literals).
-    {_, Query} = split_path_query(Path),
-    case parse_query(Query, Names) of
-        {ok, Vars} -> {ok, maps:merge(Acc, Vars)};
-        nomatch -> nomatch
-    end;
-match_segments([{query, _} | _], _, _) ->
-    %% {query, _} must be terminal.
-    throw(bad_template).
+    %% Query-form segment consumes the query string. The earlier
+    %% literals must have matched the whole path portion.
+    case split_path_query(Path) of
+        {<<>>, Query} ->
+            case parse_query(Query, Names) of
+                {ok, Vars} -> {ok, maps:merge(Acc, Vars)};
+                nomatch -> nomatch
+            end;
+        {_, _} ->
+            nomatch
+    end.
 
 split_path_query(Bin) ->
     case binary:match(Bin, <<"?">>) of

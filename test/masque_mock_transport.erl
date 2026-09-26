@@ -101,6 +101,7 @@ simulate(MockPid, {send_to_stream, StreamId, Msg}) ->
 %%                               Inner}}` the sleep completes then
 %%                               sends `{mock_connected, self()}' to
 %%                               NotifyPid before returning Inner.
+%%   `{raise, Class, Reason}'  - raise instead of returning.
 connect(_Host, _Port, _Opts) ->
     resolve_connect(persistent_term:get({?MODULE, connect_result}, auto)).
 
@@ -112,6 +113,8 @@ resolve_connect({delay, Ms, Inner}) ->
 resolve_connect({notify, NotifyPid, Inner}) ->
     NotifyPid ! {mock_connected, self()},
     resolve_connect(Inner);
+resolve_connect({raise, Class, Reason}) ->
+    erlang:raise(Class, Reason, []);
 resolve_connect({ok, _} = R) ->
     R;
 resolve_connect({error, _} = E) ->

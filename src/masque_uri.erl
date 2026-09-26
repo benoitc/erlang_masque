@@ -15,6 +15,7 @@
 
 -export([expand/2, match/2, to_path/1, valid_host/1]).
 -export([build_authority/2, parse_authority_form/1]).
+-export([parse_ip_literal/1, parse_uint/2]).
 
 -export_type([template/0, vars/0]).
 
@@ -96,29 +97,67 @@ drop_authority(Rest) ->
     end.
 
 %% @doc Validate `Host' as an IPv4 literal, IPv6 literal, or LDH
-%% registered name. Rejects IPv6 zone identifiers (RFC 3986 excludes
-%% the `%zone' suffix from URI host syntax).
+%% registered name. IP literals follow {@link parse_ip_literal/1};
+%% a name whose last label looks numeric (`127.1', `0x7f.0.0.1') is
+%% rejected rather than left to a resolver that would read it as an
+%% address.
 -spec valid_host(binary()) -> boolean().
 valid_host(<<>>) ->
     false;
 valid_host(Host) when is_binary(Host) ->
-    S = binary_to_list(Host),
-    case inet:parse_address(S) of
-        {ok, _} ->
-            not has_zone_id(Host);
-        {error, _} ->
-            valid_reg_name(Host)
+    case parse_ip_literal(Host) of
+        {ok, _} -> true;
+        error -> valid_reg_name(Host)
     end.
 
-has_zone_id(Host) ->
-    binary:match(Host, <<"%">>) =/= nomatch.
+%% @doc Parse a strict IP literal: an IPv4 dotted quad of four decimal
+%% octets without leading zeros, or an IPv6 address. Shorthand, hex and
+%% octal IPv4 forms and IPv6 zone identifiers (`fe80::1%eth0', which
+%% RFC 3986 excludes from URI host syntax) are rejected.
+-spec parse_ip_literal(binary()) -> {ok, inet:ip_address()} | error.
+parse_ip_literal(Bin) when is_binary(Bin) ->
+    S = binary_to_list(Bin),
+    Parsed =
+        case {binary:match(Bin, <<"%">>), binary:match(Bin, <<":">>)} of
+            {nomatch, nomatch} -> inet:parse_ipv4strict_address(S);
+            {nomatch, _} -> inet:parse_ipv6strict_address(S);
+            _ -> {error, einval}
+        end,
+    case Parsed of
+        {ok, IP} -> {ok, IP};
+        {error, _} -> error
+    end.
+
+%% @doc Parse a decimal integer in `0..Max': ASCII digits only, no
+%% sign, no leading zeros.
+-spec parse_uint(binary(), non_neg_integer()) -> {ok, non_neg_integer()} | error.
+parse_uint(<<"0">>, _Max) ->
+    {ok, 0};
+parse_uint(<<C, _/binary>> = Bin, Max) when C >= $1, C =< $9 ->
+    case lists:all(fun(D) -> D >= $0 andalso D =< $9 end, binary_to_list(Bin)) of
+        true ->
+            case binary_to_integer(Bin) of
+                N when N =< Max -> {ok, N};
+                _ -> error
+            end;
+        false ->
+            error
+    end;
+parse_uint(_, _Max) ->
+    error.
 
 %% reg-name per RFC 3986: one or more labels joined by dots, each label
 %% a non-empty run of alphanumerics / `-' with no leading or trailing
-%% hyphen.
+%% hyphen. A numeric-looking last label (no top-level domain is) marks
+%% a non-canonical IPv4 form.
 valid_reg_name(Host) ->
     Labels = binary:split(Host, <<".">>, [global]),
-    Labels =/= [] andalso lists:all(fun valid_label/1, Labels).
+    lists:all(fun valid_label/1, Labels) andalso
+        not numeric_label(lists:last(Labels)).
+
+numeric_label(<<"0x", _/binary>>) -> true;
+numeric_label(<<"0X", _/binary>>) -> true;
+numeric_label(L) -> lists:all(fun(C) -> C >= $0 andalso C =< $9 end, binary_to_list(L)).
 
 valid_label(<<>>) ->
     false;
@@ -139,11 +178,9 @@ is_ldh(_) -> false.
 %%====================================================================
 
 parse_port(Bin) when is_binary(Bin) ->
-    try binary_to_integer(Bin) of
-        P when is_integer(P), P >= 1, P =< 65535 -> {ok, P};
+    case parse_uint(Bin, 65535) of
+        {ok, P} when P >= 1 -> {ok, P};
         _ -> error
-    catch
-        _:_ -> error
     end;
 parse_port(Int) when is_integer(Int), Int >= 1, Int =< 65535 ->
     {ok, Int};

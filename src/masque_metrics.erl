@@ -33,9 +33,19 @@
     ip_advertised_count/0
 ]).
 
+%% Simple drop counters for Connect-UDP-Bind sessions, same shape as
+%% the CONNECT-IP ones.
+-export([
+    setup_bind_counters/0,
+    bind_drop_inc/1,
+    bind_drop_count/1,
+    bind_drop_reasons/0
+]).
+
 -spec setup() -> ok.
 setup() ->
     setup_ip_counters(),
+    setup_bind_counters(),
     Meter = instrument_meter:get_meter(<<"masque">>),
     persistent_term:put(
         masque_tunnels_total,
@@ -235,4 +245,56 @@ lifecycle_get(Idx) ->
     case persistent_term:get(masque_ip_lifecycle_counters, undefined) of
         undefined -> 0;
         Ref -> counters:get(Ref, Idx)
+    end.
+
+%%====================================================================
+%% Connect-UDP-Bind drop counters.
+%%====================================================================
+
+%% @doc Idempotent allocator for the udp-bind drop counters.
+-spec setup_bind_counters() -> ok.
+setup_bind_counters() ->
+    case persistent_term:get(masque_bind_drop_counters, undefined) of
+        undefined ->
+            Ref = counters:new(
+                length(bind_drop_reasons()),
+                [write_concurrency]
+            ),
+            persistent_term:put(masque_bind_drop_counters, Ref);
+        _ ->
+            ok
+    end.
+
+%% Ordered list of recognised udp-bind drop reasons; `other' catches
+%% the rest (including handler-supplied reasons).
+-spec bind_drop_reasons() -> [atom()].
+bind_drop_reasons() ->
+    [
+        context_zero,
+        unknown_context,
+        malformed,
+        peer_filter,
+        pending_limit,
+        uncompressed_closed,
+        other
+    ].
+
+-spec bind_drop_inc(atom()) -> ok.
+bind_drop_inc(Reason) ->
+    case persistent_term:get(masque_bind_drop_counters, undefined) of
+        undefined -> ok;
+        Ref -> counters:add(Ref, bind_reason_index(Reason), 1)
+    end.
+
+-spec bind_drop_count(atom()) -> non_neg_integer().
+bind_drop_count(Reason) ->
+    case persistent_term:get(masque_bind_drop_counters, undefined) of
+        undefined -> 0;
+        Ref -> counters:get(Ref, bind_reason_index(Reason))
+    end.
+
+bind_reason_index(Reason) ->
+    case index_of(Reason, bind_drop_reasons(), 1) of
+        not_found -> index_of(other, bind_drop_reasons(), 1);
+        I -> I
     end.

@@ -65,6 +65,8 @@ are shipped in this library.
 
 ## Installation
 
+Requires Erlang/OTP 29.
+
 Add to your `rebar.config`:
 
 ```erlang

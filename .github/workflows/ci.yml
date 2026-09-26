@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        otp: ['26', '27', '28', '29']
+        otp: ['29']
     steps:
       - uses: actions/checkout@v4
 
@@ -76,7 +76,7 @@ jobs:
 
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: '28'
+          otp-version: '29'
           rebar3-version: '3.25.0'
 
       - name: Cache Hex packages
@@ -104,16 +104,16 @@ jobs:
 
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: '28'
+          otp-version: '29'
           rebar3-version: '3.25.0'
 
       - name: Cache PLT
         uses: actions/cache@v4
         with:
           path: _build/default/rebar3_*_plt
-          key: ${{ runner.os }}-dialyzer-otp28-${{ hashFiles('rebar.config') }}
+          key: ${{ runner.os }}-dialyzer-otp29-${{ hashFiles('rebar.config') }}
           restore-keys: |
-            ${{ runner.os }}-dialyzer-otp28-
+            ${{ runner.os }}-dialyzer-otp29-
 
       - name: Dialyzer
         run: rebar3 dialyzer

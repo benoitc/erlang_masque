@@ -65,10 +65,9 @@
     proxy_public_address_error/0
 ]).
 
-%% Used in tests and by the bind matcher when comparing the encoded
-%% wildcard literal that arrives on the wire.
+%% The wildcard target value. The template engine has already
+%% percent-decoded the path, so `%2A' on the wire arrives here as `*'.
 -define(WILDCARD, <<"*">>).
--define(WILDCARD_PCT, <<"%2A">>).
 
 %%====================================================================
 %% URI matching / expansion
@@ -94,6 +93,9 @@ match_with(T, Path) ->
     case masque_uri_template:match(T, Path) of
         {ok, #{target_host := Host, target_port := Port}} ->
             classify_match(Host, Port);
+        {ok, _} ->
+            %% The template lacks `target_host' or `target_port'.
+            {error, bad_template};
         {error, no_match} ->
             {error, no_match};
         {error, bad_pct} ->
@@ -128,8 +130,6 @@ decode_host(<<>>) ->
     {error, empty};
 decode_host(?WILDCARD) ->
     wildcard;
-decode_host(?WILDCARD_PCT) ->
-    wildcard;
 decode_host(Bin) when is_binary(Bin) ->
     case masque_uri:valid_host(Bin) of
         true -> {ok, Bin};
@@ -140,8 +140,6 @@ decode_port(<<>>) ->
     {error, empty};
 decode_port(?WILDCARD) ->
     wildcard;
-decode_port(?WILDCARD_PCT) ->
-    wildcard;
 decode_port(Bin) when is_binary(Bin) ->
     case parse_port_value(Bin) of
         {ok, P} -> {ok, P};
@@ -149,11 +147,9 @@ decode_port(Bin) when is_binary(Bin) ->
     end.
 
 parse_port_value(Bin) ->
-    try binary_to_integer(Bin) of
-        N when is_integer(N), N >= 1, N =< 65535 -> {ok, N};
+    case masque_uri:parse_uint(Bin, 65535) of
+        {ok, N} when N >= 1 -> {ok, N};
         _ -> not_port
-    catch
-        _:_ -> not_port
     end.
 
 %% @doc Expand a CONNECT-UDP URI template for a bind handshake.

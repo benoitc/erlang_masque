@@ -7,14 +7,24 @@
 %%%   <li>Emit the initial `ROUTE_ADVERTISEMENT' combining the
 %%%       configured static `routes' with any `resolved_addresses'
 %%%       populated by the listener's DNS step.</li>
-%%%   <li>BCP-38 source-address filtering on inbound packets (via
-%%%       `masque_ip:is_public/1').</li>
+%%%   <li>BCP-38 source-address filtering on inbound packets: the
+%%%       source must fall inside a prefix assigned to this client.</li>
+%%%   <li>Act as a router for accepted packets: decrement the TTL /
+%%%       Hop Limit (ICMP Time Exceeded when it runs out) and enforce
+%%%       the `mtu' option (default 1500; ICMPv6 Packet Too Big or
+%%%       ICMPv4 Fragmentation Needed when exceeded).</li>
 %%%   <li>Hand each accepted IP packet to the user-supplied
 %%%       `forward_fun' (default: drop).</li>
+%%%   <li>Record the addresses and routes the client assigns or
+%%%       advertises to the proxy (reported through `lifecycle_fun'
+%%%       as `peer_address_assigned' / `peer_routes_advertised').</li>
 %%% </ul>
 %%%
-%%% Phase 2 replaces this handler with `masque_ip_tun_proxy_handler'
-%%% which owns a TUN device instead of a forwarder-fun.
+%%% Assigned prefixes are registered in `masque_ip_session_registry',
+%%% which also keeps sessions sharing one pool from getting the same
+%%% addresses. A consumer that owns a TUN device can look up the
+%%% serving session there and push packets back with
+%%% `masque_ip:inject_packet/2'.
 -module(masque_ip_proxy_handler).
 -behaviour(masque_handler).
 
@@ -35,6 +45,8 @@
 
 -include("masque_ip.hrl").
 
+-define(DEFAULT_MTU, 1500).
+
 -record(state, {
     opts :: map(),
     resolved = [] :: [inet:ip_address()],
@@ -42,6 +54,12 @@
     pools = [] :: [#ip_route{}],
     %% Already-assigned addresses (tagged with the IP version).
     assigned = [] :: [ip_assignment_tuple()],
+    %% Routes advertised at init. A hostname target is scoped to them.
+    routes = [] :: [#ip_route{}],
+    %% Addresses and routes the client assigned / advertised to us
+    %% (RFC 9484 sec 4.7: both directions are allowed).
+    peer_assigned = [] :: [#ip_assignment{}],
+    peer_routes = [] :: [#ip_route{}],
     %% Negotiated URI scope: target / ipproto from the request line.
     %% `'*'' on either axis means "any" and skips the per-packet check.
     target = '*' :: masque_uri_ip:ip_target(),
@@ -58,15 +76,35 @@
 
 accept(Req) ->
     Opts = maps:get(handler_opts, Req, #{}),
-    Allow = maps:get(allow_private, Opts, false),
-    Addrs = maps:get(resolved_addresses, Req, []),
-    case
-        Allow orelse Addrs =:= [] orelse
-            lists:all(fun masque_ip:is_public/1, Addrs)
-    of
+    case maps:get(allow_private, Opts, false) orelse target_is_public(Req) of
         true -> accept;
         false -> {reject, forbidden}
     end.
+
+%% `*' can reach anything, so it needs `allow_private'. A prefix must
+%% start and end on public addresses (the data plane also drops
+%% non-public destinations inside it). Hostnames and literals are
+%% checked on their resolved addresses.
+target_is_public(Req) ->
+    case maps:get(ip_target, Req, '*') of
+        '*' ->
+            false;
+        {V, Net, Pfx} when V =:= 4; V =:= 6 ->
+            {First, Last} = prefix_bounds(V, Net, Pfx),
+            masque_ip:is_public(First) andalso masque_ip:is_public(Last);
+        {_, _, _, _} = A ->
+            masque_ip:is_public(A);
+        {_, _, _, _, _, _, _, _} = A ->
+            masque_ip:is_public(A);
+        _Host ->
+            lists:all(
+                fun masque_ip:is_public/1,
+                maps:get(resolved_addresses, Req, [])
+            )
+    end.
+
+prefix_bounds(4, Net, Pfx) -> prefix_range_v4(Net, Pfx);
+prefix_bounds(6, Net, Pfx) -> prefix_range_v6(Net, Pfx).
 
 %%====================================================================
 %% init — publish the initial ROUTE_ADVERTISEMENT
@@ -84,6 +122,7 @@ init(Req, Opts) ->
         opts = Opts,
         resolved = Resolved,
         pools = Pools,
+        routes = Routes,
         target = Target,
         ipproto = IPProto
     },
@@ -152,7 +191,6 @@ allocate_one(
                 address = Addr,
                 prefix_len = Pfx
             },
-            register_with_registry(V, Addr, Pfx, S1),
             emit_assigned(Entry, S1),
             {Entry, S1};
         none ->
@@ -190,22 +228,28 @@ min_assignable(V, Opts) ->
         N when is_integer(N) -> N
     end.
 
-register_with_registry(V, Addr, Pfx, #state{opts = Opts}) ->
+%% Claim a candidate range in the cross-session registry. Another
+%% session sharing the pool may already hold it (`{error, conflict}'),
+%% in which case the allocator moves on to the next candidate.
+register_with_registry(V, Addr, Pfx, Opts) ->
     %% The handler runs inside the session's process, so `self()' is
     %% the session pid. Context id 0 is the IP datagram context per
     %% RFC 9484 §6 (matches `MASQUE_CONTEXT_ID_IP'). Both can be
     %% overridden via opts for embedded uses.
-    Pid = maps:get(session_pid, Opts, self()),
+    Pid = session_pid(Opts),
     Ctx = maps:get(ip_context_id, Opts, ?MASQUE_CONTEXT_ID_IP),
-    _ = masque_ip_session_registry:register(V, Addr, Pfx, Pid, Ctx),
-    ok.
+    masque_ip_session_registry:register(V, Addr, Pfx, Pid, Ctx) =:= ok.
 
-next_free(V, Pfx, #state{pools = Pools, assigned = Assigned} = S) ->
+session_pid(Opts) ->
+    maps:get(session_pid, Opts, self()).
+
+next_free(V, Pfx, #state{pools = Pools, assigned = Assigned, opts = Opts} = S) ->
     case pick_pool(V, Pools) of
         undefined ->
             none;
         Pool ->
-            case iter_pool(V, Pfx, Pool, Assigned) of
+            Claim = fun(Addr) -> register_with_registry(V, Addr, Pfx, Opts) end,
+            case iter_pool(V, Pfx, Pool, Assigned, Claim) of
                 {ok, Addr} ->
                     {ok, Addr, S#state{assigned = [{V, Addr, Pfx} | Assigned]}};
                 exhausted ->
@@ -221,37 +265,36 @@ iter_pool(
     V,
     Pfx,
     #ip_route{start_addr = StartAddr, end_addr = EndAddr},
-    Assigned
+    Assigned,
+    Claim
 ) ->
     Max = max_prefix(V),
     Stride = 1 bsl (Max - Pfx),
     StartInt = align_up(addr_to_int(V, StartAddr), Stride),
     EndInt = addr_to_int(V, EndAddr),
-    iter_range_strided(V, StartInt, EndInt, Pfx, Stride, Assigned).
+    iter_range_strided(V, StartInt, EndInt, Stride, Assigned, Claim).
 
-iter_range_strided(_V, Cur, End, _Pfx, _Stride, _Assigned) when
+iter_range_strided(_V, Cur, End, _Stride, _Assigned, _Claim) when
     Cur > End
 ->
     exhausted;
-iter_range_strided(V, Cur, End, Pfx, Stride, Assigned) ->
+iter_range_strided(V, Cur, End, Stride, Assigned, Claim) ->
     %% A candidate range covers [Cur, Cur + Stride - 1] in int space.
     Last = Cur + Stride - 1,
+    Next = fun() -> iter_range_strided(V, Cur + Stride, End, Stride, Assigned, Claim) end,
     case Last > End of
         true ->
             exhausted;
         false ->
             case overlaps_assigned(V, Cur, Last, Assigned) of
                 true ->
-                    iter_range_strided(
-                        V,
-                        Cur + Stride,
-                        End,
-                        Pfx,
-                        Stride,
-                        Assigned
-                    );
+                    Next();
                 false ->
-                    {ok, int_to_addr(V, Cur)}
+                    Addr = int_to_addr(V, Cur),
+                    case Claim(Addr) of
+                        true -> {ok, Addr};
+                        false -> Next()
+                    end
             end
     end.
 
@@ -370,26 +413,87 @@ max_prefix(6) -> 128.
 handle_ip_packet(Packet, #state{opts = Opts} = S) ->
     case accept_inbound(Packet, S) of
         ok ->
-            forward(Packet, S);
+            route(Packet, S);
         {drop, Reason} ->
             emit_drop(Reason, drop_detail(Packet), Opts),
             {ok, S}
     end.
 
+%% Router duties before handing the packet on: decrement the TTL /
+%% Hop Limit and check the egress MTU. Failures drop the packet and
+%% answer the client with the matching ICMP error, unless the packet
+%% is itself an ICMP error (RFC 1122 §3.2.2, RFC 4443 §2.4 (e)).
+route(Packet, #state{opts = Opts} = S) ->
+    case masque_ip_packet:decrement_ttl(Packet) of
+        {ok, Fwd} ->
+            Mtu = maps:get(mtu, Opts, ?DEFAULT_MTU),
+            case byte_size(Fwd) > Mtu of
+                true ->
+                    emit_drop(mtu_exceeded, drop_detail(Packet), Opts),
+                    icmp_reply(Packet, fun() -> too_big(Packet, Mtu) end, S);
+                false ->
+                    forward(Fwd, S)
+            end;
+        {error, ttl_zero} ->
+            emit_drop(ttl_zero, drop_detail(Packet), Opts),
+            icmp_reply(Packet, fun() -> time_exceeded(Packet) end, S);
+        {error, malformed} ->
+            emit_drop(malformed, drop_detail(Packet), Opts),
+            {ok, S}
+    end.
+
+%% The drop itself is already counted (`ttl_zero' / `mtu_exceeded').
+icmp_reply(Packet, Build, S) ->
+    case masque_icmp:is_error(Packet) of
+        true ->
+            {ok, S};
+        false ->
+            {ok, S, [{send_ip_packet, Build()}]}
+    end.
+
+too_big(<<4:4, _/bitstring>> = Packet, Mtu) ->
+    masque_icmp:frag_needed(Mtu, Packet);
+too_big(Packet, Mtu) ->
+    masque_icmp:packet_too_big(Mtu, Packet).
+
+time_exceeded(<<4:4, _/bitstring>> = Packet) ->
+    masque_icmp:time_exceeded(v4, Packet);
+time_exceeded(Packet) ->
+    masque_icmp:time_exceeded(v6, Packet).
+
 %% RFC 9484 §5: the proxy MUST drop packets that fail BCP-38 source
 %% filtering or fall outside the negotiated `target' / `ipproto'
 %% scope. Returns the first failing axis so the drop counter and the
 %% lifecycle hook can attribute the cause.
-accept_inbound(Packet, #state{target = Target, ipproto = IPProto} = S) ->
+accept_inbound(
+    Packet,
+    #state{target = Target, ipproto = IPProto, routes = Routes} = S
+) ->
     case src_filter_passes(Packet, S) of
         false ->
             {drop, bcp38};
         true ->
-            case masque_ip_packet:scope_check(Packet, Target, IPProto) of
-                ok -> ok;
+            case masque_ip_packet:scope_check(Packet, Target, IPProto, Routes) of
+                ok -> dst_filter(Packet, S);
                 {error, Reason} -> {drop, Reason}
             end
     end.
+
+%% A prefix target may cover private space the accept/1 bounds check
+%% cannot see; drop non-public destinations unless `allow_private'.
+dst_filter(Packet, #state{target = {V, _, _}, opts = Opts}) when V =:= 4; V =:= 6 ->
+    case maps:get(allow_private, Opts, false) of
+        true ->
+            ok;
+        false ->
+            {ok, _, Dst} = masque_ip_packet:destination(Packet),
+            case masque_ip:is_public(Dst) of
+                true -> ok;
+                false -> {drop, scope_target}
+            end
+    end;
+dst_filter(_Packet, _S) ->
+    ok.
 
 forward(Packet, #state{opts = Opts} = S) ->
     case maps:find(forward_fun, Opts) of
@@ -468,58 +572,54 @@ invoke_lifecycle(_Carrier, Event, Detail, Opts) ->
     end.
 
 %% BCP-38-style source check: reject packets whose source address
-%% doesn't match one the proxy actually assigned to this client.
-%% (`allow_private' skips the check, matching the accept/1 gate.)
+%% is not inside a prefix the proxy assigned to this client. With
+%% nothing assigned, only `allow_private' lets packets through.
 src_filter_passes(_Packet, #state{opts = Opts, assigned = []}) ->
-    maps:get(allow_private, Opts, true);
-src_filter_passes(<<4:4, _/bitstring>> = Packet, #state{assigned = Assigned}) ->
-    case Packet of
-        <<_:12/binary, SA:8, SB:8, SC:8, SD:8, _/binary>> ->
-            lists:any(
-                fun
-                    ({4, {A, B, C, D}, _}) ->
-                        {A, B, C, D} =:= {SA, SB, SC, SD};
-                    (_) ->
-                        false
-                end,
-                Assigned
-            );
-        _ ->
-            false
-    end;
-src_filter_passes(<<6:4, _/bitstring>> = Packet, #state{assigned = Assigned}) ->
-    case Packet of
-        <<_:8/binary, SA:16, SB:16, SC:16, SD:16, SE:16, SF:16, SG:16, SH:16, _/binary>> ->
-            lists:any(
-                fun
-                    ({6, {A, B, C, D, E, F, G, H}, _}) ->
-                        {A, B, C, D, E, F, G, H} =:=
-                            {SA, SB, SC, SD, SE, SF, SG, SH};
-                    (_) ->
-                        false
-                end,
-                Assigned
-            );
-        _ ->
-            false
-    end;
+    maps:get(allow_private, Opts, false);
+src_filter_passes(<<4:4, _:92, Src:32, _/bitstring>>, #state{assigned = Assigned}) ->
+    in_assigned(4, Src, Assigned);
+src_filter_passes(<<6:4, _:60, Src:128, _/bitstring>>, #state{assigned = Assigned}) ->
+    in_assigned(6, Src, Assigned);
 src_filter_passes(_, _) ->
     false.
+
+in_assigned(V, Src, Assigned) ->
+    Max = max_prefix(V),
+    lists:any(
+        fun
+            ({V0, A, Pfx}) when V0 =:= V ->
+                Shift = Max - Pfx,
+                (Src bsr Shift) =:= (addr_to_int(V, A) bsr Shift);
+            (_) ->
+                false
+        end,
+        Assigned
+    ).
 
 %%====================================================================
 %% Peer-initiated control-plane (bidirectional per §8.2)
 %%====================================================================
 
-handle_address_assign(_Entries, S) -> {ok, S}.
+%% The client assigned addresses to the proxy. Keep the latest entry
+%% per request id and report it.
+handle_address_assign(Entries, #state{peer_assigned = Prev, opts = Opts} = S) ->
+    Ids = [Id || #ip_assignment{request_id = Id} <- Entries],
+    Kept = [E || #ip_assignment{request_id = Id} = E <- Prev, not lists:member(Id, Ids)],
+    invoke_lifecycle(Opts, peer_address_assigned, #{entries => Entries}, Opts),
+    {ok, S#state{peer_assigned = Kept ++ Entries}}.
 
-handle_route_advertisement(_Entries, S) -> {ok, S}.
+%% Each ROUTE_ADVERTISEMENT carries the peer's full route set
+%% (RFC 9484 sec 4.7.3), so it replaces the previous one.
+handle_route_advertisement(Routes, #state{opts = Opts} = S) ->
+    invoke_lifecycle(Opts, peer_routes_advertised, #{routes => Routes}, Opts),
+    {ok, S#state{peer_routes = Routes}}.
 
 terminate(_Reason, #state{assigned = Assigned, opts = Opts}) ->
     [release_one(Entry, Opts) || Entry <- Assigned],
     ok.
 
 release_one({V, Addr, Pfx}, Opts) ->
-    _ = masque_ip_session_registry:release(V, Addr, Pfx),
+    _ = masque_ip_session_registry:release(V, Addr, Pfx, session_pid(Opts)),
     invoke_lifecycle(
         Opts,
         address_released,

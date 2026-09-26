@@ -15,9 +15,15 @@
 -export([
     destination/1,
     upper_protocol/1,
+    upper_layer/1,
     scope_passes/3,
-    scope_check/3
+    scope_check/3,
+    scope_check/4,
+    decrement_ttl/1,
+    checksum/1
 ]).
+
+-include("masque_ip.hrl").
 
 -type version() :: 4 | 6.
 -type address() :: inet:ip4_address() | inet:ip6_address().
@@ -44,13 +50,25 @@ destination(_) ->
 %% headers (Hop-by-Hop 0, Routing 43, Fragment 44, Destination 60,
 %% AH 51) to find the first non-extension Next Header.
 -spec upper_protocol(binary()) -> {ok, proto()} | {error, term()}.
-upper_protocol(<<4:4, IHL:4, _Rest:64, Proto:8, _/binary>> = Pkt) when
+upper_protocol(Pkt) ->
+    case upper_layer(Pkt) of
+        {ok, Proto, _Payload} -> {ok, Proto};
+        {error, _} = Err -> Err
+    end.
+
+%% @doc Like {@link upper_protocol/1}, and also return the bytes after
+%% the IP header (and IPv6 extension headers). For a non-initial IPv4
+%% fragment these are not the start of the upper-layer header.
+-spec upper_layer(binary()) -> {ok, proto(), binary()} | {error, malformed}.
+upper_layer(<<4:4, IHL:4, _Rest:64, Proto:8, _/binary>> = Pkt) when
     IHL >= 5, byte_size(Pkt) >= IHL * 4
 ->
-    {ok, Proto};
-upper_protocol(<<6:4, _:4, _:8, _:16, _:16, NextHdr:8, _:8, _Src:128, _Dst:128, Rest/binary>>) ->
+    HdrLen = IHL * 4,
+    <<_:HdrLen/binary, Payload/binary>> = Pkt,
+    {ok, Proto, Payload};
+upper_layer(<<6:4, _:4, _:8, _:16, _:16, NextHdr:8, _:8, _Src:128, _Dst:128, Rest/binary>>) ->
     walk_v6_ext(NextHdr, Rest);
-upper_protocol(_) ->
+upper_layer(_) ->
     {error, malformed}.
 
 %% @doc Combined `target' / `ipproto' scope check used by the
@@ -67,7 +85,8 @@ scope_passes(Packet, Target, IPProto) ->
     end.
 
 %% @doc Reasonful variant of `scope_passes/3' for telemetry. Returns
-%% the first failing axis instead of a boolean.
+%% the first failing axis instead of a boolean. A hostname target has
+%% no routes here and never matches; use `scope_check/4'.
 -spec scope_check(
     binary(),
     masque_uri_ip:ip_target(),
@@ -75,9 +94,22 @@ scope_passes(Packet, Target, IPProto) ->
 ) ->
     ok | {error, malformed | scope_target | scope_ipproto}.
 scope_check(Packet, Target, IPProto) ->
+    scope_check(Packet, Target, IPProto, []).
+
+%% @doc Like `scope_check/3', but a hostname target matches when the
+%% destination falls inside one of `Routes' (the routes advertised for
+%% the resolved addresses).
+-spec scope_check(
+    binary(),
+    masque_uri_ip:ip_target(),
+    masque_uri_ip:ip_ipproto(),
+    [#ip_route{}]
+) ->
+    ok | {error, malformed | scope_target | scope_ipproto}.
+scope_check(Packet, Target, IPProto, Routes) ->
     case destination(Packet) of
         {ok, V, Dst} ->
-            case target_matches(V, Dst, Target) of
+            case target_matches(V, Dst, Target, Routes) of
                 true ->
                     case ipproto_matches(Packet, IPProto) of
                         true -> ok;
@@ -90,27 +122,83 @@ scope_check(Packet, Target, IPProto) ->
             {error, malformed}
     end.
 
+%% @doc Decrement the IPv4 TTL or IPv6 Hop Limit of a packet the
+%% proxy is about to forward (RFC 9484: the proxy acts as an IP
+%% router). The IPv4 header checksum is recomputed. Returns
+%% `{error, ttl_zero}' when the packet must not be forwarded because
+%% the TTL / Hop Limit would reach zero.
+-spec decrement_ttl(binary()) -> {ok, binary()} | {error, ttl_zero | malformed}.
+decrement_ttl(<<4:4, IHL:4, Mid:7/binary, TTL:8, Proto:8, _Csum:16, Rest/binary>> = Pkt) when
+    IHL >= 5, byte_size(Pkt) >= IHL * 4
+->
+    case TTL =< 1 of
+        true ->
+            {error, ttl_zero};
+        false ->
+            OptLen = IHL * 4 - 12,
+            <<HdrRest:OptLen/binary, Payload/binary>> = Rest,
+            Hdr0 = <<4:4, IHL:4, Mid/binary, (TTL - 1):8, Proto:8, 0:16, HdrRest/binary>>,
+            Csum = checksum(Hdr0),
+            {ok,
+                <<4:4, IHL:4, Mid/binary, (TTL - 1):8, Proto:8, Csum:16, HdrRest/binary,
+                    Payload/binary>>}
+    end;
+decrement_ttl(<<6:4, Low:4, Head:6/binary, HopLimit:8, Rest/binary>> = Pkt) when
+    byte_size(Pkt) >= 40
+->
+    case HopLimit =< 1 of
+        true -> {error, ttl_zero};
+        false -> {ok, <<6:4, Low:4, Head/binary, (HopLimit - 1):8, Rest/binary>>}
+    end;
+decrement_ttl(_) ->
+    {error, malformed}.
+
+%% @doc Standard 16-bit one's-complement Internet checksum (RFC 1071).
+-spec checksum(binary()) -> 0..16#FFFF.
+checksum(Bin) ->
+    finish_csum(sum_words(Bin, 0)).
+
+sum_words(<<A:16, Rest/binary>>, Acc) -> sum_words(Rest, Acc + A);
+sum_words(<<A:8>>, Acc) -> Acc + (A bsl 8);
+sum_words(<<>>, Acc) -> Acc.
+
+finish_csum(Sum) ->
+    S = (Sum band 16#FFFF) + (Sum bsr 16),
+    S2 = (S band 16#FFFF) + (S bsr 16),
+    (bnot S2) band 16#FFFF.
+
 %%====================================================================
 %% Internal
 %%====================================================================
 
-target_matches(_V, _Dst, '*') ->
+target_matches(_V, _Dst, '*', _Routes) ->
     true;
-target_matches(4, Dst, {_, _, _, _} = Want) ->
+target_matches(4, Dst, {_, _, _, _} = Want, _Routes) ->
     Dst =:= Want;
-target_matches(6, Dst, {_, _, _, _, _, _, _, _} = Want) ->
+target_matches(6, Dst, {_, _, _, _, _, _, _, _} = Want, _Routes) ->
     Dst =:= Want;
-target_matches(4, Dst, {4, Net, Pfx}) ->
+target_matches(4, Dst, {4, Net, Pfx}, _Routes) ->
     in_v4_prefix(Dst, Net, Pfx);
-target_matches(6, Dst, {6, Net, Pfx}) ->
+target_matches(6, Dst, {6, Net, Pfx}, _Routes) ->
     in_v6_prefix(Dst, Net, Pfx);
-target_matches(_V, _Dst, Bin) when is_binary(Bin) ->
+target_matches(V, Dst, Bin, Routes) when is_binary(Bin) ->
     %% Hostname target: resolution happens at handshake time and the
-    %% resolved addresses become routes, so packets are scoped via
-    %% the route table rather than here.
-    true;
-target_matches(_, _, _) ->
+    %% resolved addresses become routes, so the destination must fall
+    %% inside one of them.
+    in_routes(V, Dst, Routes);
+target_matches(_, _, _, _) ->
     false.
+
+in_routes(V, Dst, Routes) ->
+    lists:any(
+        fun
+            (#ip_route{version = RV, start_addr = S, end_addr = E}) when RV =:= V ->
+                S =< Dst andalso Dst =< E;
+            (_) ->
+                false
+        end,
+        Routes
+    ).
 
 in_v4_prefix({A, B, C, D}, {NA, NB, NC, ND}, Pfx) when Pfx =< 32 ->
     Mask = bnot ((1 bsl (32 - Pfx)) - 1) band 16#FFFFFFFF,
@@ -161,8 +249,8 @@ walk_v6_ext(51, <<NH:8, ExtLen:8, _:6/binary, Rest/binary>>) ->
         false ->
             {error, malformed}
     end;
-walk_v6_ext(NH, _Rest) ->
-    {ok, NH}.
+walk_v6_ext(NH, Rest) ->
+    {ok, NH, Rest}.
 
 consume_ext(NH, ExtLen, Rest, Cont) ->
     Skip = ExtLen * 8,

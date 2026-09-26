@@ -158,8 +158,12 @@
         %% `capsule-protocol') are not overridable; a duplicate here
         %% is silently dropped.
         request_headers => [{binary(), binary()}],
+        %% Bound on the `queue'-mode receive queue, in items (default
+        %% 1000). See {@link recv/2}.
+        rx_queue_limit => pos_integer(),
         %% Internal - set by racer, not by callers.
         transport => transport(),
+        defer_owner => boolean(),
         proxy => {binary(), inet:port_number()},
         alpn => [binary()],
         mode => message | queue
@@ -371,7 +375,10 @@ dial_single(Mod, Target, Opts, Owner) ->
                 catch
                     exit:{noproc, _} -> {error, session_died};
                     exit:{normal, _} -> {error, session_died};
-                    exit:{{shutdown, _}, _} -> {error, session_died}
+                    exit:{{shutdown, _}, _} -> {error, session_died};
+                    exit:{timeout, _} -> {error, handshake_timeout};
+                    exit:{Why, {gen_statem, call, _}} -> {error, Why};
+                    exit:Other -> {error, Other}
                 end,
             erlang:demonitor(MRef, [flush]),
             case Result of
@@ -433,11 +440,23 @@ send(Sess, ContextId, Data) ->
 %% @doc Block until data is received or `Timeout' ms elapses.
 %%
 %% Requires the session to be in `queue' delivery mode (see
-%% {@link set_mode/2}).
+%% {@link set_mode/2}). The queue holds at most `rx_queue_limit'
+%% items (default 1000): datagram tunnels drop past it (counted as
+%% `rx_dropped' in {@link info/1}), a CONNECT-TCP tunnel ends with
+%% `rx_overflow'. After the peer ends the tunnel, data still queued
+%% is returned first, then `{error, closed}' (or `{error,
+%% rx_overflow}').
 -spec recv(session(), pos_integer()) ->
     {ok, binary()} | {error, timeout | term()}.
 recv(Sess, Timeout) ->
-    gen_statem:call(Sess, {recv, Timeout}, Timeout + 500).
+    try
+        gen_statem:call(Sess, {recv, Timeout}, Timeout + 500)
+    catch
+        exit:{noproc, _} -> {error, closed};
+        exit:{normal, _} -> {error, closed};
+        exit:{shutdown, _} -> {error, closed};
+        exit:{{shutdown, _}, _} -> {error, closed}
+    end.
 
 %% @doc Send a capsule on the tunnel's request stream (RFC 9297 §3.2).
 -spec send_capsule(session(), non_neg_integer(), iodata()) ->
@@ -689,7 +708,14 @@ start_chain_listener_h1(Name, Opts) ->
     start_listener_h1(Name, chain_all(Opts)).
 
 chain_all(Opts) ->
+    HOpts =
+        case maps:get(handler_opts, Opts, #{}) of
+            #{via_token := _} = H -> H;
+            H when is_map(H) -> H#{via_token => masque_chain_handler:new_token()};
+            H -> H
+        end,
     Opts#{
+        handler_opts => HOpts,
         handler => masque_chain_handler,
         tcp_handler => masque_chain_handler,
         ip_handler => masque_chain_handler

@@ -19,7 +19,10 @@
 %%%   <li>`bind_port :: inet:port_number()' - default `0'
 %%%       (kernel-assigned ephemeral).</li>
 %%%   <li>`bind_socket_opts :: [gen_udp:option()]' - merged on top of
-%%%       `[binary, {active, true}]'.</li>
+%%%       `[binary, {active, N}]'.</li>
+%%%   <li>`active_n :: pos_integer()' - datagrams the socket delivers
+%%%       before it pauses until the session has relayed them. Default
+%%%       `32'.</li>
 %%%   <li>`public_addresses :: [{ip_address(), port()}]' -
 %%%       list emitted on `Proxy-Public-Address'. Required if the
 %%%       socket is bound to a wildcard address; otherwise sockname
@@ -28,9 +31,13 @@
 %%%       - alternative to the static list. Takes precedence when
 %%%       set.</li>
 %%%   <li>`peer_filter_fun :: fun((ip(), port()) -> ok | {drop, atom()})'
-%%%       - per-packet egress policy. Default rejects RFC 1918,
-%%%       link-local, and multicast unless `allow_private => true';
-%%%       loopback is allowed by default for testability.</li>
+%%%       - per-packet egress policy. Default passes only public
+%%%       peers (`masque_ip:is_public/1', IPv4-mapped IPv6 checked as
+%%%       IPv4).</li>
+%%%   <li>`allow_loopback :: boolean()' - let the default filter
+%%%       pass loopback peers. Default `false'.</li>
+%%%   <li>`allow_private :: boolean()' - let the default filter pass
+%%%       every peer. Default `false'.</li>
 %%%   <li>`scrub_fun :: fun((Packet, State) -> {pass, Packet, State} |
 %%%                                            {drop, Reason, State})'
 %%%       - data-plane policy hook for DDoS scrubbing or other
@@ -42,8 +49,11 @@
 
 -include("masque_udp_bind.hrl").
 
+-define(DEFAULT_ACTIVE_N, 32).
+
 -record(state, {
     socket :: gen_udp:socket(),
+    active_n = ?DEFAULT_ACTIVE_N :: pos_integer(),
     public_addresses :: [{inet:ip_address(), inet:port_number()}],
     advertised_families :: [4 | 6],
     peer_filter_fun :: fun(
@@ -72,9 +82,10 @@
 init(_Req, Opts) ->
     BindAddr = maps:get(bind_address, Opts, any),
     BindPort = maps:get(bind_port, Opts, 0),
+    ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
     SocketOpts = [
         binary,
-        {active, true},
+        {active, ActiveN},
         {ip, BindAddr}
         | maps:get(bind_socket_opts, Opts, [])
     ],
@@ -85,13 +96,14 @@ init(_Req, Opts) ->
                     Families = families(Addresses),
                     State = #state{
                         socket = Socket,
+                        active_n = ActiveN,
                         public_addresses = Addresses,
                         advertised_families = Families,
                         peer_filter_fun =
                             maps:get(
                                 peer_filter_fun,
                                 Opts,
-                                fun default_peer_filter/2
+                                default_peer_filter(Opts)
                             ),
                         scrub_fun =
                             maps:get(
@@ -170,8 +182,9 @@ handle_info(
         true ->
             {ok, S, [{send_bind_packet, {FromIP, FromPort}, Bytes}]}
     end;
-handle_info({udp_passive, Socket}, #state{socket = Socket} = S) ->
-    _ = inet:setopts(Socket, [{active, true}]),
+handle_info({udp_passive, Socket}, #state{socket = Socket, active_n = N} = S) ->
+    %% Every datagram delivered before this message has been relayed.
+    _ = inet:setopts(Socket, [{active, N}]),
     {ok, S};
 handle_info({udp_error, Socket, Reason}, #state{socket = Socket} = S) ->
     {stop, {bind_socket_error, Reason}, S};
@@ -236,43 +249,31 @@ family_of({_, _, _, _, _, _, _, _}) -> 6.
 %% Default policies
 %%====================================================================
 
-%% Reject RFC 1918, link-local, multicast. Loopback is allowed
-%% (CT scaffolding runs the upstream peer on 127.0.0.1).
-default_peer_filter(IP, _Port) ->
-    case is_private(IP) of
-        true -> {drop, peer_filter};
-        false -> ok
+%% Only globally routable peers (`masque_ip:is_public/1') pass by
+%% default. `allow_loopback' lets loopback through, `allow_private'
+%% lets everything through. IPv4-mapped IPv6 peers are checked as the
+%% IPv4 address they carry.
+default_peer_filter(Opts) ->
+    AllowPrivate = maps:get(allow_private, Opts, false),
+    AllowLoopback = maps:get(allow_loopback, Opts, false),
+    fun(IP, _Port) -> peer_allowed(unmap(IP), AllowPrivate, AllowLoopback) end.
+
+peer_allowed(_IP, true, _AllowLoopback) ->
+    ok;
+peer_allowed(IP, false, AllowLoopback) ->
+    case masque_ip:is_public(IP) orelse (AllowLoopback andalso is_loopback(IP)) of
+        true -> ok;
+        false -> {drop, peer_filter}
     end.
 
-%% loopback ok
-is_private({127, _, _, _}) ->
-    false;
-is_private({10, _, _, _}) ->
-    true;
-is_private({172, B, _, _}) when B >= 16, B =< 31 -> true;
-is_private({192, 168, _, _}) ->
-    true;
-%% link-local
-is_private({169, 254, _, _}) ->
-    true;
-%% multicast
-is_private({A, _, _, _}) when A >= 224, A =< 239 -> true;
-%% v6 loopback
-is_private({0, 0, 0, 0, 0, 0, 0, 1}) ->
-    false;
-%% v6 link-local
-is_private({16#FE80, _, _, _, _, _, _, _}) ->
-    true;
-%% v6 multicast
-is_private({16#FF00, _, _, _, _, _, _, _}) ->
-    true;
-is_private({A, _, _, _, _, _, _, _}) when
-    %% v6 ULA
-    A >= 16#FC00, A =< 16#FDFF
-->
-    true;
-is_private(_) ->
-    false.
+unmap({0, 0, 0, 0, 0, 16#FFFF, AB, CD}) ->
+    {AB bsr 8, AB band 16#FF, CD bsr 8, CD band 16#FF};
+unmap(IP) ->
+    IP.
+
+is_loopback({127, _, _, _}) -> true;
+is_loopback({0, 0, 0, 0, 0, 0, 0, 1}) -> true;
+is_loopback(_) -> false.
 
 default_scrub(Packet, State) ->
     {pass, Packet, State}.

@@ -127,8 +127,117 @@ race_timeout_surfaces_when_deadline_hits_test() ->
     ?assertMatch({error, {race_timeout, _}}, run([h3, h2, h1], Opts)).
 
 %%====================================================================
+%% Leaks and lost events
+%%====================================================================
+
+no_stray_messages_after_race_test() ->
+    %% h3 and h2 both succeed; the loser reports after the winner is
+    %% picked and h1 fails late. None of it may reach the caller.
+    Opts = base_opts(#{
+        prefer_timeout_ms => 0,
+        h1_prefer_timeout_ms => 0,
+        timeout => 2000,
+        fake_by_transport => #{
+            h3 => #{fake_result => ok, fake_delay_ms => 10},
+            h2 => #{fake_result => ok, fake_delay_ms => 30},
+            h1 => #{fake_result => {error, late}, fake_delay_ms => 60}
+        }
+    }),
+    {{ok, Sess}, Msgs} = in_fresh_process(fun() ->
+        R = run([h3, h2, h1], Opts#{owner => self()}),
+        timer:sleep(200),
+        R
+    end),
+    ?assertEqual([], Msgs),
+    ok = ?FAKE:stop(Sess).
+
+no_stray_messages_after_failed_race_test() ->
+    Opts = base_opts(#{
+        prefer_timeout_ms => 0,
+        timeout => 100,
+        fake_by_transport => #{
+            h3 => #{fake_result => {error, err_h3}, fake_delay_ms => 150},
+            h2 => #{fake_result => ok, fake_delay_ms => 150}
+        }
+    }),
+    {Result, Msgs} = in_fresh_process(fun() ->
+        R = run([h3, h2], Opts#{owner => self()}),
+        timer:sleep(300),
+        R
+    end),
+    ?assertMatch({error, {race_timeout, _}}, Result),
+    ?assertEqual([], Msgs).
+
+event_after_handshake_reaches_owner_test() ->
+    %% The winning session emits an event right after its handshake
+    %% completes, before the racer moves it to the real owner.
+    Opts = base_opts(#{
+        prefer_timeout_ms => 0,
+        fake_event => true,
+        fake_by_transport => #{
+            h3 => #{fake_result => {error, no_quic}},
+            h2 => #{fake_result => ok, fake_delay_ms => 5}
+        }
+    }),
+    {ok, Sess} = run([h3, h2], Opts),
+    receive
+        {fake_event, Sess} -> ok
+    after 1000 -> ?assert(false)
+    end,
+    ok = ?FAKE:stop(Sess).
+
+caller_killed_mid_race_leaves_nothing_test() ->
+    Self = self(),
+    Opts = base_opts(#{
+        prefer_timeout_ms => 0,
+        h1_prefer_timeout_ms => 0,
+        timeout => 60000,
+        fake_notify => Self,
+        fake_result => ok,
+        fake_delay_ms => 60000
+    }),
+    Caller = spawn(fun() -> run([h3, h2, h1], Opts#{owner => self()}) end),
+    Sessions = [
+        receive
+            {fake_started, _, S} -> S
+        after 1000 -> error(no_session)
+        end
+     || _ <- [h3, h2, h1]
+    ],
+    Workers = [W || S <- Sessions, W <- [owner_of(S)]],
+    exit(Caller, kill),
+    [wait_down(P) || P <- Sessions ++ Workers],
+    ok.
+
+%%====================================================================
 %% Helpers
 %%====================================================================
+
+in_fresh_process(Fun) ->
+    Parent = self(),
+    {Pid, MRef} = spawn_monitor(fun() ->
+        R = Fun(),
+        {messages, Msgs} = erlang:process_info(self(), messages),
+        Parent ! {self(), R, Msgs}
+    end),
+    receive
+        {Pid, R, Msgs} ->
+            erlang:demonitor(MRef, [flush]),
+            {R, Msgs};
+        {'DOWN', MRef, process, Pid, Reason} ->
+            error({race_process_died, Reason})
+    end.
+
+owner_of(Sess) ->
+    {_, Data} = sys:get_state(Sess),
+    element(5, Data).
+
+wait_down(Pid) ->
+    MRef = erlang:monitor(process, Pid),
+    receive
+        {'DOWN', MRef, process, Pid, _} -> ok
+    after 3000 -> error({still_alive, Pid})
+    end.
 
 base_opts(Extra) ->
     Defaults = #{

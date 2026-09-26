@@ -6,14 +6,145 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- TLS: every client transport (h2, udp-bind on h1/h2/h3, pooled h2 in
+  the racer, chain upstreams) now uses `verify_peer` with the system CA
+  store, hostname check and SNI by default. **Breaking**: self-signed
+  setups need `verify => verify_none` or `cacerts`.
+- TLS: `cacerts` is honoured on h1 clients.
+- CONNECT-IP: `'*'` and private prefix targets are rejected unless
+  `allow_private => true`. **Breaking** default.
+- CONNECT-IP: prefix targets drop packets to private destinations;
+  hostname targets only reach their advertised routes.
+- CONNECT-IP: packets from unassigned sources are dropped unless
+  `allow_private`; sources are matched against the whole assigned
+  prefix.
+- CONNECT-IP: `masque_ip:is_public/1` also rejects `::/96`, `2002::/16`,
+  `fec0::/10`, `3fff::/20` and `5f00::/16`.
+- CONNECT-IP: the h1 listener resolves hostname targets like h3 and h2.
+- udp-bind: the default peer filter uses `masque_ip:is_public/1`;
+  loopback is dropped unless `allow_loopback`, other non-public peers
+  unless `allow_private`; IPv4-mapped peers are checked as IPv4.
+  **Breaking** default.
+- Chain: relay loops are detected through a `via` header and rejected
+  with 508 and Proxy-Status `proxy_loop_detected`.
+- URI parsing: strict dotted-quad IPv4, no zone ids, digits-only ports,
+  ipproto and prefix lengths, numeric-looking hostnames rejected, no
+  double decoding of `%2A`.
+- At most 64 pending ADDRESS_REQUEST ids per CONNECT-IP session.
+
 ### Changed
 
-- Bumped `quic` 1.3.0 -> 2.0.0 and `h1` (erlang_h1) 0.6.2 -> 0.9.1.
+- Erlang/OTP 29 is now the only supported release (`minimum_otp_vsn`
+  in `rebar.config`); CI runs tests, lint and dialyzer on OTP 29 only.
+- Bumped `quic` 1.3.0 -> 2.0.1 and `h1` (erlang_h1) 0.6.2 -> 0.9.1.
 - Bumped `h2` 0.9.0 -> 0.12.3.
 - Bumped `instrument` 1.1.3 -> 1.1.5 and `hackney` 4.3.0 -> 4.7.4.
 - The h2 server now reads `:authority` and `:scheme` from the request
   headers and no longer falls back to the `host` header or a hard-coded
   `https` scheme. Both pseudo-headers are required, matching the h3 server.
+- CONNECT-TCP: no `capsule-protocol` header in either direction; a 2xx
+  carrying it fails with `{error, {bad_response, capsule_protocol}}` and
+  `send_capsule/3` returns `{error, not_supported}`. **Breaking**.
+- CONNECT-TCP: `{masque_closed, Sess, peer_fin}` means the peer finished
+  sending; the session stays writable until `shutdown_write/1` or
+  `close/1`. A half-closed tunnel idles out after 30 s (`eof_timeout`).
+  h1 cannot half-close (OTP `ssl` limitation). **Breaking**.
+- CONNECT-TCP: upstream errors and handler crashes reset the stream with
+  `H3_CONNECT_ERROR` / `CONNECT_ERROR` instead of a FIN.
+- CONNECT-TCP: a tunnel write that fails or stays blocked for 30 s resets
+  the tunnel instead of dropping data.
+- URI templates: adjacent variables, a variable before `{?...}` and a
+  non-terminal `{?...}` are rejected at parse time; query-form templates
+  require an exact path; IP templates only allow `target` and `ipproto`;
+  udp-bind templates without host/port return `{error, bad_template}`.
+  **Breaking**.
+- `masque:connect/3` and `bind_connect/3` return `{error, Reason}` on
+  dial failure instead of exiting, with the raw reason
+  (`{connect, econnrefused}`, TLS alerts, `handshake_timeout`,
+  `bad_upgrade_response`, `headers_too_large`, `bad_status_line`).
+- h1 clients use one overall handshake deadline.
+- `recv/2` returns unread data after the peer closes, then
+  `{error, closed}`; it returns `{error, closed}` on a dead session. A
+  closed queue-mode session lingers at most 30 s.
+- Queue-mode datagrams are dropped once `rx_queue_limit` is reached; a
+  CONNECT-TCP session ends with `{error, rx_overflow}`.
+- Proxy handlers read sockets in `{active, N}` mode (`active_n`, TCP 16,
+  UDP and udp-bind 32).
+- The h1 server requires `Connection: Upgrade` on upgrade requests.
+- Unknown `{reject, _}` reasons from `accept/1` map to 502.
+- The router finalizes sessions asynchronously; handler output produced
+  before the 2xx is held and sent after it.
+- Upstream pool checkout returns `{error, timeout | {dial_failed, R} |
+  {dial_crashed, {C, R}}}` instead of exiting, and dials more
+  connections per fingerprint when owners hit `max_streams`.
+- `masque_ip_session_registry:release/3` only frees ranges owned by the
+  caller; `release/4` takes the owner pid.
+- `masque_capsule:known/1` returns true for every implemented capsule
+  type.
+- ROUTE_ADVERTISEMENT validation is O(n log n).
+
+### Added
+
+- `rx_queue_limit` connect option (default 1000 items); `masque:info/1`
+  reports `rx_dropped` on datagram sessions.
+- `checkout_timeout_ms` in `upstream_pool_opts` (default 60 s).
+- `active_n` handler option on the TCP, UDP and udp-bind proxy handlers.
+- CONNECT-IP forwarding: TTL / hop-limit decrement with ICMP Time
+  Exceeded, `mtu` handler option (default 1500) with Packet Too Big /
+  Fragmentation Needed, `ttl_zero` and `mtu_exceeded` drop counters.
+- CONNECT-IP lifecycle events `peer_address_assigned` and
+  `peer_routes_advertised`.
+- `masque_chain_handler` forwards ADDRESS_REQUEST upstream and relays
+  the prompted ADDRESS_ASSIGN back.
+- `via_token` in chain `handler_opts` (one per chain listener by
+  default), `masque_chain_handler:new_token/0` and `node_token/0`.
+- udp-bind `max_pending_compression_responses` option (default 16).
+- udp-bind drop counters: `masque_metrics:setup_bind_counters/0`,
+  `bind_drop_inc/1`, `bind_drop_count/1`, `bind_drop_reasons/0`.
+- `masque_ip:resolve_target/3`, `masque_ip_packet:scope_check/4`,
+  `decrement_ttl/1`, `checksum/1`, `upper_layer/1`,
+  `masque_icmp:frag_needed/2`, `is_error/1`,
+  `masque_chain_handler:handle_address_request/2`.
+- `masque_tls:client_opts/3` with an explicit ALPN list.
+- `masque_uri:parse_ip_literal/1`, `parse_uint/2`,
+  `masque_uri_template:var_names/1`.
+- `masque_compression_table:install/3` (reports `close_proxy_id`
+  conflicts), `mark_uncompressed_closed/1` and the
+  `{error, uncompressed_closed}` result.
+- `masque_ip_capsule` decode errors `non_canonical_prefix`,
+  `route_range_reversed`, `{unknown_capsule_type, N}`; codec error atoms
+  `bad_ip_version` and `unknown_capsule_type`.
+
+### Fixed
+
+- Sessions and upstream sockets end on connection close (h3, h2),
+  GOAWAY, peer stream reset and a clean FIN.
+- Client streams at or above a GOAWAY id close with `goaway`; lower ids
+  keep running.
+- Bytes buffered before a stream is claimed are no longer dropped.
+- Handler output produced before the h3 2xx (target bytes, datagrams,
+  capsules, IP packets) is held until the stream is finalized.
+- udp-bind over h2 works end to end; udp-bind sessions survive messages
+  before finalize, reset the stream on handler crashes, and clients
+  close their connection on stop.
+- udp-bind `send_to/3` uses the client's own uncompressed context.
+- `[h3, h2]` racing works for `bind_connect/3`.
+- h2 tunnel slots are released when a session fails to start.
+- Server sessions stop only on their own router `'DOWN'`; other
+  `'DOWN'` messages reach the handler.
+- CONNECT-IP address allocation skips addresses already in the registry,
+  so sessions sharing a pool get distinct addresses.
+- CONNECT-IP never answers an ICMP error with an ICMP error.
+- Chains relay upstream 508 as 508 and pass CONNECT-TCP half-close
+  through; h1 Proxy-Status maps `loop_detected` and `upstream_timeout`.
+  An h1-to-h1 self-loop still surfaces as 502 because the h1 client
+  exits on the server's close.
+- The racer leaves no stray messages, workers or sessions after a race,
+  delivers events that arrive right after the 2xx to the owner, and
+  reports the real failure reason.
+- The upstream pool survives dial crashes and owner deaths during a dial.
 
 ## [0.7.0] - 2026-06-13
 
@@ -133,7 +264,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
   invoking-packet truncation (548 B ICMPv4, 1232 B ICMPv6) and
   IPv6 pseudo-header checksum. Session `{icmp_error, ...}` action
   emits the resulting IP packet as a context-0 datagram.
-- RFC 9484 §8 MTU check on the H3 client handshake — aborts with
+- RFC 9484 §8 MTU check on the H3 client handshake - aborts with
   `{mtu_too_low, Got, 1280}` if the negotiated QUIC datagram size
   can't carry a 1280-byte IPv6 packet.
 - Client `connect/3` validates target shape vs. protocol and

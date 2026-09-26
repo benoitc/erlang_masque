@@ -24,6 +24,9 @@
 -include("masque.hrl").
 -include("masque_ip.hrl").
 
+%% Most ADDRESS_REQUEST entries left unanswered at once.
+-define(MAX_PEER_PENDING, 64).
+
 -record(state, {
     conn :: pid(),
     stream_id :: non_neg_integer(),
@@ -35,14 +38,16 @@
     cap_buf = <<>> :: binary(),
     max_cap :: pos_integer(),
     pending_actions :: [term()] | undefined,
-    %% Handler actions produced before the 200 is sent and the stream
-    %% is claimed (e.g. an upstream ROUTE_ADVERTISEMENT forwarded by a
-    %% chain handler whose init/2 raced ahead of finalize). Held in
-    %% order and flushed once the stream is open.
-    pending_out = [] :: [term()],
+    %% H3 path: handler messages (e.g. an upstream ROUTE_ADVERTISEMENT
+    %% forwarded by a chain handler, TUN packets) and injected packets
+    %% that arrived before finalize, newest first. Replayed once the
+    %% 2xx is sent.
+    early = [] :: [term()],
     %% Request IDs received from the client (from ADDRESS_REQUEST) but
     %% not yet answered by this server session.
     peer_pending = #{} :: #{pos_integer() => true},
+    %% Monitor on the router (H3 path).
+    router_ref :: reference() | undefined,
     start_time :: integer() | undefined
 }).
 
@@ -70,9 +75,9 @@ init(
 ) ->
     process_flag(trap_exit, true),
     Router = maps:get(router, Args, undefined),
-    _ =
+    RouterRef =
         case Router of
-            undefined -> ok;
+            undefined -> undefined;
             _ -> erlang:monitor(process, Router)
         end,
     MaxCap = maps:get(
@@ -86,6 +91,7 @@ init(
                 conn = Conn,
                 stream_id = StreamId,
                 router = Router,
+                router_ref = RouterRef,
                 transport = Transport,
                 handler = Handler,
                 h_state = HState,
@@ -157,8 +163,10 @@ send_response(#state{transport = h3, conn = C, stream_id = S}, Status, Hdrs) ->
 send_response(#state{transport = h2, conn = C, stream_id = S}, Status, Hdrs) ->
     h2:send_response(C, S, Status, Hdrs).
 
+%% `drain_buffer => false': bytes that arrived before the claim are
+%% replayed as `{data, _, _, Fin}' messages through the normal path.
 claim_stream(#state{transport = h3, conn = C, stream_id = S}) ->
-    quic_h3:set_stream_handler(C, S, self());
+    quic_h3:set_stream_handler(C, S, self(), #{drain_buffer => false});
 claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
     h2:set_stream_handler(C, S, self()).
 
@@ -166,40 +174,74 @@ claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
 %% Calls / casts
 %%====================================================================
 
-handle_call(
-    finalize,
-    _From,
-    #state{pending_actions = Actions, pending_out = Out} = S
-) when
-    Actions =/= undefined
-->
+%% H3 path: send the 2xx, claim the stream, run the handler's init
+%% actions, then replay the messages that arrived meanwhile.
+finalize(#state{pending_actions = Actions} = S) ->
     case send_response(S, 200, response_headers()) of
         ok ->
             case claim_stream(S) of
-                Ok when Ok =:= ok; is_tuple(Ok) ->
-                    %% Stream is now open: run the handler's init actions,
-                    %% then flush any actions buffered before finalize.
-                    {reply, ok,
-                        run_init_actions(
-                            Actions ++ Out,
-                            S#state{
-                                pending_actions = undefined,
-                                pending_out = [],
-                                start_time =
-                                    erlang:monotonic_time(millisecond)
-                            }
-                        )};
                 {error, _} ->
-                    {reply, {error, stream_dead}, S}
+                    {error, S};
+                _ ->
+                    S1 = run_init_actions(
+                        Actions,
+                        S#state{
+                            pending_actions = undefined,
+                            start_time = erlang:monotonic_time(millisecond)
+                        }
+                    ),
+                    replay_early(lists:reverse(S1#state.early), S1#state{early = []})
             end;
         {error, _} ->
-            {reply, {error, stream_dead}, S}
+            {error, S}
+    end.
+
+replay_early([], S) ->
+    {ok, S};
+replay_early([{'$gen_cast', Msg} | Rest], S) ->
+    replay_next(handle_cast(Msg, S), Rest);
+replay_early([Msg | Rest], S) ->
+    replay_next(handle_info(Msg, S), Rest).
+
+replay_next({noreply, S}, Rest) -> replay_early(Rest, S);
+replay_next({stop, Reason, S}, _Rest) -> {stop, Reason, S}.
+
+handle_call(finalize, _From, #state{pending_actions = Actions} = S) when
+    Actions =/= undefined
+->
+    case finalize(S) of
+        {ok, S2} -> {reply, ok, S2};
+        {stop, Reason, S2} -> {stop, Reason, ok, S2};
+        {error, S2} -> {reply, {error, stream_dead}, S2}
     end;
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
+%% Asynchronous finalize from the router: run the same steps as the
+%% `finalize' call and report back; the session stops if the stream
+%% could not be opened.
+handle_cast({finalize, Router}, #state{pending_actions = Actions} = S) when
+    Actions =/= undefined
+->
+    Result = finalize(S),
+    Reply =
+        case Result of
+            {error, _} -> {error, stream_dead};
+            _ -> ok
+        end,
+    Router ! {masque_finalized, S#state.stream_id, self(), Reply},
+    case Result of
+        {ok, S2} -> {noreply, S2};
+        {stop, Reason, S2} -> {stop, Reason, S2};
+        {error, S2} -> {stop, stream_dead, S2}
+    end;
 handle_cast(connection_closed, S) ->
     {stop, connection_closed, S};
+handle_cast({inject_packet, Pkt} = Msg, #state{pending_actions = Actions, early = Early} = S) when
+    is_binary(Pkt), Actions =/= undefined
+->
+    %% Not finalized yet: hold the packet until the 2xx is sent.
+    {noreply, S#state{early = [{'$gen_cast', Msg} | Early]}};
 handle_cast({inject_packet, Pkt}, S) when is_binary(Pkt) ->
     %% Out-of-band packet injection from a process other than the
     %% session itself (e.g. a TUN device owner). Re-uses the same
@@ -245,7 +287,7 @@ handle_info(
     Tag =:= quic_h3; Tag =:= h2
 ->
     {stop, peer_reset, S};
-handle_info({h2, _Conn, closed}, S) ->
+handle_info({h2, _Conn, {closed, _Reason}}, S) ->
     {stop, peer_closed, S};
 handle_info(flush_cap_buf, #state{cap_buf = Buf} = S) when Buf =/= <<>> ->
     drain_capsules(Buf, false, S#state{cap_buf = <<>>});
@@ -253,8 +295,14 @@ handle_info(flush_cap_buf, S) ->
     {noreply, S};
 handle_info({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
-handle_info({'DOWN', _MRef, process, _Pid, _Reason}, S) ->
+handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
     {stop, router_gone, S};
+handle_info(Msg, #state{pending_actions = Actions, early = Early} = S) when
+    Actions =/= undefined
+->
+    %% Not finalized yet: nothing may be written to the stream before
+    %% the 2xx, so keep the message for `finalize'.
+    {noreply, S#state{early = [Msg | Early]}};
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
@@ -363,6 +411,9 @@ drain_capsules(Buf, Fin, S) ->
             end;
         {more, _} when Fin, Buf =/= <<>> ->
             reset_and_stop(truncated_capsule, S);
+        {more, _} when Fin ->
+            %% Clean FIN: terminate/2 sends our FIN back.
+            {stop, normal, S#state{cap_buf = <<>>}};
         {more, _} ->
             {noreply, S#state{cap_buf = Buf}};
         {error, _} ->
@@ -395,7 +446,12 @@ dispatch_capsule(
     #state{peer_pending = Pend} = S
 ) ->
     case masque_ip_capsule:decode_address_request(Body) of
-        {ok, Entries} ->
+        {ok, Entries0} ->
+            %% Bound the unanswered requests a client can pile up:
+            %% entries past the limit are rejected right away.
+            Room = max(0, ?MAX_PEER_PENDING - map_size(Pend)),
+            {Entries, Extra} = lists:split(min(Room, length(Entries0)), Entries0),
+            _ = reject_now(Extra, S),
             Pend1 = lists:foldl(
                 fun(#ip_prefix_request{request_id = Id}, Acc) ->
                     Acc#{Id => true}
@@ -403,11 +459,16 @@ dispatch_capsule(
                 Pend,
                 Entries
             ),
-            dispatch(
-                handle_address_request,
-                [Entries],
-                S#state{peer_pending = Pend1}
-            );
+            case Entries of
+                [] ->
+                    {noreply, S};
+                _ ->
+                    dispatch(
+                        handle_address_request,
+                        [Entries],
+                        S#state{peer_pending = Pend1}
+                    )
+            end;
         {error, _} ->
             reset_and_stop(malformed_capsule, S)
     end;
@@ -501,20 +562,6 @@ exported(Mod, Fun, Arity) ->
     _ = code:ensure_loaded(Mod),
     erlang:function_exported(Mod, Fun, Arity).
 
-%% Before finalize (pending_actions =/= undefined) the 200 has not been
-%% sent and the stream is not claimed, so any outbound capsule would be
-%% dropped. Hold these actions and let finalize flush them in order once
-%% the stream is open.
-apply_actions_noreply(
-    Actions,
-    #state{
-        pending_actions = Pending,
-        pending_out = Out
-    } = State
-) when
-    Pending =/= undefined
-->
-    {noreply, State#state{pending_out = Out ++ Actions}};
 apply_actions_noreply(Actions, State) ->
     case do_actions(Actions, State) of
         {ok, S2} -> {noreply, S2};
@@ -589,6 +636,19 @@ send_assign(Entries, #state{peer_pending = Pend} = S) ->
         {error, _} = Err ->
             Err
     end.
+
+%% Answer requests with the RFC 9484 sec 4.7.1 "no address" entry
+%% without involving the handler.
+reject_now([], _S) ->
+    ok;
+reject_now(Requests, S) ->
+    Body = masque_ip_capsule:encode_address_assign(
+        masque_ip:reject_requests(Requests)
+    ),
+    Cap = iolist_to_binary(
+        masque_capsule:encode(?MASQUE_CAPSULE_ADDRESS_ASSIGN, Body)
+    ),
+    transport_send_data(S, Cap, false).
 
 consume_pending([], Pend) ->
     {ok, Pend};

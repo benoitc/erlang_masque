@@ -8,8 +8,20 @@
 %%%   <li>Client-to-target: `handle_data/2' writes bytes to the TCP socket.</li>
 %%%   <li>Target-to-client: `{tcp, Socket, Bytes}' messages arrive on the
 %%%       session and are emitted as `{send_data, Bytes}' actions.</li>
-%%%   <li>Target FIN: `{tcp_closed, Socket}' closes the tunnel.</li>
+%%%   <li>Client FIN: `handle_eof/1' shuts down the write side of the
+%%%       socket; target bytes keep flowing to the client.</li>
+%%%   <li>Target FIN: `{tcp_closed, Socket}' ends the stream toward the
+%%%       client with FIN; client bytes keep flowing to the target.</li>
 %%% </ul>
+%%%
+%%% The tunnel ends once both directions have seen FIN. A half-closed
+%%% tunnel with no traffic for 30 seconds ends with `eof_timeout'.
+%%%
+%%% The socket runs in `{active, N}' mode (`active_n', default 16).
+%%% After N messages it pauses; the `tcp_passive' notice is handled
+%%% only once the session has written every earlier chunk to the
+%%% tunnel, so a slow client stalls reads from the target instead of
+%%% growing the session mailbox.
 %%%
 %%% Accepts the same policy hooks as the UDP proxy (`allow', `resolver',
 %%% `family'), plus `connect_timeout' (default 5000 ms).
@@ -25,9 +37,18 @@
     terminate/2
 ]).
 
+-define(DEFAULT_ACTIVE_N, 16).
+%% Idle time allowed on a half-closed tunnel.
+-define(EOF_IDLE_MS, 30000).
+
 -record(state, {
     socket :: gen_tcp:socket(),
-    eof_timer :: reference() | undefined
+    active_n = ?DEFAULT_ACTIVE_N :: pos_integer(),
+    eof_timer :: reference() | undefined,
+    %% The client sent FIN (we shut down our write side).
+    write_closed = false :: boolean(),
+    %% The target sent FIN.
+    read_closed = false :: boolean()
 }).
 
 %%====================================================================
@@ -49,6 +70,7 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
     Family = pick_family(maps:get(family, Opts, auto), Host),
     ConnTimeout = maps:get(connect_timeout, Opts, 5000),
     AllowPrivate = maps:get(allow_private, Opts, false),
+    ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
     case resolve(ResolverFun, Host) of
         {ok, IP} ->
             case AllowPrivate orelse masque_ip:is_public(IP) of
@@ -57,13 +79,20 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
                 true ->
                     TcpOpts = [
                         binary,
-                        {active, true},
+                        {active, ActiveN},
+                        %% Report a target RST as `{tcp_error, _,
+                        %% econnreset}' so the tunnel is reset rather
+                        %% than closed cleanly.
+                        {show_econnreset, true},
+                        %% Keep the socket writable after the target's
+                        %% FIN so the tunnel can half-close.
+                        {exit_on_close, false},
                         Family
                         | maps:get(socket_opts, Opts, [])
                     ],
                     case gen_tcp:connect(IP, Port, TcpOpts, ConnTimeout) of
                         {ok, Socket} ->
-                            {ok, #state{socket = Socket}};
+                            {ok, #state{socket = Socket, active_n = ActiveN}};
                         {error, Reason} ->
                             {stop, {resolution_failed, {tcp_connect, Reason}}}
                     end
@@ -76,7 +105,7 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
 handle_data(Data, #state{socket = S} = State) ->
     case gen_tcp:send(S, Data) of
         ok ->
-            {ok, State};
+            {ok, rearm_eof_timer(State)};
         {error, closed} ->
             {stop, target_closed, State};
         {error, Reason} ->
@@ -84,30 +113,29 @@ handle_data(Data, #state{socket = S} = State) ->
     end.
 
 -spec handle_eof(#state{}) -> {ok, #state{}} | {stop, term(), #state{}}.
+handle_eof(#state{socket = S, read_closed = true} = State) ->
+    _ = gen_tcp:shutdown(S, write),
+    {stop, normal, cancel_eof_timer(State#state{write_closed = true})};
 handle_eof(#state{socket = S} = State) ->
     _ = gen_tcp:shutdown(S, write),
-    TRef = erlang:send_after(30000, self(), eof_timeout),
-    {ok, State#state{eof_timer = TRef}}.
+    {ok, arm_eof_timer(State#state{write_closed = true})}.
 
 -spec handle_info(term(), #state{}) ->
     {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
 handle_info({tcp, Socket, Bytes}, #state{socket = Socket} = State) ->
-    {ok, State, [{send_data, Bytes}]};
-handle_info(
-    {tcp_closed, Socket},
-    #state{
-        socket = Socket,
-        eof_timer = TRef
-    } = State
-) ->
-    _ =
-        case TRef of
-            undefined -> ok;
-            _ -> erlang:cancel_timer(TRef)
-        end,
-    {stop, target_closed, State};
-handle_info(eof_timeout, State) ->
-    {stop, eof_timeout, State};
+    {ok, rearm_eof_timer(State), [{send_data, Bytes}]};
+handle_info({tcp_passive, Socket}, #state{socket = Socket, active_n = N} = State) ->
+    %% The session stops on a failed tunnel write, so reaching this
+    %% clause means every earlier chunk was handed to the tunnel.
+    _ = inet:setopts(Socket, [{active, N}]),
+    {ok, State};
+handle_info({tcp_closed, Socket}, #state{socket = Socket, write_closed = true} = State) ->
+    {stop, target_closed, cancel_eof_timer(State)};
+handle_info({tcp_closed, Socket}, #state{socket = Socket} = State) ->
+    %% Half-close: FIN toward the client, keep forwarding its bytes.
+    {ok, arm_eof_timer(State#state{read_closed = true}), [{send_data, <<>>, true}]};
+handle_info({timeout, TRef, eof_timeout}, #state{eof_timer = TRef} = State) ->
+    {stop, eof_timeout, State#state{eof_timer = undefined}};
 handle_info({tcp_error, Socket, Reason}, #state{socket = Socket} = State) ->
     {stop, {target_error, Reason}, State};
 handle_info(_Other, State) ->
@@ -121,6 +149,20 @@ terminate(_Reason, #state{socket = S}) ->
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+arm_eof_timer(State) ->
+    State1 = cancel_eof_timer(State),
+    State1#state{eof_timer = erlang:start_timer(?EOF_IDLE_MS, self(), eof_timeout)}.
+
+%% Traffic on a half-closed tunnel restarts its idle timer.
+rearm_eof_timer(#state{eof_timer = undefined} = State) -> State;
+rearm_eof_timer(State) -> arm_eof_timer(State).
+
+cancel_eof_timer(#state{eof_timer = undefined} = State) ->
+    State;
+cancel_eof_timer(#state{eof_timer = TRef} = State) ->
+    _ = erlang:cancel_timer(TRef),
+    State#state{eof_timer = undefined}.
 
 default_resolver(Host) when is_binary(Host) ->
     default_resolver(binary_to_list(Host));

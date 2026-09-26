@@ -141,7 +141,7 @@ handle_info(
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
-handle_info({h2, _Conn, closed}, S) ->
+handle_info({h2, _Conn, {closed, _Reason}}, S) ->
     {stop, peer_closed, S};
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
@@ -206,6 +206,9 @@ drain_capsules(Buf, Fin, S) ->
             end;
         {more, _} when Fin, Buf =/= <<>> ->
             reset_and_stop(truncated_capsule, S);
+        {more, _} when Fin ->
+            %% Clean END_STREAM: terminate/2 sends our END_STREAM back.
+            {stop, normal, S#state{cap_buf = <<>>}};
         {more, _} ->
             {noreply, S#state{cap_buf = Buf}}
     end.

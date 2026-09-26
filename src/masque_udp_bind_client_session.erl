@@ -39,7 +39,7 @@
 -export([send_capsule/3]).
 
 -export([init/1, callback_mode/0, terminate/3, code_change/4]).
--export([connecting/3, open/3, closing/3]).
+-export([connecting/3, failed/3, open/3, closing/3, closed/3]).
 
 -include("masque.hrl").
 -include("masque_udp_bind.hrl").
@@ -58,10 +58,15 @@
     conn :: pid() | undefined,
     stream_id :: non_neg_integer() | undefined,
     handshake_from :: gen_statem:from() | undefined,
+    %% Dial error parked in the `failed' state.
+    failure :: term(),
     timeout_ref :: reference() | undefined,
     mode :: message | queue,
     rx_buf :: queue:queue({inet:ip_address(), inet:port_number(), binary()}),
     rx_waiters :: queue:queue({gen_statem:from(), reference()}),
+    %% Bound on `rx_buf' (`rx_queue_limit') and datagrams dropped past it.
+    rx_limit = ?MASQUE_DEFAULT_RX_QUEUE_LIMIT :: pos_integer(),
+    rx_dropped = 0 :: non_neg_integer(),
     cap_buf = <<>> :: binary(),
     max_cap :: pos_integer(),
     extra_headers = [] :: [{binary(), binary()}],
@@ -129,6 +134,7 @@ init({Target, Opts, Owner}) ->
     process_flag(trap_exit, true),
     {ProxyHost, ProxyPort} = maps:get(proxy, Opts),
     MRef = erlang:monitor(process, Owner),
+    ok = masque_client_owner:init(Opts),
     Mode = maps:get(mode, Opts, message),
     Transport = maps:get(transport, Opts, h3),
     MaxCap = maps:get(
@@ -145,6 +151,7 @@ init({Target, Opts, Owner}) ->
     Data = #data{
         owner = Owner,
         owner_ref = MRef,
+        rx_limit = masque_client_rx:limit(Opts),
         proxy_host = to_bin(ProxyHost),
         proxy_port = ProxyPort,
         template = Template,
@@ -179,7 +186,7 @@ build_template(Opts, ProxyHost, ProxyPort) ->
 %%====================================================================
 
 connecting(internal, {do_handshake, Opts}, Data) ->
-    case do_connect(Data, Opts) of
+    case masque_client_failed:guard(fun() -> do_connect(Data, Opts) end) of
         {ok, Conn, StreamId} ->
             Timeout = maps:get(timeout, Opts, 5000),
             TRef = erlang:start_timer(Timeout, self(), handshake_timeout),
@@ -189,10 +196,13 @@ connecting(internal, {do_handshake, Opts}, Data) ->
                 timeout_ref = TRef
             }};
         {error, Reason} ->
-            {stop, {handshake_failed, Reason}}
+            %% The caller's `handshake_await' is not processed yet.
+            {next_state, failed, Data#data{failure = Reason}, masque_client_failed:enter(Opts)}
     end;
 connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
+connecting({call, From}, {set_owner, NewOwner}, Data) ->
+    {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 connecting({call, From}, _Other, Data) ->
     %% No outbound API works before the handshake completes.
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
@@ -234,6 +244,25 @@ connecting(
             reply_handshake(Data, {error, {bad_status, Status}}),
             {stop, {handshake_failed, {bad_status, Status}}}
     end;
+connecting(info, {Tag, _Conn, {closed, _Reason}}, Data) when
+    Tag =:= quic_h3; Tag =:= h2
+->
+    reply_handshake(Data, {error, peer_closed}),
+    {stop, peer_closed, Data};
+connecting(
+    info,
+    {quic_h3, _Conn, {goaway, Id}},
+    #data{stream_id = StreamId} = Data
+) when is_integer(StreamId), StreamId >= Id ->
+    reply_handshake(Data, {error, goaway}),
+    {stop, goaway, Data};
+connecting(
+    info,
+    {h2, _Conn, {goaway, LastId, _Code}},
+    #data{stream_id = StreamId} = Data
+) when is_integer(StreamId), StreamId > LastId ->
+    reply_handshake(Data, {error, goaway}),
+    {stop, goaway, Data};
 connecting(
     info,
     {timeout, TRef, handshake_timeout},
@@ -254,8 +283,17 @@ connecting(info, _Msg, Data) ->
 %% State: open
 %%====================================================================
 
+%%====================================================================
+%% State: failed (dial error parked for `handshake_await')
+%%====================================================================
+
+failed(Type, Event, #data{failure = Reason, owner_ref = Ref}) ->
+    masque_client_failed:handle(Type, Event, Reason, Ref).
+
 open({call, From}, handshake_await, Data) ->
     {keep_state, Data, [{reply, From, ok}]};
+open({call, From}, {set_owner, NewOwner}, Data) ->
+    {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 open({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, open)}]};
 open({call, From}, {send_to, Peer, Bytes}, Data) ->
@@ -296,7 +334,7 @@ open(
     {keep_state, handle_inbound_datagram(Payload, Data)};
 open(
     info,
-    {Tag, _Conn, {data, StreamId, Bytes, _Fin}},
+    {Tag, _Conn, {data, StreamId, Bytes, Fin}},
     #data{
         stream_id = StreamId,
         cap_buf = Buf,
@@ -308,18 +346,32 @@ open(
     New = <<Buf/binary, Bytes/binary>>,
     case byte_size(New) > Max of
         true -> {stop, capsule_buffer_overflow};
-        false -> drain_capsules(New, Data)
+        false -> drain_capsules(New, Fin, Data)
     end;
 open(
     info,
-    {Tag, _Conn, {reset, StreamId, _Code}},
-    #data{stream_id = StreamId}
+    {Tag, _Conn, {stream_reset, StreamId, _Code}},
+    #data{stream_id = StreamId} = Data
 ) when
     Tag =:= quic_h3; Tag =:= h2
 ->
-    {stop, peer_reset};
-open(info, {Tag, _Conn, closed}, _Data) when Tag =:= h2; Tag =:= quic_h3 ->
-    {stop, peer_closed};
+    end_tunnel({stop, peer_reset}, Data);
+open(info, {Tag, _Conn, {closed, _Reason}}, Data) when
+    Tag =:= h2; Tag =:= quic_h3
+->
+    end_tunnel({stop, peer_closed}, Data);
+%% GOAWAY: requests the peer did not process (h3: id at or above the
+%% GOAWAY id, h2: id above the last-stream-id) end; others keep running.
+open(info, {quic_h3, _Conn, {goaway, Id}}, #data{stream_id = StreamId} = Data) when
+    StreamId >= Id
+->
+    end_tunnel({stop, goaway}, Data);
+open(
+    info,
+    {h2, _Conn, {goaway, LastId, _Code}},
+    #data{stream_id = StreamId} = Data
+) when StreamId > LastId ->
+    end_tunnel({stop, goaway}, Data);
 open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
 open(
@@ -374,10 +426,43 @@ closing(_, _, Data) ->
 %% terminate / code_change
 %%====================================================================
 
-terminate(Reason, _State, #data{owner = Owner, mode = message}) ->
-    Owner ! {masque_closed, self(), Reason},
+%%====================================================================
+%% State: closed (peer ended the tunnel, queue-mode data unread)
+%%====================================================================
+
+closed({call, From}, info, Data) ->
+    {keep_state_and_data, [{reply, From, session_info(Data, closed)}]};
+closed(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
+    masque_client_rx:closed(Type, Event, Buf, Ref, {bind, fun(B) -> Data#data{rx_buf = B} end}).
+
+%% A parked dial error was already returned to `handshake_await'.
+terminate(_Reason, failed, _Data) ->
     ok;
-terminate(_Reason, _State, _Data) ->
+terminate(Reason, _State, #data{owner = Owner, mode = message} = Data) ->
+    masque_client_owner:send(Owner, {masque_closed, self(), Reason}),
+    close_conn(Data);
+terminate(_Reason, _State, Data) ->
+    close_conn(Data).
+
+%% The session dialed its own connection (udp-bind is never pooled):
+%% close it with the session.
+close_conn(#data{conn = undefined}) ->
+    ok;
+close_conn(#data{transport = h3, conn = Conn}) ->
+    _ =
+        (try
+            quic_h3:close(Conn)
+        catch
+            _:_ -> ok
+        end),
+    ok;
+close_conn(#data{transport = h2, conn = Conn}) ->
+    _ =
+        (try
+            h2:close(Conn)
+        catch
+            _:_ -> ok
+        end),
     ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
@@ -411,7 +496,15 @@ handle_send_to({IP, Port}, Bytes, Data) ->
             try_uncompressed_fallback(Tuple, Bytes, Data)
     end.
 
+%% No context for this peer: use our own uncompressed context when it
+%% is installed, else one the proxy opened.
 try_uncompressed_fallback(Tuple, Bytes, Data) ->
+    case find_own_uncompressed(Data#data.own_table) of
+        {ok, _} -> send_uncompressed(Tuple, Bytes, Data);
+        not_found -> try_peer_uncompressed(Tuple, Bytes, Data)
+    end.
+
+try_peer_uncompressed(Tuple, Bytes, Data) ->
     case find_peer_uncompressed(Data#data.peer_table) of
         {ok, Id} ->
             case
@@ -603,7 +696,7 @@ handle_context_zero(_Inner, Data) ->
     Data.
 
 handle_known_context(Ctx, Inner, Data) ->
-    case masque_compression_table:lookup_by_id(Data#data.peer_table, Ctx) of
+    case lookup_context(Ctx, Data) of
         {ok, #compression_entry{ip_version = 0}} ->
             case masque_udp_bind_payload:decode_uncompressed(Inner) of
                 {ok, {_V, IP, Port}, UdpPayload} ->
@@ -619,6 +712,33 @@ handle_known_context(Ctx, Inner, Data) ->
             Data
     end.
 
+%% A context carries datagrams both ways: the proxy replies on the
+%% contexts we opened (own table) as well as on its own (peer table).
+lookup_context(Ctx, #data{peer_table = PT, own_table = OT}) ->
+    case masque_compression_table:lookup_by_id(PT, Ctx) of
+        not_found ->
+            case masque_compression_table:lookup_by_id(OT, Ctx) of
+                {ok, #compression_entry{state = installed}} = Found -> Found;
+                _ -> not_found
+            end;
+        Found ->
+            Found
+    end.
+
+%% The peer ended the tunnel. Queue-mode data the owner has not read
+%% yet stays available to `recv/2' (see `masque_client_rx');
+%% otherwise return `Result'.
+end_tunnel(Result, #data{mode = Mode, rx_buf = Buf} = Data) ->
+    case masque_client_rx:keep_unread(Mode, Buf) of
+        true ->
+            ok = close_conn(Data),
+            {next_state, closed,
+                Data#data{conn = undefined, rx_buf = masque_client_rx:close_queue(Buf, closed)},
+                masque_client_rx:closed_enter()};
+        false ->
+            Result
+    end.
+
 deliver_bind_packet(
     PeerOrTagged,
     Bytes,
@@ -629,7 +749,7 @@ deliver_bind_packet(
             {T, scoped} -> T;
             T -> T
         end,
-    Owner ! {masque_bind_packet, self(), Peer, Bytes},
+    masque_client_owner:send(Owner, {masque_bind_packet, self(), Peer, Bytes}),
     Data;
 deliver_bind_packet(
     PeerOrTagged,
@@ -647,18 +767,31 @@ deliver_bind_packet(
             gen_statem:reply(From, {ok, Peer, Bytes}),
             Data#data{rx_waiters = Ws2};
         {empty, _} ->
-            Data#data{rx_buf = queue:in({Peer, Bytes}, Q)}
+            case masque_client_rx:is_full(Q, Data#data.rx_limit) of
+                false -> Data#data{rx_buf = queue:in({Peer, Bytes}, Q)};
+                true -> Data#data{rx_dropped = Data#data.rx_dropped + 1}
+            end
     end.
 
-drain_capsules(Buf, Data) ->
+drain_capsules(Buf, Fin, Data) ->
     case masque_capsule:decode(Buf) of
         {ok, {Type, Value, Rest}} ->
             case dispatch_capsule(Type, Value, Data) of
                 {ok, Data2} ->
-                    drain_capsules(Rest, Data2#data{cap_buf = <<>>});
+                    drain_capsules(Rest, Fin, Data2#data{cap_buf = <<>>});
                 {stop, R} ->
                     {stop, R, Data}
             end;
+        {more, _} when Fin, Buf =/= <<>> ->
+            {stop, truncated_capsule, Data};
+        {more, _} when Fin ->
+            %% Clean FIN: the proxy ended the tunnel. Send ours back.
+            end_tunnel(
+                {next_state, closing, Data#data{cap_buf = <<>>}, [
+                    {next_event, internal, do_close}
+                ]},
+                Data
+            );
         {more, _} ->
             {keep_state, Data#data{cap_buf = Buf}};
         {error, _} ->
@@ -671,10 +804,12 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_ASSIGN, Body, Data) ->
             case masque_compression_table:install(Data#data.peer_table, A) of
                 {ok, T2} ->
                     Owner = Data#data.owner,
-                    Owner !
+                    masque_client_owner:send(
+                        Owner,
                         {masque_compression_assigned, self(), A#compression_assign.context_id, {
                             A#compression_assign.address, A#compression_assign.port
-                        }},
+                        }}
+                    ),
                     %% Send ACK for the new mapping.
                     Bytes = iolist_to_binary(
                         masque_compression_capsule:encode(
@@ -702,7 +837,9 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_ACK, Body, Data) ->
             of
                 {ok, T2} ->
                     Owner = Data#data.owner,
-                    Owner ! {masque_compression_acked, self(), Ack#compression_ack.context_id},
+                    masque_client_owner:send(
+                        Owner, {masque_compression_acked, self(), Ack#compression_ack.context_id}
+                    ),
                     {ok, Data#data{own_table = T2}};
                 {error, _} ->
                     {stop, malformed_capsule}
@@ -721,8 +858,9 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_CLOSE, Body, Data) ->
                 )
             of
                 {ok, T2} ->
-                    Data#data.owner !
-                        {masque_compression_closed, self(), Id},
+                    masque_client_owner:send(
+                        Data#data.owner, {masque_compression_closed, self(), Id}
+                    ),
                     {ok, Data#data{peer_table = T2}};
                 {error, unknown_context} ->
                     case
@@ -731,8 +869,9 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_CLOSE, Body, Data) ->
                         )
                     of
                         {ok, T2} ->
-                            Data#data.owner !
-                                {masque_compression_closed, self(), Id},
+                            masque_client_owner:send(
+                                Data#data.owner, {masque_compression_closed, self(), Id}
+                            ),
                             {ok, Data#data{own_table = T2}};
                         {error, _} ->
                             {stop, malformed_capsule}
@@ -741,6 +880,9 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_CLOSE, Body, Data) ->
         {error, _} ->
             {stop, malformed_capsule}
     end;
+dispatch_capsule(0, Value, #data{transport = h2} = Data) ->
+    %% h2 carries HTTP datagrams as RFC 9297 DATAGRAM capsules (type 0).
+    {ok, handle_inbound_datagram(Value, Data)};
 dispatch_capsule(_Type, _Value, Data) ->
     %% Unknown / unrelated capsules: silently drop per RFC 9297.
     {ok, Data}.
@@ -782,15 +924,10 @@ drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->
 %%====================================================================
 
 do_connect(#data{transport = h3} = Data, Opts) ->
-    SSLOpts = [
-        {server_name_indication, binary_to_list(Data#data.proxy_host)}
-        | maps:get(ssl_opts, Opts, [])
-    ],
-    ConnOpts = #{
-        transport => ssl,
-        ssl_opts => SSLOpts,
+    ConnOpts0 = maps:with([verify, cacerts], Opts),
+    ConnOpts = ConnOpts0#{
         sync => true,
-        verify => maps:get(verify, Opts, verify_none),
+        connect_timeout => maps:get(timeout, Opts, 5000),
         timeout => maps:get(timeout, Opts, 5000),
         settings => #{enable_connect_protocol => 1, h3_datagram => 1},
         h3_datagram_enabled => true,
@@ -830,15 +967,11 @@ do_connect(#data{transport = h3} = Data, Opts) ->
             {error, {connect, R}}
     end;
 do_connect(#data{transport = h2} = Data, Opts) ->
-    SSLOpts = [
-        {server_name_indication, binary_to_list(Data#data.proxy_host)}
-        | maps:get(ssl_opts, Opts, [])
-    ],
+    SSLOpts = masque_tls:client_opts(Data#data.proxy_host, Opts, [<<"h2">>]),
     ConnOpts = #{
         transport => ssl,
         ssl_opts => SSLOpts,
         sync => true,
-        verify => maps:get(verify, Opts, verify_none),
         timeout => maps:get(timeout, Opts, 5000),
         settings => #{enable_connect_protocol => 1}
     },
@@ -930,15 +1063,24 @@ family_of({_, _, _, _, _, _, _, _}) -> 6.
 reply_handshake(#data{handshake_from = undefined}, _Reply) -> ok;
 reply_handshake(#data{handshake_from = From}, Reply) -> gen_statem:reply(From, Reply).
 
+%% Used by the transport racer to flip ownership from the race worker
+%% to the real caller after a winning handshake.
+swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
+    _ = erlang:demonitor(OldRef, [flush]),
+    NewRef = erlang:monitor(process, NewOwner),
+    ok = masque_client_owner:release(NewOwner),
+    Data#data{owner = NewOwner, owner_ref = NewRef}.
+
 cancel_timer(undefined) ->
     ok;
 cancel_timer(Ref) ->
     _ = erlang:cancel_timer(Ref),
     ok.
 
-session_info(#data{transport = T, bind_scope = Scope}, State) ->
+session_info(#data{transport = T, bind_scope = Scope, rx_dropped = Dropped}, State) ->
     #{
         state => State,
+        rx_dropped => Dropped,
         protocol => udp_bind,
         transport => T,
         bind => Scope

@@ -19,7 +19,8 @@
 -export([
     handshake_unscoped_completes/1,
     handshake_response_carries_required_headers/1,
-    bind_disabled_rejects/1
+    bind_disabled_rejects/1,
+    handshake_via_transport_race/1
 ]).
 
 suite() -> [{timetrap, {seconds, 30}}].
@@ -28,7 +29,8 @@ all() ->
     [
         handshake_unscoped_completes,
         handshake_response_carries_required_headers,
-        bind_disabled_rejects
+        bind_disabled_rejects,
+        handshake_via_transport_race
     ].
 
 init_per_suite(Config) ->
@@ -130,6 +132,26 @@ bind_disabled_rejects(Config) ->
         }
     ),
     ?assertMatch({error, _}, Result).
+
+%% The default `[h3, h2]' race: the racer hands the winning udp-bind
+%% session to the caller with `{set_owner, _}'.
+handshake_via_transport_race(Config) ->
+    Server = ?config(server, Config),
+    Url = server_url(Server),
+    {ok, Sess} = masque:bind_connect(
+        Url,
+        unscoped,
+        #{
+            transports => [h3, h2],
+            prefer_timeout_ms => 0,
+            verify => verify_none,
+            timeout => 5000
+        }
+    ),
+    {monitored_by, Monitors} = erlang:process_info(self(), monitored_by),
+    ?assert(lists:member(Sess, Monitors)),
+    {ok, [_ | _]} = masque:proxy_public_address(Sess),
+    ok = masque:close(Sess).
 
 server_url(#{port := Port}) ->
     iolist_to_binary(io_lib:format("https://127.0.0.1:~p", [Port])).
