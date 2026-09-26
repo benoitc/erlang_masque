@@ -88,3 +88,10 @@ explicit_alpn_test() ->
 caller_cacerts_win_test() ->
     Opts = masque_tls:client_opts(<<"proxy.example">>, #{cacerts => [<<"ca">>]}),
     ?assertEqual([<<"ca">>], proplists:get_value(cacerts, Opts)).
+
+%% ssl:connect/4 needs `inet6' to dial an IPv6 literal.
+ipv6_literal_selects_inet6_test() ->
+    ?assert(lists:member(inet6, masque_tls:client_opts(<<"::1">>, #{}))),
+    ?assert(lists:member(inet6, masque_tls:client_opts("2001:db8::1", #{}, [<<"h2">>]))),
+    ?assertNot(lists:member(inet6, masque_tls:client_opts(<<"127.0.0.1">>, #{}))),
+    ?assertNot(lists:member(inet6, masque_tls:client_opts(<<"proxy.example">>, #{}))).
