@@ -255,9 +255,7 @@ bind_h1_request_ipv6_authority_and_headers(Config) ->
             _ = dial(URI, h1, udp_bind, #{
                 verify => verify_none,
                 timeout => 1000,
-                request_headers => Headers,
-                %% ssl:connect/4 needs `inet6' to dial an IPv6 literal.
-                ssl_opts => [inet6]
+                request_headers => Headers
             }),
             Req =
                 receive
