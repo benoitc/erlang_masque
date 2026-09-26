@@ -63,3 +63,17 @@ proxy_authorization_clean_value_passes_validation_test() ->
     ?assertMatch({error, _}, Result),
     {error, Reason} = Result,
     ?assertNotMatch({invalid_opts, _}, Reason).
+
+unknown_transport_returns_error_test() ->
+    ?assertEqual(
+        {error, {invalid_opts, {transports, [foo]}}},
+        masque:connect(<<"https://127.0.0.1:1">>, {<<"host">>, 80}, #{transports => [foo]})
+    ),
+    ?assertEqual(
+        {error, {invalid_opts, {transports, h3}}},
+        masque:connect(<<"https://127.0.0.1:1">>, {<<"host">>, 80}, #{transports => h3})
+    ),
+    ?assertEqual(
+        {error, {invalid_opts, {transports, [h3, bar]}}},
+        masque:bind_connect(<<"https://127.0.0.1:1">>, unscoped, #{transports => [h3, bar]})
+    ).

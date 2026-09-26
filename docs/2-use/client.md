@@ -20,7 +20,7 @@ This page covers everything you do on the client side of a tunnel: open it with 
 | Option | Default | What it does |
 |---|---|---|
 | `protocol` | `udp` | `udp`, `tcp` or `ip`. |
-| `transports` | `[h3, h2]` | Transports to try. One entry dials only that transport; two or more are raced. Add `h1` as a last resort: `[h3, h2, h1]`. |
+| `transports` | `[h3, h2]` | Transports to try. One entry dials only that transport; two or more are raced. Add `h1` as a last resort: `[h3, h2, h1]`. Anything but a list of `h3`, `h2`, `h1` returns `{error, {invalid_opts, {transports, T}}}`. |
 | `prefer_timeout_ms` | `250` | Head start of the first transport before the second one starts. |
 | `h1_prefer_timeout_ms` | `500` | Delay before the third transport starts, counted from the start of the second. |
 | `timeout` | `5000` | Handshake timeout in ms. When racing, the whole race must finish within it. |

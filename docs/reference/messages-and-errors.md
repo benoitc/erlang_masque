@@ -70,6 +70,7 @@ Rejected before any socket opens (`connect/3` only):
 | --- | --- |
 | `{invalid_proxy_uri, URI}` | not an `https://host[:port]` URI |
 | `{bad_target_for_protocol, Protocol}` | target shape does not match `protocol` (IP needs `{Target, IPProto}`, others `{Host, Port}`) |
+| `{invalid_opts, {transports, T}}` | `transports` is not a list of `h3`, `h2` and `h1` |
 | `{invalid_opts, capsule_protocol_required_for_ip}` | `capsule_protocol => false` with `protocol => ip` |
 | `{invalid_opts, proxy_authorization_contains_crlf}` / `{invalid_opts, proxy_authorization_must_be_binary}` | bad `proxy_authorization` |
 
