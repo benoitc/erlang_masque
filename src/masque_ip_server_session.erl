@@ -26,6 +26,7 @@
 
 %% Most ADDRESS_REQUEST entries left unanswered at once.
 -define(MAX_PEER_PENDING, 64).
+-define(H3_INTERNAL_ERROR, 16#102).
 
 -record(state, {
     conn :: pid(),
@@ -342,7 +343,7 @@ terminate(
     _ = unregister_from_router(Router, StreamId),
     _ =
         (try
-            transport_send_data(S, <<>>, true)
+            end_stream(Reason, S)
         catch
             _:_ -> ok
         end),
@@ -352,6 +353,15 @@ terminate(
 
 maybe_release_h2_tunnel(h2, Conn) -> masque_h2_server:release_tunnel(Conn);
 maybe_release_h2_tunnel(_, _) -> ok.
+
+%% A handler crash resets the stream so the client does not read it as
+%% a clean close; every other stop ends the stream with FIN.
+end_stream({handler_crash, _}, #state{transport = h3, conn = C, stream_id = Sid}) ->
+    quic_h3:cancel(C, Sid, ?H3_INTERNAL_ERROR);
+end_stream({handler_crash, _}, #state{transport = h2, conn = C, stream_id = Sid}) ->
+    h2:cancel(C, Sid, internal_error);
+end_stream(_Reason, S) ->
+    transport_send_data(S, <<>>, true).
 
 unregister_from_router(undefined, _) ->
     ok;
@@ -551,6 +561,8 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
                     );
                 {stop, Reason, HS2} ->
                     {stop, Reason, S#state{h_state = HS2}};
+                {stop, Reason} ->
+                    {stop, Reason, S};
                 _ ->
                     {noreply, S}
             end;
@@ -740,8 +752,8 @@ safe_apply(M, F, A) ->
         apply(M, F, A)
     catch
         Class:Reason:Stack ->
-            error_logger:error_msg(
-                "masque ip handler ~p:~p/~p failed: ~p:~p~n~p~n",
+            logger:error(
+                "masque ip handler ~p:~p/~p failed: ~p:~p~n~p",
                 [M, F, length(A), Class, Reason, Stack]
             ),
             {stop, {handler_crash, Reason}}

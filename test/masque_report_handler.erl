@@ -3,7 +3,8 @@
 %%% `init/2' sends `{masque_session, self()}' to the pid under
 %%% `report_to' in the handler opts, so a suite can monitor the
 %%% server-side session process. Packets, capsules and TCP bytes are
-%%% echoed, except capsule type `16#ff00', which closes the session.
+%%% echoed, except capsule type `16#ff00', which closes the session,
+%%% and `16#ff01', which makes `handle_capsule/3' crash.
 %%% With `early_data => Bin' the session also queues a message, before
 %%% the stream is finalized, that makes the handler send `Bin' as a
 %%% datagram.
@@ -31,6 +32,8 @@ handle_packet(Data, State) ->
 
 handle_capsule(16#ff00, _Value, State) ->
     {ok, State, [close_session]};
+handle_capsule(16#ff01, _Value, _State) ->
+    error(boom);
 handle_capsule(Type, Value, State) ->
     {ok, State, [{send_capsule, Type, Value}]}.
 

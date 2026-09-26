@@ -103,6 +103,6 @@ Clients that race transports reconnect to whichever instance your DNS or load ba
 
 ## Logs
 
-`masque` itself logs one thing: an exception raised by a handler callback in a server session, at error level through `error_logger` (which forwards to `logger`), with the module, function, arity, class, reason and stack. The udp-bind session over h1 does not catch handler exceptions, so there you get the standard OTP crash report instead. Refused requests are not logged; they are counted in `masque.tunnels.rejected`. What the handler crash does to the tunnel is described in [handlers](handlers.md#what-a-crash-does). The transport libraries (`quic`, `h2`, `h1`) log on their own.
+`masque` itself logs one thing: an exception raised by a handler callback in a server session, at error level through `logger`, with the module, function, arity, class, reason and stack. The udp-bind session over h1 does not catch handler exceptions, so there you get the standard OTP crash report instead. Refused requests are not logged; they are counted in `masque.tunnels.rejected`. What the handler crash does to the tunnel is described in [handlers](handlers.md#what-a-crash-does). The transport libraries (`quic`, `h2`, `h1`) log on their own.
 
 Next: [debugging](../3-change/debugging.md), or back to [concepts](../1-understand/concepts.md) for the map of the code.

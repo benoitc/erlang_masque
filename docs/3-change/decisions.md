@@ -32,6 +32,12 @@ This page records design decisions that are visible in the code, with the reason
 - **Consequences.** The queue is bounded only by the target socket's `{active, N}` window.
 - **Where.** The `early` field and `replay_early/2` in the h3-capable server sessions.
 
+### A handler crash ends the tunnel
+
+- **Decision.** When a handler callback raises after `init/2`, the session logs it and stops with `{handler_crash, Reason}`. On h3 and h2 the stream is reset, on h1 the socket is closed, and `terminate/2` runs.
+- **Why.** Settled by the maintainer (former Q13). Continuing with the handler state from before the crash can leave the handler's sockets and its state out of step, and a reset tells the client the tunnel failed rather than ended.
+- **Where.** `dispatch/3` and `safe_apply/3` in every server session.
+
 ### h2 and h1 sessions live under per-protocol supervisors
 
 - **Decision.** One `simple_one_for_one` supervisor per protocol and transport under `masque_sup`, children `temporary`.
@@ -177,7 +183,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q10.** Which connect-tcp draft revision is targeted?
 - **Q11.** Should `upstream_pool => true` apply to udp-bind? Today the checkout happens (and may dial) but the session ignores the owner and dials its own connection.
 - **Q12.** Is `masque_capsule` meant to become the single capsule codec? Today `quic_h3_capsule` (through `masque_capsule`), `h2_capsule` and `h1_capsule` are all used.
-- **Q13.** Which handler-crash behaviour is intended? UDP, TCP and IP sessions log and ignore a crash in a callback; the h3/h2 udp-bind session stops and resets; the h1 udp-bind session crashes.
+- **Q13.** Settled: [a handler crash ends the tunnel](#a-handler-crash-ends-the-tunnel).
 - **Q14.** Should draining send GOAWAY, and should the server react to a client GOAWAY? Today it does neither.
 - **Q15.** A peer reset of a pending h3 stream makes the router drop the entry without replying, so the listener's `start_session` call waits the full 30 s. Intended?
 - **Q16.** In a scoped udp-bind, context 0 goes to `handle_packet/2`, which the default bind handler does not export, so that traffic is dropped. Intended?

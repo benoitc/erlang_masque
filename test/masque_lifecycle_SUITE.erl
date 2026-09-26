@@ -36,6 +36,8 @@
     h2_udp_bind_round_trip/1,
     h3_bind_handler_crash_resets_stream/1,
     h2_bind_handler_crash_resets_stream/1,
+    h3_udp_handler_crash_resets_stream/1,
+    h2_udp_handler_crash_resets_stream/1,
     bind_message_before_finalize/1,
     h3_unknown_reject_reason_gets_response/1,
     h2_unknown_reject_reason_gets_response/1,
@@ -84,6 +86,8 @@ all() ->
         h2_udp_bind_round_trip,
         h3_bind_handler_crash_resets_stream,
         h2_bind_handler_crash_resets_stream,
+        h3_udp_handler_crash_resets_stream,
+        h2_udp_handler_crash_resets_stream,
         bind_message_before_finalize,
         h3_unknown_reject_reason_gets_response,
         h2_unknown_reject_reason_gets_response,
@@ -475,6 +479,25 @@ h2_bind_handler_crash_resets_stream(Config) ->
 bind_handler_crash_resets_stream(Config, Transport) ->
     Sess = bind_connect(Config, Transport),
     ok = masque:send_capsule(Sess, 16#ff01, <<>>),
+    receive
+        {masque_closed, Sess, peer_reset} -> ok
+    after 5000 -> ct:fail(no_reset_on_crash)
+    end.
+
+%% A crash in a callback after init stops the session and resets the
+%% stream; the session must not keep running on stale handler state.
+h3_udp_handler_crash_resets_stream(Config) ->
+    udp_handler_crash_resets_stream(Config, h3).
+
+h2_udp_handler_crash_resets_stream(Config) ->
+    udp_handler_crash_resets_stream(Config, h2).
+
+udp_handler_crash_resets_stream(Config, Transport) ->
+    Sess = connect(Config, Transport),
+    Pid = await_session(),
+    MRef = erlang:monitor(process, Pid),
+    ok = masque:send_capsule(Sess, 16#ff01, <<>>),
+    await_down(MRef, Pid),
     receive
         {masque_closed, Sess, peer_reset} -> ok
     after 5000 -> ct:fail(no_reset_on_crash)
