@@ -242,3 +242,45 @@ stop_listener(_Owner, Sock) ->
 
 cleanup(State) ->
     masque_udp_bind_proxy_handler:terminate(normal, State).
+
+%%====================================================================
+%% Scoped binds and the `allow' policy
+%%====================================================================
+
+scoped_req(Port) ->
+    (req())#{bind => scoped, target_host => <<"127.0.0.1">>, target_port => Port}.
+
+scoped_bind_refuses_other_peers_test() ->
+    {Listener, ListenerSock, ListenerPort} = open_listener(),
+    Opts = #{bind_address => {127, 0, 0, 1}, allow_loopback => true},
+    {ok, State, _} = masque_udp_bind_proxy_handler:init(scoped_req(ListenerPort), Opts),
+    ?assertMatch(
+        {drop, peer_filter, _},
+        masque_udp_bind_proxy_handler:handle_bind_packet(
+            {{127, 0, 0, 1}, ListenerPort + 1}, <<"x">>, State
+        )
+    ),
+    {ok, _} = masque_udp_bind_proxy_handler:handle_bind_packet(
+        {{127, 0, 0, 1}, ListenerPort}, <<"ok">>, State
+    ),
+    receive
+        {udp, ListenerSock, _, _, <<"ok">>} -> ok
+    after 1000 -> ct:fail("scoped peer did not receive packet")
+    end,
+    cleanup(State),
+    stop_listener(Listener, ListenerSock).
+
+allow_refuses_peer_test() ->
+    Opts = #{
+        bind_address => {127, 0, 0, 1},
+        allow_loopback => true,
+        allow => fun({Host, _Port}) -> Host =/= <<"127.0.0.1">> end
+    },
+    {ok, State, _} = masque_udp_bind_proxy_handler:init(req(), Opts),
+    ?assertMatch(
+        {drop, peer_filter, _},
+        masque_udp_bind_proxy_handler:handle_bind_packet(
+            {{127, 0, 0, 1}, 9}, <<"x">>, State
+        )
+    ),
+    cleanup(State).

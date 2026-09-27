@@ -42,6 +42,7 @@
     h1_bind_handler_crash_closes_tunnel/1,
     unsupported_call_keeps_session/1,
     udp_bind_skips_pool/1,
+    h3_send_to_on_proxy_context/1,
     h1_every_tunnel_counts_open_and_close/1,
     h1_udp_bind_assign_by_address/1,
     h1_udp_bind_pending_limit/1,
@@ -100,6 +101,7 @@ all() ->
         h1_bind_handler_crash_closes_tunnel,
         unsupported_call_keeps_session,
         udp_bind_skips_pool,
+        h3_send_to_on_proxy_context,
         h1_every_tunnel_counts_open_and_close,
         h1_udp_bind_assign_by_address,
         h1_udp_bind_pending_limit,
@@ -215,6 +217,13 @@ extra_opts(h3_udp_bind_output_before_finalize_is_kept) ->
     };
 extra_opts(h1_bind_handler_crash_closes_tunnel) ->
     (bind_opts())#{bind_handler => masque_crash_bind_handler};
+extra_opts(h3_send_to_on_proxy_context) ->
+    B = bind_opts(),
+    HOpts = maps:get(handler_opts, B),
+    B#{
+        bind_handler => masque_crash_bind_handler,
+        handler_opts => HOpts#{early_assign => {{127, 0, 0, 1}, send_to_peer_port()}}
+    };
 extra_opts(udp_bind_skips_pool) ->
     bind_opts();
 extra_opts(h1_every_tunnel_counts_open_and_close) ->
@@ -563,6 +572,32 @@ h1_udp_bind_pending_limit(Config) ->
     end,
     {open, _} = sys:get_state(Sess),
     ok = masque:close(Sess).
+
+%% Contexts are two-way: a context the proxy opened for a peer also
+%% carries the client's packets to that peer.
+h3_send_to_on_proxy_context(Config) ->
+    {ok, Peer} = gen_udp:open(send_to_peer_port(), [binary, {ip, {127, 0, 0, 1}}, {active, true}]),
+    Sess = bind_connect(Config, h3),
+    PeerAddr = {{127, 0, 0, 1}, send_to_peer_port()},
+    receive
+        {masque_compression_assigned, Sess, _Id, PeerAddr} -> ok
+    after 5000 -> ct:fail(no_proxy_assign)
+    end,
+    %% The datagram may overtake our ACK on the stream: retry.
+    ok = send_until_received(Sess, PeerAddr, Peer, 20),
+    ok = masque:close(Sess),
+    gen_udp:close(Peer).
+
+send_until_received(_Sess, _PeerAddr, _Peer, 0) ->
+    ct:fail(peer_never_received);
+send_until_received(Sess, PeerAddr, Peer, N) ->
+    ok = masque:send_to(Sess, PeerAddr, <<"via-proxy-context">>),
+    receive
+        {udp, Peer, _, _, <<"via-proxy-context">>} -> ok
+    after 200 -> send_until_received(Sess, PeerAddr, Peer, N - 1)
+    end.
+
+send_to_peer_port() -> 47811.
 
 %% `upstream_pool => true' has no effect on a bind: no pooled
 %% connection is checked out, on the single-transport path or in a race.

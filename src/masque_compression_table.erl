@@ -95,8 +95,13 @@ returned `state()` through their gen_server state.
     uncompressed_id = undefined :: undefined | pos_integer(),
     %% Proxy own table: the client closed its uncompressed context.
     uncompressed_closed = false :: boolean(),
-    max_entries :: pos_integer()
+    max_entries :: pos_integer(),
+    %% Recently closed ids, newest first. An ACK or CLOSE that crosses
+    %% our own CLOSE on the wire refers to one of these and is ignored.
+    closed = [] :: [pos_integer()]
 }).
+
+-define(MAX_TOMBSTONES, 64).
 
 -opaque state() :: #state{}.
 
@@ -428,7 +433,10 @@ install_ack(#state{direction = peer}, _Ack) ->
 install_ack(#state{} = S, #compression_ack{context_id = Id}) ->
     case maps:get(Id, S#state.entries, undefined) of
         undefined ->
-            {error, malformed_unknown_ack};
+            case lists:member(Id, S#state.closed) of
+                true -> {ok, S};
+                false -> {error, malformed_unknown_ack}
+            end;
         #compression_entry{state = pending_ack} = E ->
             E2 = E#compression_entry{state = installed},
             {ok, S#state{entries = maps:put(Id, E2, S#state.entries)}};
@@ -443,8 +451,9 @@ install_ack(#state{} = S, #compression_ack{context_id = Id}) ->
 %%====================================================================
 
 -doc """
-Record a peer `COMPRESSION_CLOSE`. Removes the entry from
-whichever table holds it. The caller is expected to dispatch by
+Record a `COMPRESSION_CLOSE`, ours or the peer's. Removes the entry
+from whichever table holds it and remembers the id, so an ACK or
+CLOSE for it that was already in flight is ignored. The caller is expected to dispatch by
 direction first - typically the session looks up the ID in both
 tables and calls install_close on the matching one.
 """.
@@ -453,9 +462,15 @@ tables and calls install_close on the matching one.
 install_close(#state{} = S, #compression_close{context_id = Id}) ->
     case maps:take(Id, S#state.entries) of
         error ->
-            {error, unknown_context};
+            case lists:member(Id, S#state.closed) of
+                true -> {ok, S};
+                false -> {error, unknown_context}
+            end;
         {Entry, NewEntries} ->
-            S2 = S#state{entries = NewEntries},
+            S2 = S#state{
+                entries = NewEntries,
+                closed = lists:sublist([Id | S#state.closed], ?MAX_TOMBSTONES)
+            },
             S3 = drop_tuple_index(Entry, S2),
             S4 = clear_uncompressed_marker(Id, S3),
             {ok, S4}

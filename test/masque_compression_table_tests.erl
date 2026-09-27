@@ -404,3 +404,25 @@ open_compressed_table_full_test() ->
             T1, {4, {10, 0, 0, 2}, 1234}
         )
     ).
+
+%%====================================================================
+%% Tombstones: an ACK or CLOSE that crosses our CLOSE is ignored
+%%====================================================================
+
+ack_after_local_close_ignored_test() ->
+    T0 = masque_compression_table:new_own(client, #{}),
+    {ok, #compression_entry{context_id = Id}, T1} =
+        masque_compression_table:open_compressed(T0, {4, {10, 0, 0, 1}, 1234}),
+    {ok, T2} = masque_compression_table:install_close(T1, #compression_close{context_id = Id}),
+    ?assertEqual(
+        {ok, T2}, masque_compression_table:install_ack(T2, #compression_ack{context_id = Id})
+    ).
+
+close_after_local_close_ignored_test() ->
+    T0 = masque_compression_table:new_own(client, #{}),
+    {ok, #compression_entry{context_id = Id}, T1} =
+        masque_compression_table:open_compressed(T0, {4, {10, 0, 0, 1}, 1234}),
+    {ok, T2} = masque_compression_table:install_close(T1, #compression_close{context_id = Id}),
+    ?assertEqual(
+        {ok, T2}, masque_compression_table:install_close(T2, #compression_close{context_id = Id})
+    ).

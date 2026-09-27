@@ -470,6 +470,10 @@ closed(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
 %% A parked dial error was already returned to `handshake_await'.
 terminate(_Reason, failed, _Data) ->
     ok;
+%% The handshake failed: the caller already has the error, and the
+%% session pid was never handed to it.
+terminate(Reason, connecting, #data{} = Data) ->
+    terminate(Reason, closed_before_open, Data#data{mode = queue});
 terminate(Reason, _State, #data{owner = Owner, mode = message} = Data) ->
     masque_client_owner:send(Owner, {masque_closed, self(), Reason}),
     close_conn(Data);
@@ -525,7 +529,16 @@ handle_send_to({IP, Port}, Bytes, Data) ->
         ->
             send_compressed_inline(Id, Bytes, Data);
         _ ->
-            try_uncompressed_fallback(Tuple, Bytes, Data)
+            %% Contexts are two-way: use one the proxy opened for this
+            %% peer before falling back to an uncompressed context.
+            case masque_compression_table:lookup_by_tuple(Data#data.peer_table, Tuple) of
+                {ok, #compression_entry{context_id = Id, ip_version = V}} when
+                    V =:= 4; V =:= 6
+                ->
+                    send_compressed_inline(Id, Bytes, Data);
+                _ ->
+                    try_uncompressed_fallback(Tuple, Bytes, Data)
+            end
     end.
 
 %% No context for this peer: use our own uncompressed context when it
@@ -833,7 +846,7 @@ drain_capsules(Buf, Fin, Data) ->
 dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_ASSIGN, Body, Data) ->
     case masque_compression_capsule:decode_assign(Body) of
         {ok, A} ->
-            case masque_compression_table:install(Data#data.peer_table, A) of
+            case masque_compression_table:install(Data#data.peer_table, A, Data#data.own_table) of
                 {ok, T2} ->
                     Owner = Data#data.owner,
                     masque_client_owner:send(
@@ -853,6 +866,18 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_ASSIGN, Body, Data) ->
                     ),
                     _ = transport_send_data(Data, Bytes, false),
                     {ok, Data#data{peer_table = T2}};
+                {ok, {conflict, close_proxy_id, ProxyId}, T2} ->
+                    %% We already opened this tuple: acknowledge, then
+                    %% close the proxy's duplicate context.
+                    {ok, T3} = masque_compression_table:install_close(
+                        T2, #compression_close{context_id = ProxyId}
+                    ),
+                    Bytes = iolist_to_binary([
+                        masque_compression_capsule:encode(#compression_ack{context_id = ProxyId}),
+                        masque_compression_capsule:encode(#compression_close{context_id = ProxyId})
+                    ]),
+                    _ = transport_send_data(Data, Bytes, false),
+                    {ok, Data#data{peer_table = T3}};
                 {error, _} ->
                     {stop, malformed_capsule}
             end;
@@ -948,7 +973,12 @@ drop_waiter(TRef, From, #data{rx_waiters = Ws} = Data) ->
         fun({F, T}) -> not (F =:= From andalso T =:= TRef) end,
         Ws
     ),
-    gen_statem:reply(From, {error, timeout}),
+    %% Reply only if the waiter was still queued: a delivery that raced
+    %% the timer has already answered it.
+    case queue:len(Filtered) =:= queue:len(Ws) of
+        true -> ok;
+        false -> gen_statem:reply(From, {error, timeout})
+    end,
     Data#data{rx_waiters = Filtered}.
 
 %%====================================================================

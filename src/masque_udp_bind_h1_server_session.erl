@@ -278,8 +278,21 @@ handle_context_zero(Inner, #state{bind_scope = scoped} = S) ->
 handle_context_zero(_Inner, S) ->
     drop(context_zero, S).
 
+%% Contexts are two-way: a datagram may use one the client opened
+%% (peer table) or an installed one we opened (own table).
+lookup_context(Ctx, #state{peer_table = PT, own_table = OT}) ->
+    case masque_compression_table:lookup_by_id(PT, Ctx) of
+        {ok, _} = Found ->
+            Found;
+        not_found ->
+            case masque_compression_table:lookup_by_id(OT, Ctx) of
+                {ok, #compression_entry{state = installed}} = Found -> Found;
+                _ -> not_found
+            end
+    end.
+
 handle_known_context(Ctx, Inner, S) ->
-    case masque_compression_table:lookup_by_id(S#state.peer_table, Ctx) of
+    case lookup_context(Ctx, S) of
         {ok, #compression_entry{ip_version = 0}} ->
             case masque_udp_bind_payload:decode_uncompressed(Inner) of
                 {ok, {_V, IP, Port}, Pkt} ->
@@ -400,7 +413,7 @@ do_actions([{compression_ack, Id} | Rest], S) ->
     do_actions(Rest, S);
 do_actions([{compression_close, Id} | Rest], S) ->
     send_capsule(#compression_close{context_id = Id}, S),
-    do_actions(Rest, S);
+    do_actions(Rest, forget_context(Id, S));
 do_actions([{send_capsule, Type, Value} | Rest], S) ->
     Bytes = iolist_to_binary(masque_capsule:encode(Type, Value)),
     send_bytes(Bytes, S),
@@ -435,6 +448,20 @@ open_compression(IP, Port, #state{own_table = OT} = S) ->
                 {error, _} ->
                     masque_metrics:bind_drop_inc(other),
                     S
+            end
+    end.
+
+%% Our own CLOSE removes the context from whichever table holds it,
+%% so we stop using it and ignore a CLOSE or ACK that crosses ours.
+forget_context(Id, #state{own_table = OT, peer_table = PT} = S) ->
+    Close = #compression_close{context_id = Id},
+    case masque_compression_table:install_close(OT, Close) of
+        {ok, OT2} ->
+            S#state{own_table = OT2};
+        {error, _} ->
+            case masque_compression_table:install_close(PT, Close) of
+                {ok, PT2} -> S#state{peer_table = PT2};
+                {error, _} -> S
             end
     end.
 
@@ -485,7 +512,19 @@ send_bind_payload({IP, Port}, UdpPayload, S) ->
         ->
             send_compressed_inline(Id, UdpPayload, S);
         _ ->
-            try_uncompressed_fallback(Tuple, UdpPayload, S)
+            case peer_compressed(S#state.peer_table, Tuple) of
+                {ok, Id} -> send_compressed_inline(Id, UdpPayload, S);
+                not_found -> try_uncompressed_fallback(Tuple, UdpPayload, S)
+            end
+    end.
+
+%% A compressed context the client opened for this peer.
+peer_compressed(Table, Tuple) ->
+    case masque_compression_table:lookup_by_tuple(Table, Tuple) of
+        {ok, #compression_entry{context_id = Id, ip_version = V}} when V =:= 4; V =:= 6 ->
+            {ok, Id};
+        _ ->
+            not_found
     end.
 
 try_uncompressed_fallback(Tuple, UdpPayload, S) ->

@@ -8,6 +8,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- udp-bind: the listener `allow` policy applies to every peer, and a
+  scoped bind only exchanges packets with its scoped target.
+
 - The proxy host's own addresses (non-loopback interfaces, the new
   `self_addresses` option, bind `public_addresses`) are refused as UDP
   and TCP targets, CONNECT-IP destinations and udp-bind peers unless
@@ -170,6 +173,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `bad_ip_version` and `unknown_capsule_type`.
 
 ### Fixed
+
+- udp-bind: an ACK or CLOSE that crosses a local CLOSE no longer ends
+  the tunnel; a proxy `compression_close` action removes the context;
+  contexts are two-way on both sides (`send_to/3` uses proxy-opened
+  contexts, the proxy accepts client datagrams on its own contexts);
+  the client handles a conflicting proxy ASSIGN; `recv/2` timeouts no
+  longer answer a waiter twice; no stray `masque_closed` after a failed
+  handshake; `Proxy-Public-Address` is parsed as a Structured Field
+  list with strict addresses.
 
 - h1 and h2 clients dial an IPv6 literal proxy (`https://[::1]:443`)
   without `ssl_opts => [inet6]`.

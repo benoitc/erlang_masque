@@ -39,6 +39,13 @@ Configurable via `handler_opts`:
   pass loopback peers. Default `false`.
 - `allow_private :: boolean()` - let the default filter pass
   every peer. Default `false`.
+- `allow :: fun(({HostBin, Port}) -> boolean())` - the same target
+  policy as CONNECT-UDP, applied to each peer (host as text, e.g.
+  `<<"192.0.2.1">>`). Refused peers are dropped (`peer_filter`).
+- `allow_self :: boolean()` - let the default filter pass the
+  proxy's own addresses. Default `false`.
+- A scoped bind (`target_host` / `target_port` in the request) only
+  exchanges packets with that target, after resolving it.
 - `scrub_fun :: fun((Packet, State) -> {pass, Packet, State} |
   {drop, Reason, State})`
   - data-plane policy hook for DDoS scrubbing or other
@@ -50,6 +57,8 @@ Configurable via `handler_opts`:
 -include("masque_udp_bind.hrl").
 
 -define(DEFAULT_ACTIVE_N, 32).
+%% Peers remembered as allowed by `allow'; the cache is reset past it.
+-define(MAX_ALLOWED_PEERS, 1024).
 
 -record(state, {
     socket :: gen_udp:socket(),
@@ -67,8 +76,15 @@ Configurable via `handler_opts`:
             {pass, binary(), term()}
             | {drop, atom(), term()}
     ),
-    user_state :: term()
+    user_state :: term(),
+    %% `allow' policy and the peers it already accepted.
+    allow :: undefined | fun((ip_port_text()) -> boolean()),
+    allowed = #{} :: #{ip_port() => true},
+    %% A scoped bind only talks to this peer.
+    scope = any :: any | ip_port()
 }).
+
+-type ip_port_text() :: {binary(), inet:port_number()}.
 
 -type opts() :: map().
 -type ip_port() :: {inet:ip_address(), inet:port_number()}.
@@ -79,7 +95,40 @@ Configurable via `handler_opts`:
 
 -spec init(masque_handler:req(), opts()) ->
     {ok, #state{}, [term()]} | {stop, term()}.
-init(_Req, Opts) ->
+init(Req, Opts) ->
+    case scope(Req, Opts) of
+        {ok, Scope} -> open(Scope, Opts);
+        {error, Reason} -> {stop, {resolution_failed, Reason}}
+    end.
+
+%% A scoped bind names one target; resolve it once, like CONNECT-UDP.
+scope(#{bind := scoped, target_host := Host, target_port := Port}, Opts) when
+    is_integer(Port)
+->
+    Resolver = maps:get(resolver, Opts, fun default_resolver/1),
+    case Resolver(Host) of
+        {ok, [IP | _]} -> {ok, {IP, Port}};
+        {ok, IP} when is_tuple(IP) -> {ok, {IP, Port}};
+        {ok, []} -> {error, nxdomain};
+        {error, R} -> {error, {resolve, R}};
+        Other -> {error, {bad_resolver_result, Other}}
+    end;
+scope(_Req, _Opts) ->
+    {ok, any}.
+
+default_resolver(Host) when is_binary(Host) ->
+    HostStr = binary_to_list(Host),
+    case inet:parse_address(HostStr) of
+        {ok, IP} ->
+            {ok, IP};
+        {error, _} ->
+            case inet:getaddr(HostStr, inet) of
+                {ok, IP} -> {ok, IP};
+                {error, _} -> inet:getaddr(HostStr, inet6)
+            end
+    end.
+
+open(Scope, Opts) ->
     BindAddr = maps:get(bind_address, Opts, any),
     BindPort = maps:get(bind_port, Opts, 0),
     ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
@@ -111,7 +160,9 @@ init(_Req, Opts) ->
                                 Opts,
                                 fun default_scrub/2
                             ),
-                        user_state = maps:get(user_state, Opts, undefined)
+                        user_state = maps:get(user_state, Opts, undefined),
+                        allow = maps:get(allow, Opts, undefined),
+                        scope = Scope
                     },
                     Headers = response_headers(Addresses),
                     {ok, State, [{response_headers, Headers}]};
@@ -142,11 +193,37 @@ drop with a reason that the session can attribute via metrics.
 handle_bind_packet({IP, Port}, Payload, #state{} = S0) when
     is_binary(Payload)
 ->
-    case (S0#state.peer_filter_fun)(IP, Port) of
+    case in_scope({IP, Port}, S0) andalso (S0#state.peer_filter_fun)(IP, Port) of
+        false ->
+            {drop, peer_filter, S0};
         ok ->
-            scrub_then_send(IP, Port, Payload, S0);
+            case allowed({IP, Port}, S0) of
+                {true, S1} -> scrub_then_send(IP, Port, Payload, S1);
+                false -> {drop, peer_filter, S0}
+            end;
         {drop, Reason} ->
             {drop, Reason, S0}
+    end.
+
+in_scope(_Peer, #state{scope = any}) -> true;
+in_scope(Peer, #state{scope = Scope}) -> Peer =:= Scope.
+
+%% The listener `allow' policy, asked once per peer.
+allowed(_Peer, #state{allow = undefined} = S) ->
+    {true, S};
+allowed(Peer, #state{allowed = Seen} = S) when is_map_key(Peer, Seen) ->
+    {true, S};
+allowed({IP, Port} = Peer, #state{allow = Allow, allowed = Seen} = S) ->
+    case Allow({list_to_binary(inet:ntoa(IP)), Port}) of
+        true ->
+            Seen1 =
+                case map_size(Seen) >= ?MAX_ALLOWED_PEERS of
+                    true -> #{};
+                    false -> Seen
+                end,
+            {true, S#state{allowed = Seen1#{Peer => true}}};
+        _ ->
+            false
     end.
 
 scrub_then_send(IP, Port, Payload, #state{} = S0) ->
@@ -178,7 +255,10 @@ handle_info(
     %% defends against weird kernel behaviour and against the proxy's
     %% own bind socket receiving packets from a family the client
     %% isn't expecting.
-    case lists:member(family_of(FromIP), S#state.advertised_families) of
+    case
+        lists:member(family_of(FromIP), S#state.advertised_families) andalso
+            in_scope({FromIP, FromPort}, S)
+    of
         false ->
             {ok, S};
         true ->

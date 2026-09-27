@@ -324,36 +324,60 @@ lowercase_bin(B) when is_binary(B) ->
 strip(B) when is_binary(B) ->
     iolist_to_binary(string:trim(B, both, " \t")).
 
-%% Parse an RFC 9651 list of bare-string items. We do not implement
-%% the full sf grammar (no parameters, no inner lists) - that's all
-%% draft-11 needs from us. Returns the unquoted strings in order.
+%% Parse an RFC 9651 list whose members are Strings. Quoted strings
+%% may contain escaped `\"` / `\\` and commas; parameters after a
+%% member are accepted and ignored; inner lists and other bare items
+%% are rejected. Returns the unquoted strings in order.
 parse_string_list(<<>>) ->
     {ok, []};
 parse_string_list(Bin) ->
-    Items = [strip(I) || I <- binary:split(Bin, <<",">>, [global])],
-    case lists:foldr(fun unquote/2, {ok, []}, Items) of
-        {ok, _} = Ok -> Ok;
-        {error, _} = E -> E
-    end.
+    sf_members(Bin, []).
 
-unquote(_, {error, _} = E) ->
-    E;
-unquote(<<>>, {ok, Acc}) ->
-    {ok, Acc};
-unquote(Item, {ok, Acc}) ->
-    case Item of
-        <<$", Body/binary>> ->
-            BSize = byte_size(Body),
-            case BSize > 0 andalso binary:at(Body, BSize - 1) =:= $" of
-                true ->
-                    Inner = binary:part(Body, 0, BSize - 1),
-                    {ok, [Inner | Acc]};
-                false ->
-                    {error, malformed}
+sf_members(Bin, Acc) ->
+    case sf_string(skip_ows(Bin)) of
+        {ok, Str, Rest0} ->
+            Rest = skip_ows(skip_params(Rest0)),
+            case Rest of
+                <<>> -> {ok, lists:reverse([Str | Acc])};
+                <<$,, Next/binary>> when Next =/= <<>> -> sf_members(Next, [Str | Acc]);
+                _ -> {error, malformed}
             end;
-        _ ->
+        error ->
             {error, malformed}
     end.
+
+sf_string(<<$", Rest/binary>>) -> sf_string_chars(Rest, <<>>);
+sf_string(_) -> error.
+
+sf_string_chars(<<$\\, C, Rest/binary>>, Acc) when C =:= $"; C =:= $\\ ->
+    sf_string_chars(Rest, <<Acc/binary, C>>);
+sf_string_chars(<<$", Rest/binary>>, Acc) ->
+    {ok, Acc, Rest};
+sf_string_chars(<<C, Rest/binary>>, Acc) when C >= 16#20, C =< 16#7E, C =/= $\\ ->
+    sf_string_chars(Rest, <<Acc/binary, C>>);
+sf_string_chars(_, _) ->
+    error.
+
+%% `;key' or `;key=value' parameters: skipped up to the next `,'
+%% outside a quoted string.
+skip_params(<<$;, Rest/binary>>) -> skip_param(Rest);
+skip_params(Bin) -> Bin.
+
+skip_param(<<$", Rest/binary>>) ->
+    case sf_string_chars(Rest, <<>>) of
+        {ok, _, Tail} -> skip_param(Tail);
+        error -> <<$!>>
+    end;
+skip_param(<<C, _/binary>> = Bin) when C =:= $,; C =:= $\s; C =:= $\t -> skip_params(Bin);
+skip_param(<<$;, _/binary>> = Bin) ->
+    skip_params(Bin);
+skip_param(<<_, Rest/binary>>) ->
+    skip_param(Rest);
+skip_param(<<>>) ->
+    <<>>.
+
+skip_ows(<<C, Rest/binary>>) when C =:= $\s; C =:= $\t -> skip_ows(Rest);
+skip_ows(Bin) -> Bin.
 
 parse_addr_strings(Strings) ->
     parse_addr_strings(Strings, []).
@@ -373,7 +397,7 @@ parse_ip_port(<<$[, Rest/binary>>) ->
     %% IPv6 literal: "[address]:port".
     case binary:split(Rest, <<"]:">>) of
         [V6, PortBin] ->
-            case {inet:parse_ipv6_address(binary_to_list(V6)), parse_port_value(PortBin)} of
+            case {inet:parse_ipv6strict_address(binary_to_list(V6)), parse_port_value(PortBin)} of
                 {{ok, Addr}, {ok, Port}} -> {ok, {Addr, Port}};
                 _ -> {error, malformed}
             end;
@@ -384,7 +408,7 @@ parse_ip_port(Bin) ->
     %% IPv4: "address:port".
     case binary:split(Bin, <<":">>) of
         [V4, PortBin] ->
-            case {inet:parse_ipv4_address(binary_to_list(V4)), parse_port_value(PortBin)} of
+            case {inet:parse_ipv4strict_address(binary_to_list(V4)), parse_port_value(PortBin)} of
                 {{ok, Addr}, {ok, Port}} -> {ok, {Addr, Port}};
                 _ -> {error, malformed}
             end;
