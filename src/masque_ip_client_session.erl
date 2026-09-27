@@ -45,6 +45,8 @@
     ]}
 ).
 
+-define(MAX_PEER_PENDING, 64).
+
 -record(data, {
     owner :: pid(),
     owner_ref :: reference(),
@@ -682,12 +684,14 @@ sanitise_extra_headers(List) when is_list(List) ->
         <<":protocol">>,
         <<"capsule-protocol">>
     ],
+    %% h2 and h3 field names are lowercase; compare and send them so.
     [
-        {K, V}
+        {Name, V}
      || {K, V} <- List,
         is_binary(K),
         is_binary(V),
-        not lists:member(K, Reserved)
+        Name <- [string:lowercase(K)],
+        not lists:member(Name, Reserved)
     ].
 
 split_url(<<"https://", Rest/binary>>) ->
@@ -791,7 +795,11 @@ deliver_capsule(
     #data{owner = Owner, peer_pending = Pend} = Data
 ) ->
     case masque_ip_capsule:decode_address_request(Inner) of
-        {ok, Entries} ->
+        {ok, Entries0} ->
+            %% Keep at most 64 unanswered proxy requests; a proxy that
+            %% floods them gets the rest ignored.
+            Room = max(0, ?MAX_PEER_PENDING - map_size(Pend)),
+            Entries = lists:sublist(Entries0, Room),
             masque_client_owner:send(Owner, {masque_address_request, self(), Entries}),
             Pend1 = lists:foldl(
                 fun(R, Acc) ->

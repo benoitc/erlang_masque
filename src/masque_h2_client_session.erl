@@ -498,12 +498,14 @@ sanitise_extra_headers(List) when is_list(List) ->
         <<":protocol">>,
         <<"capsule-protocol">>
     ],
+    %% h2 and h3 field names are lowercase; compare and send them so.
     [
-        {K, V}
+        {Name, V}
      || {K, V} <- List,
         is_binary(K),
         is_binary(V),
-        not lists:member(K, Reserved)
+        Name <- [string:lowercase(K)],
+        not lists:member(Name, Reserved)
     ].
 
 %% Outbound: UDP payloads become DATAGRAM capsules whose inner

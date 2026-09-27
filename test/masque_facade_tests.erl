@@ -77,3 +77,41 @@ unknown_transport_returns_error_test() ->
         {error, {invalid_opts, {transports, [h3, bar]}}},
         masque:bind_connect(<<"https://127.0.0.1:1">>, unscoped, #{transports => [h3, bar]})
     ).
+
+%% Target hosts are validated: only IP addresses and host names.
+target_host_validation_test() ->
+    Proxy = <<"https://127.0.0.1:1">>,
+    ?assertEqual(
+        {error, {bad_target_for_protocol, tcp}},
+        masque:connect(Proxy, {<<"a:1 HTTP/1.1\r\nX: y">>, 80}, #{protocol => tcp})
+    ),
+    ?assertEqual(
+        {error, {bad_target_for_protocol, udp}},
+        masque:connect(Proxy, {<<"host">>, 0}, #{})
+    ),
+    ?assertEqual(
+        {error, {bad_target_for_protocol, udp_bind}},
+        masque:bind_connect(Proxy, {<<"bad host">>, 53}, #{})
+    ).
+
+%% An IP tuple target is accepted (converted to text), not a crash.
+ip_tuple_target_accepted_test() ->
+    {error, Reason} = masque:connect(
+        <<"https://127.0.0.1:1">>,
+        {{127, 0, 0, 1}, 53},
+        #{transports => [h1], timeout => 200}
+    ),
+    ?assertNotMatch(function_clause, Reason),
+    ?assertNotMatch({bad_target_for_protocol, _}, Reason).
+
+timeout_must_be_positive_integer_test() ->
+    ?assertEqual(
+        {error, {invalid_opts, {timeout, infinity}}},
+        masque:connect(<<"https://127.0.0.1:1">>, {<<"host">>, 80}, #{timeout => infinity})
+    ).
+
+bad_arguments_are_refused_test() ->
+    ?assertEqual({error, badarg}, masque:set_mode(self(), bogus)),
+    ?assertEqual({error, badarg}, masque:send(self(), -1, <<"x">>)),
+    ?assertEqual({error, badarg}, masque:send_capsule(self(), foo, <<"x">>)),
+    ?assertEqual({error, badarg}, masque:send_to(self(), {<<"1.2.3.4">>, 53}, <<"x">>)).

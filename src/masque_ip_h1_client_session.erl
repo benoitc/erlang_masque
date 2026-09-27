@@ -44,6 +44,8 @@
     ]}
 ).
 
+-define(MAX_PEER_PENDING, 64).
+
 -record(data, {
     owner :: pid(),
     owner_ref :: reference(),
@@ -390,7 +392,7 @@ remaining(Deadline) ->
 
 do_upgrade(Conn, Data, Timeout) ->
     Headers = request_headers(Data),
-    case h1:upgrade(Conn, ?MASQUE_CONNECT_IP_PROTOCOL, Headers, Timeout) of
+    case upgrade(Conn, ?MASQUE_CONNECT_IP_PROTOCOL, Headers, Timeout) of
         {ok, _StreamId, Socket, Buffer, RespHeaders} ->
             case validate_response(RespHeaders) of
                 ok ->
@@ -412,6 +414,14 @@ do_upgrade(Conn, Data, Timeout) ->
                     _:_ -> ok
                 end),
             {error, classify_upgrade_error(Reason)}
+    end.
+
+%% `h1:upgrade/4' is a call: its timeout arrives as an exit.
+upgrade(Conn, Protocol, Headers, Timeout) ->
+    try
+        h1:upgrade(Conn, Protocol, Headers, Timeout)
+    catch
+        exit:{timeout, _} -> {error, timeout}
     end.
 
 classify_upgrade_error({http_status, Code, _} = R) -> {handshake_rejected, Code, R};
@@ -522,7 +532,11 @@ deliver_capsule(
     #data{owner = Owner, peer_pending = Pend} = Data
 ) ->
     case masque_ip_capsule:decode_address_request(Inner) of
-        {ok, Entries} ->
+        {ok, Entries0} ->
+            %% Keep at most 64 unanswered proxy requests; a proxy that
+            %% floods them gets the rest ignored.
+            Room = max(0, ?MAX_PEER_PENDING - map_size(Pend)),
+            Entries = lists:sublist(Entries0, Room),
             masque_client_owner:send(Owner, {masque_address_request, self(), Entries}),
             Pend1 = lists:foldl(
                 fun(R, Acc) ->

@@ -11,7 +11,7 @@ This page covers everything you do on the client side of a tunnel: open it with 
 ```
 
 - The proxy URI must be `https://host[:port]` (port defaults to 443).
-- The target is `{Host, Port}` for `udp` and `tcp`, and `{IpTarget, IpProto}` for `ip` (see [connect-ip](connect-ip.md)). Connect-UDP-Bind has its own entry point, `masque:bind_connect/3` (see [connect-udp-bind](connect-udp-bind.md)).
+- The target is `{Host, Port}` for `udp` and `tcp` (`Host` an IP address, as a tuple or text, or a host name; `Port` in 1..65535), and `{IpTarget, IpProto}` for `ip` (see [connect-ip](connect-ip.md)). Connect-UDP-Bind has its own entry point, `masque:bind_connect/3` (see [connect-udp-bind](connect-udp-bind.md)).
 - `connect/2` is `connect/3` with `#{}`.
 - `Sess` is the session pid. It returns only after the proxy answered 2xx (101 on HTTP/1.1 Upgrade). On failure you get `{error, Reason}`; `connect` does not exit the caller.
 
@@ -23,7 +23,7 @@ This page covers everything you do on the client side of a tunnel: open it with 
 | `transports` | `[h3, h2]` | Transports to try. One entry dials only that transport; two or more are raced. Add `h1` as a last resort: `[h3, h2, h1]`. Anything but a list of `h3`, `h2`, `h1` returns `{error, {invalid_opts, {transports, T}}}`. |
 | `prefer_timeout_ms` | `250` | Head start of the first transport before the second one starts. |
 | `h1_prefer_timeout_ms` | `500` | Delay before the third transport starts, counted from the start of the second. |
-| `timeout` | `5000` | Handshake timeout in ms. When racing, the whole race must finish within it. |
+| `timeout` | `5000` | Handshake timeout in ms (a positive integer). When racing, the whole race must finish within it. |
 | `verify` | `verify_peer` | `verify_none` turns certificate checks off. All transports. |
 | `cacerts` | system store | DER trust anchors. All transports. |
 | `ssl_opts` | `[]` | Extra `ssl` client options, merged over the defaults. h2 and h1 only; h3 ignores it. An IPv6 literal proxy (`https://[::1]:443`) gets `inet6` by default. |

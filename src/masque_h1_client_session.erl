@@ -358,7 +358,7 @@ remaining(Deadline) ->
 
 do_upgrade(Conn, Data, Timeout) ->
     Headers = request_headers(Data),
-    case h1:upgrade(Conn, ?MASQUE_CONNECT_UDP_PROTOCOL, Headers, Timeout) of
+    case upgrade(Conn, ?MASQUE_CONNECT_UDP_PROTOCOL, Headers, Timeout) of
         {ok, _StreamId, Socket, Buffer, RespHeaders} ->
             case validate_response(RespHeaders, Data) of
                 ok ->
@@ -380,6 +380,14 @@ do_upgrade(Conn, Data, Timeout) ->
                     _:_ -> ok
                 end),
             {error, classify_upgrade_error(Reason)}
+    end.
+
+%% `h1:upgrade/4' is a call: its timeout arrives as an exit.
+upgrade(Conn, Protocol, Headers, Timeout) ->
+    try
+        h1:upgrade(Conn, Protocol, Headers, Timeout)
+    catch
+        exit:{timeout, _} -> {error, timeout}
     end.
 
 classify_upgrade_error({http_status, Code, _} = R) -> {handshake_rejected, Code, R};

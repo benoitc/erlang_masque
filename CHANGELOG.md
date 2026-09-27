@@ -8,6 +8,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- Client: target hosts must be an IP address or a valid host name and
+  ports 1..65535, so a user-supplied host can no longer inject into the
+  h1 CONNECT request line; the h1 CONNECT-TCP session also refuses
+  control characters there.
+
 - Pool: the connection fingerprint uses the TLS options that take
   effect, so reordered duplicate `ssl_opts` (for example two `verify`
   values) can no longer share a connection dialed with other checks.
@@ -188,6 +193,16 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `bad_ip_version` and `unknown_capsule_type`.
 
 ### Fixed
+
+- Client: IP tuple targets work (they crashed session init);
+  `timeout => infinity` is refused with `{invalid_opts, {timeout, _}}`
+  instead of crashing (it is no longer in `connect_opts()`); bad
+  arguments to `set_mode/2`, `send/3`, `send_capsule/3`, `send_to/3`
+  return `{error, badarg}`; `bind_connect/3` validates its target; an h1
+  upgrade timeout returns `handshake_timeout`; extra headers are
+  filtered and sent lowercase on h2/h3; an empty DATA frame carrying FIN
+  is not delivered as data; CONNECT-IP clients keep at most 64
+  unanswered proxy ADDRESS_REQUEST ids.
 
 - Pool: a connection that received GOAWAY is no longer handed out
   (`{error, goaway}`); a checkout that races the owner's idle timer is
