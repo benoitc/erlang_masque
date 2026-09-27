@@ -372,7 +372,7 @@ open(
     Tag =:= quic_h3; Tag =:= h2
 ->
     New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> {stop, capsule_buffer_overflow};
         false -> drain_capsules(New, Fin, Data)
     end;
@@ -937,8 +937,9 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_CLOSE, Body, Data) ->
         {error, _} ->
             {stop, malformed_capsule}
     end;
-dispatch_capsule(0, Value, #data{transport = h2} = Data) ->
-    %% h2 carries HTTP datagrams as RFC 9297 DATAGRAM capsules (type 0).
+dispatch_capsule(0, Value, Data) ->
+    %% RFC 9297 sec 3.5: a DATAGRAM capsule is an HTTP datagram, on h2
+    %% (where it is the only way) and on h3 alike.
     {ok, handle_inbound_datagram(Value, Data)};
 dispatch_capsule(_Type, _Value, Data) ->
     %% Unknown / unrelated capsules: silently drop per RFC 9297.

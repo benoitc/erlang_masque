@@ -529,7 +529,7 @@ handle_stream_bytes(
     #state{cap_buf = Buf, max_cap = Max} = S
 ) ->
     New = <<Buf/binary, Data/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true ->
             reset_and_stop(capsule_buffer_overflow, S);
         false ->
@@ -573,11 +573,12 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_CLOSE, Body, S) ->
         {ok, Close} -> handle_peer_close(Close, S);
         {error, _} -> reset_and_stop(malformed_capsule, S)
     end;
-dispatch_capsule(0, Value, #state{transport = h2} = S) ->
-    %% h2 carries HTTP datagrams as RFC 9297 DATAGRAM capsules (type 0).
+dispatch_capsule(0, Value, #state{transport = T} = S) ->
+    %% RFC 9297 sec 3.5: a DATAGRAM capsule is an HTTP datagram, on h2
+    %% (where it is the only way) and on h3 alike.
     masque_metrics:bytes_in(
         byte_size(Value),
-        #{protocol => udp_bind, transport => h2}
+        #{protocol => udp_bind, transport => T}
     ),
     handle_inbound_datagram(Value, S);
 dispatch_capsule(Type, Value, S) ->

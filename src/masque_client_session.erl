@@ -295,7 +295,7 @@ open(
     #data{stream_id = StreamId, cap_buf = Buf, max_cap = Max} = Data
 ) ->
     New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> client_stream_abort(capsule_buffer_overflow, Data);
         false -> drain_client_capsules(New, Fin, Data)
     end;
@@ -455,8 +455,21 @@ deliver_packet(
             end
     end.
 
+capsule_datagram(Payload, Data) ->
+    case masque_datagram:decode(Payload) of
+        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} when
+            byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD
+        ->
+            deliver_packet(UdpBytes, Data);
+        _ ->
+            Data
+    end.
+
 drain_client_capsules(Buf, Fin, #data{owner = Owner} = Data) ->
     case masque_capsule:decode(Buf) of
+        {ok, {0, Value, Rest}} ->
+            %% RFC 9297 sec 3.5: a DATAGRAM capsule is an HTTP datagram.
+            drain_client_capsules(Rest, Fin, capsule_datagram(Value, Data#data{cap_buf = <<>>}));
         {ok, {Type, Value, Rest}} ->
             masque_client_owner:send(Owner, {masque_capsule, self(), Type, Value}),
             drain_client_capsules(Rest, Fin, Data#data{cap_buf = <<>>});

@@ -197,7 +197,7 @@ handle_traffic(
     } = S
 ) ->
     New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> reset_and_stop(capsule_buffer_overflow, S);
         false -> drain_capsules(New, Fin, S)
     end;

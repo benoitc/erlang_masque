@@ -171,7 +171,7 @@ handle_info(
 ) ->
     S1 = arm_idle(S),
     New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> {stop, capsule_buffer_overflow, S1};
         false -> step(S1#state{cap_buf = New})
     end;
@@ -185,7 +185,7 @@ handle_info(
 ) ->
     S1 = arm_idle(S),
     New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> {stop, capsule_buffer_overflow, S1};
         false -> step(S1#state{cap_buf = New})
     end;

@@ -471,7 +471,7 @@ handle_stream_bytes(
     } = S
 ) ->
     New = <<Buf/binary, Data/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true ->
             reset_and_stop(capsule_buffer_overflow, S);
         false ->
@@ -485,7 +485,7 @@ handle_stream_bytes(
 drain_capsules(Buf, Fin, S) ->
     case masque_capsule:decode(Buf) of
         {ok, {Type, Value, Rest}} ->
-            case dispatch(handle_capsule, [Type, Value], S) of
+            case capsule_event(Type, Value, S) of
                 {noreply, S2} ->
                     drain_capsules(Rest, Fin, S2#state{cap_buf = <<>>});
                 {stop, _, _} = Stop ->
@@ -503,6 +503,13 @@ drain_capsules(Buf, Fin, S) ->
         {error, _Reason} ->
             reset_and_stop(malformed_capsule, S)
     end.
+
+%% RFC 9297 sec 3.5: a DATAGRAM capsule on the stream is an HTTP
+%% datagram like one sent in a QUIC DATAGRAM frame.
+capsule_event(0, Value, #state{stream_id = StreamId} = S) ->
+    handle_traffic({masque_datagram_in, StreamId, Value}, S);
+capsule_event(Type, Value, S) ->
+    dispatch(handle_capsule, [Type, Value], S).
 
 reset_and_stop(Reason, #state{conn = Conn, stream_id = StreamId} = S) ->
     _ =

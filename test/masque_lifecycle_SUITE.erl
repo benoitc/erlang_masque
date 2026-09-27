@@ -44,6 +44,8 @@
     udp_bind_skips_pool/1,
     h2_slow_start_does_not_block_others/1,
     default_tunnel_cap_is_100/1,
+    h3_datagram_capsule_is_a_datagram/1,
+    h3_many_small_capsules_in_one_write/1,
     listener_name_unique_across_transports/1,
     h3_idle_tunnel_ends/1,
     h2_tcp_receive_window_is_bounded/1,
@@ -110,6 +112,8 @@ all() ->
         udp_bind_skips_pool,
         h2_slow_start_does_not_block_others,
         default_tunnel_cap_is_100,
+        h3_datagram_capsule_is_a_datagram,
+        h3_many_small_capsules_in_one_write,
         listener_name_unique_across_transports,
         h3_idle_tunnel_ends,
         h2_tcp_receive_window_is_bounded,
@@ -238,6 +242,8 @@ extra_opts(h3_send_to_on_proxy_context) ->
         bind_handler => masque_crash_bind_handler,
         handler_opts => HOpts#{early_assign => {{127, 0, 0, 1}, send_to_peer_port()}}
     };
+extra_opts(h3_many_small_capsules_in_one_write) ->
+    #{handler_opts => #{max_capsule_size => 600}};
 extra_opts(h3_idle_tunnel_ends) ->
     #{handler_opts => #{idle_timeout_ms => 300}};
 extra_opts(h2_tcp_receive_window_is_bounded) ->
@@ -597,6 +603,30 @@ h1_udp_bind_pending_limit(Config) ->
     end,
     {open, _} = sys:get_state(Sess),
     ok = masque:close(Sess).
+
+%% RFC 9297 sec 3.5: a DATAGRAM capsule on an h3 stream carries an
+%% HTTP datagram; the proxy handles it like a QUIC DATAGRAM frame.
+h3_datagram_capsule_is_a_datagram(Config) ->
+    {Conn, Sid} = h3_open_udp(Config),
+    Cap = iolist_to_binary(masque_capsule:encode(0, <<0, "via-capsule">>)),
+    ok = quic_h3:send_data(Conn, Sid, Cap, false),
+    receive
+        {quic_h3, Conn, {datagram, Sid, <<0, "via-capsule">>}} -> ok
+    after 5000 -> ct:fail(no_echo)
+    end,
+    quic_h3:close(Conn).
+
+%% Many small complete capsules in one read are not mistaken for one
+%% oversized capsule.
+h3_many_small_capsules_in_one_write(Config) ->
+    {Conn, Sid} = h3_open_udp(Config),
+    Pid = await_session(),
+    One = iolist_to_binary(masque_capsule:encode(16#20, binary:copy(<<1>>, 60))),
+    %% About 1 KiB in one packet, over the 600-byte `max_capsule_size'.
+    ok = quic_h3:send_data(Conn, Sid, binary:copy(One, 16), false),
+    timer:sleep(500),
+    ?assert(is_process_alive(Pid)),
+    quic_h3:close(Conn).
 
 %% One name, one listener: the drain flag is keyed by name.
 listener_name_unique_across_transports(Config) ->

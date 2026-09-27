@@ -263,7 +263,7 @@ open(
     #data{stream_id = StreamId, cap_buf = Buf, max_cap = Max} = Data
 ) ->
     New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> client_stream_abort(capsule_buffer_overflow, Data);
         false -> drain_capsules(New, Fin, Data)
     end;

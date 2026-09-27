@@ -174,7 +174,7 @@ Which module serves which cell:
 
 The h3 module for a request is chosen by `session_module/1` in `masque_server_connection`; h2 and h1 pick it through the supervisor that `start_session/1` routes to by `protocol`.
 
-The capsule decode loop is the same everywhere: bytes append to `cap_buf`; above `max_capsule_size` (`handler_opts`, default 65 536) the session stops with `capsule_buffer_overflow`; a FIN on a capsule boundary is a clean end; a FIN inside a capsule is `truncated_capsule`; a decode error is `malformed_capsule`. h3 decodes with `masque_capsule` (a wrapper over `quic_h3_capsule`), h2 with `h2_capsule`, h1 with `h1_capsule`.
+The capsule decode loop is the same everywhere: bytes append to `cap_buf`; when the capsule still being received (`masque_capsule:pending_size/1`: the declared size of the trailing partial capsule, complete capsules excluded) is above `max_capsule_size` (`handler_opts`, default 65 536) the session stops with `capsule_buffer_overflow`; a DATAGRAM capsule (type 0) is handled as an HTTP datagram on every transport; a FIN on a capsule boundary is a clean end; a FIN inside a capsule is `truncated_capsule`; a decode error is `malformed_capsule`. h3 decodes with `masque_capsule` (a wrapper over `quic_h3_capsule`), h2 with `h2_capsule`, h1 with `h1_capsule`.
 
 ## Teardown matrix
 

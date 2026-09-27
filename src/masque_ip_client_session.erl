@@ -361,7 +361,7 @@ open(
     Tag =:= quic_h3; Tag =:= h2
 ->
     New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> client_stream_abort(capsule_buffer_overflow, Data);
         false -> drain_capsules(New, Fin, Data)
     end;
@@ -752,7 +752,10 @@ decode_one_capsule(#data{transport = h3}, Buf) ->
     end.
 
 deliver_capsule(datagram, Inner, Data) ->
-    %% Only reached on H2.
+    %% h2: `h2_capsule' names the DATAGRAM capsule.
+    handle_inbound_datagram(Inner, Data);
+deliver_capsule(0, Inner, Data) ->
+    %% h3: a DATAGRAM capsule on the stream (RFC 9297 sec 3.5).
     handle_inbound_datagram(Inner, Data);
 deliver_capsule(
     ?MASQUE_CAPSULE_ADDRESS_ASSIGN,

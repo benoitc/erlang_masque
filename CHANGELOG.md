@@ -185,6 +185,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A DATAGRAM capsule on an h3 stream is handled as an HTTP datagram by
+  server and client sessions (RFC 9297 section 3.5).
+- `max_capsule_size` applies to the capsule still being received, not
+  to complete capsules in the same read (`masque_capsule:pending_size/1`).
+
 - CONNECT-TCP: `family => auto` follows the resolved address (IPv6-only
   names work); an aborted tunnel aborts the target with RST (RFC 9113
   section 8.5) instead of FIN.

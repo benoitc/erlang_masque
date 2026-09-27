@@ -495,7 +495,7 @@ dispatch_datagram(Payload, S) ->
 
 handle_stream_bytes(Data, Fin, #state{cap_buf = Buf, max_cap = Max} = S) ->
     New = <<Buf/binary, Data/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> reset_and_stop(capsule_buffer_overflow, S);
         false -> drain_capsules(New, Fin, S)
     end.
@@ -538,7 +538,11 @@ decode_one_capsule(#state{transport = h3}, Buf) ->
     end.
 
 dispatch_capsule(datagram, Inner, S) ->
-    %% H2-only: datagram is a capsule carrying a Context-ID+Payload.
+    %% h2: `h2_capsule' names the DATAGRAM capsule.
+    dispatch_datagram(Inner, S);
+dispatch_capsule(0, Inner, S) ->
+    %% h3: a DATAGRAM capsule on the stream is an HTTP datagram too
+    %% (RFC 9297 sec 3.5).
     dispatch_datagram(Inner, S);
 dispatch_capsule(
     ?MASQUE_CAPSULE_ADDRESS_REQUEST,
