@@ -33,7 +33,7 @@ So a handler that wants a specific status from `init/2` returns `{stop, {reject,
 | Request shape | Extended CONNECT | Extended CONNECT | `GET` + Upgrade (udp, ip, udp-bind), classic `CONNECT host:port` (tcp) |
 | Non-MASQUE requests | `fallback` fun if set, else reject | `fallback` fun if set, else reject | always rejected |
 | `peer` / `peer_cert` in `Req` | yes (`add_peer_info/2`) | no | no |
-| Top-level opts lifted into `handler_opts` | IP, TCP and bind keys | only `address_pool`, `routes`, `mtu` plus the bind keys | IP, TCP and bind keys |
+| Top-level opts lifted into `handler_opts` | `handler_opt_keys/0` in `masque_server` | same | same |
 | Tunnel limit | router counts live + pending sessions | ETS counter `masque_h2_tunnel_counts`, reserved after `accept/1` | none: one tunnel per connection |
 | Session start | router spawns it, unsupervised | `masque_h2_session_sup` (per protocol, `temporary`) | `masque_h1_session_sup` (per protocol, `temporary`) |
 | 2xx sent by | the session, on `{finalize, Router}` | the session, at the end of `init/1` | `h1:accept_upgrade/3` (101) or `h1:accept_connect/3` (200) inside session `init/1` |
@@ -206,7 +206,7 @@ These mechanisms keep a fast side from flooding a slow one.
 - **Client reads (tcp, h2).** The session claims h2 streams with `#{flow_control => manual}` and returns receive credit with `h2:consume/3` only after `handle_data/2` returned, so a target that stops reading stops the client instead of filling the session mailbox. The TCP handler's target socket has a 30 s `send_timeout`, so a target that never reads ends the tunnel. `quic_h3` has no manual receive credit, so CONNECT-TCP over h3 does not get this.
 - **Router datagrams (h3).** The router drops a datagram, and counts it with `backlog_drop_inc/0`, when its session already has 10 000 unprocessed messages. Stream data is never dropped.
 
-Datagram writes (udp, ip, udp-bind) never block: oversize UDP payloads are dropped (RFC 9298 section 5), and on h3 payloads larger than `quic_h3:max_datagram_size/2` are dropped too. h1 sessions read the client socket with `{active, once}` and re-arm after each chunk is processed.
+Datagram writes (udp, ip, udp-bind) never block: oversize UDP payloads are dropped (RFC 9298 section 5), and the h3 UDP session also drops payloads larger than `quic_h3:max_datagram_size/2`; the IP and udp-bind sessions ignore the send error `quic_h3` returns for them. h1 sessions read the client socket with `{active, once}` and re-arm after each chunk is processed.
 
 ## Duplicated code and drift
 

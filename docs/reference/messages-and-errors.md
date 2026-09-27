@@ -56,7 +56,7 @@ When `transports` lists more than one transport, the session first belongs to a 
 | `{ssl_error, Reason}` | TLS socket error on the upgraded h1 connection. | h1 |
 | `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` | The proxy sent a bad capsule, ended the stream mid-capsule, or a capsule larger than `max_capsule_size` (default 65536). The session resets the stream. | UDP and IP on h2/h3 |
 
-udp-bind sessions report differently: they send `{masque_closed, Sess, Reason}` from `terminate/3` whenever they stop in `message` mode, with the process exit reason. A clean end (the proxy's FIN, or your own `masque:close/1`) arrives as `normal`; other values include `peer_reset`, `peer_closed`, `goaway`, `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` and `{ssl_error, _}`. A handshake failure can also be reported this way, with the handshake reason, in addition to the `{error, _}` returned by `bind_connect/3`.
+udp-bind sessions report differently: they send `{masque_closed, Sess, Reason}` from `terminate/3` whenever they stop in `message` mode, with the process exit reason. A clean end (the proxy's FIN, or your own `masque:close/1`) arrives as `normal`; other values include `peer_reset`, `peer_closed`, `goaway`, `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` and `{ssl_error, _}`. A failed handshake is only reported as the `{error, _}` returned by `bind_connect/3`; no `masque_closed` follows it.
 
 ## Results of client calls
 
@@ -109,7 +109,7 @@ Racing and pooling (`upstream_pool => true`):
 | Reason | Cause |
 | --- | --- |
 | `{race_timeout, Last}` | no transport won before `timeout`; `Last` is the last attempt's error, or `undefined` |
-| `{owner_transfer_failed, Other}` | the winning session did not accept `{set_owner, _}`; the race continues with the others and this surfaces only if it was the last |
+| `{owner_transfer_failed, Other}` | the winning session answered `{set_owner, _}` with something other than `ok`; the race continues with the others and this surfaces only if it was the last. If the call itself fails (the session died, a timeout), that exit reason surfaces instead |
 | `timeout` | a pooled dial did not finish within `checkout_timeout_ms` (default 60 s) |
 | `{dial_failed, R}`, `{dial_crashed, {Class, R}}` | the pooled connection could not be dialed |
 | `shutdown` | the pool was closed while you waited |
@@ -146,7 +146,7 @@ When several transports race, the reason you get is the last attempt's reason, n
 
 Queue-mode datagram tunnels do not fail when the queue is full: they drop and count (`rx_dropped` in `masque:info/1`).
 
-Calls a session does not implement are not all handled: CONNECT-IP and udp-bind sessions have no catch-all call clause in `open`, so `masque:send/2` or `masque:shutdown_write/1` on them crashes the session.
+Every client session answers a call it does not implement: `{error, not_ready}` while connecting, `{error, not_supported}` when open, `{error, closing}` while closing. The session keeps running.
 
 `masque:close/1` always returns `ok`.
 
