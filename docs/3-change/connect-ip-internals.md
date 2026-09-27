@@ -43,6 +43,7 @@ Each successful assignment bumps `ip_assign_inc/0` and emits `address_assigned` 
 - Writes go through the server. `register/5` refuses any overlap with an existing range, so at most one range covers an address.
 - `lookup/1` reads ETS directly (`ets:prev/2` to the closest start, then an end check), so lookups do not queue on the server.
 - Every registration monitors the session; on `'DOWN'` the session's ranges are removed.
+- The table is created by `masque_sup` (`new_table/0`), so a crash of the registry does not lose the assignments; the restarted registry monitors the sessions found in the table again and drops the rows of dead ones.
 - `release/4` removes a range only for the pid that owns it. The handler releases its ranges in `terminate/2` and emits `address_released`.
 - All write calls are no-ops when the registry is not running. In that case `register/5` returns `ok`, so sessions sharing a pool are no longer kept apart.
 

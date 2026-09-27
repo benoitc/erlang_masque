@@ -26,6 +26,7 @@
 -behaviour(gen_server).
 
 -export([start_link/0]).
+-export([new_table/0]).
 -export([register/5, release/3, release/4, release_pid/1, lookup/1, all/0]).
 
 -export([
@@ -101,6 +102,22 @@ release(V, Addr, Pfx, Pid) when (V =:= 4 orelse V =:= 6), is_pid(Pid) ->
 
 %% Release every range owned by `Pid`. Used by the registry's
 %% own `'DOWN'` handler; exposed for tests and explicit cleanup.
+%% Create the assignment table. Called by `masque_sup' so the table
+%% outlives this process.
+-spec new_table() -> ok.
+new_table() ->
+    _ = ets:new(
+        ?TABLE,
+        [
+            ordered_set,
+            named_table,
+            public,
+            {read_concurrency, true},
+            {write_concurrency, true}
+        ]
+    ),
+    ok.
+
 -spec release_pid(pid()) -> ok.
 release_pid(Pid) when is_pid(Pid) ->
     case whereis(?MODULE) of
@@ -139,18 +156,35 @@ all() ->
 %% gen_server callbacks
 %%====================================================================
 
+%% The table is created by `masque_sup' (see `new_table/0') so it
+%% survives a crash of this process; a restarted registry monitors the
+%% sessions it finds there again and drops rows of dead ones. Without
+%% the application (unit tests) the registry creates it itself.
 init([]) ->
-    _ = ets:new(
-        ?TABLE,
-        [
-            ordered_set,
-            named_table,
-            public,
-            {read_concurrency, true},
-            {write_concurrency, true}
-        ]
-    ),
-    {ok, #state{}}.
+    case ets:whereis(?TABLE) of
+        undefined ->
+            new_table(),
+            {ok, #state{}};
+        _ ->
+            {ok, #state{monitors = remonitor()}}
+    end.
+
+remonitor() ->
+    ets:foldl(
+        fun({{V, Start} = Key, _End, Pfx, Pid, _Ctx, _OldRef}, Mons) ->
+            case is_process_alive(Pid) of
+                true ->
+                    MRef = erlang:monitor(process, Pid),
+                    true = ets:update_element(?TABLE, Key, {6, MRef}),
+                    Mons#{MRef => [{V, Start, Pfx} | maps:get(MRef, Mons, [])]};
+                false ->
+                    ets:delete(?TABLE, Key),
+                    Mons
+            end
+        end,
+        #{},
+        ?TABLE
+    ).
 
 handle_call({register, V, Addr, Pfx, Pid, Ctx}, _From, S) ->
     case to_int(V, Addr) of

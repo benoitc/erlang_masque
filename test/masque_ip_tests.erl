@@ -163,3 +163,10 @@ non_address_is_not_public_test() ->
     ?assertNot(masque_ip:is_public([{8, 8, 8, 8}])),
     ?assertNot(masque_ip:is_public(undefined)),
     ?assertNot(masque_ip:is_public(<<"8.8.8.8">>)).
+
+special_purpose_ipv6_not_public_test() ->
+    ?assertNot(masque_ip:is_public({16#2001, 2, 0, 0, 0, 0, 0, 1})),
+    ?assertNot(masque_ip:is_public({16#2001, 16#10, 0, 0, 0, 0, 0, 1})),
+    ?assertNot(masque_ip:is_public({0, 0, 0, 0, 16#FFFF, 0, 16#0A00, 1})),
+    %% Globally reachable neighbours stay public (AMT 2001:3::/32).
+    ?assert(masque_ip:is_public({16#2001, 3, 0, 0, 0, 0, 0, 1})).

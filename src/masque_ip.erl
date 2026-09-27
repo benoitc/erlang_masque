@@ -196,6 +196,9 @@ is_public({0, 0, 0, 0, 0, 0, _, _}) ->
 %% ::ffff:0:0/96 mapped v4
 is_public({0, 0, 0, 0, 0, 16#FFFF, _, _}) ->
     false;
+%% ::ffff:0:0:0/96 IPv4-translated (SIIT, RFC 6052 / RFC 7915)
+is_public({0, 0, 0, 0, 16#FFFF, 0, _, _}) ->
+    false;
 %% 64:ff9b::/96 NAT64 and 64:ff9b:1::/48 local-use NAT64
 is_public({16#64, 16#FF9B, _, _, _, _, _, _}) ->
     false;
@@ -205,6 +208,11 @@ is_public({16#100, _, _, _, _, _, _, _}) ->
 %% teredo
 is_public({16#2001, 0, _, _, _, _, _, _}) ->
     false;
+%% benchmarking 2001:2::/48
+is_public({16#2001, 2, 0, _, _, _, _, _}) ->
+    false;
+%% ORCHID (deprecated) 2001:10::/28
+is_public({16#2001, B, _, _, _, _, _, _}) when B >= 16#10, B =< 16#1F -> false;
 %% documentation
 is_public({16#2001, 16#DB8, _, _, _, _, _, _}) ->
     false;

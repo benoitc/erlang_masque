@@ -377,3 +377,13 @@ route_advertisement_large_list_is_fast_test() ->
                 }
             ],
     ?assertError(proto_zero_overlap, masque_ip_capsule:encode_route_advertisement(Bad)).
+
+%% A /0 prefix is canonical only with an all-zero address.
+address_assign_non_canonical_zero_prefix_test() ->
+    BadBody = <<1, 4:8, 1:8, 2:8, 3:8, 4:8, 0:8>>,
+    ?assertEqual(
+        {error, non_canonical_prefix},
+        masque_ip_capsule:decode_address_assign(BadBody)
+    ),
+    Ok = <<1, 4:8, 0:8, 0:8, 0:8, 0:8, 0:8>>,
+    ?assertMatch({ok, [_]}, masque_ip_capsule:decode_address_assign(Ok)).

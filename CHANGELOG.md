@@ -194,6 +194,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `1.2.3.4/0` is no longer accepted as a canonical prefix (capsules and
+  CONNECT-IP targets).
+- `masque_ip:is_public/1` also rejects 2001:2::/48, 2001:10::/28 and
+  ::ffff:0:0:0/96.
+- The CONNECT-IP address registry keeps its assignments across a
+  restart of its process (its table is owned by `masque_sup`).
+
 - Client: IP tuple targets work (they crashed session init);
   `timeout => infinity` is refused with `{invalid_opts, {timeout, _}}`
   instead of crashing (it is no longer in `connect_opts()`); bad
