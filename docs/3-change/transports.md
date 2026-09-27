@@ -54,7 +54,7 @@ sequenceDiagram
 - **Close on reject.** A rejected Upgrade or CONNECT gets `connection: close` and the connection is closed (RFC 9931), so later bytes cannot be taken as part of the rejected request.
 - **One tunnel per connection.** After 101 or 200 the socket belongs to the tunnel, so there is no tunnel counting and no pooling on h1.
 - **No half-close.** OTP `ssl` drops the connection when it receives the peer's `close_notify`, so a TLS tunnel cannot half-close. On h1 a CONNECT-TCP FIN in either direction ends the tunnel.
-- **Idle timer.** Only the h1 server sessions have one (`idle_timeout_ms`, see [server internals](server-internals.md#h1-path)).
+- **Idle timer.** Every server session has one (`idle_timeout_ms`, see [server internals](server-internals.md#h1-path)).
 
 ### Tunnel counting
 

@@ -23,7 +23,7 @@
 -module(masque_server).
 -moduledoc false.
 
--export([handler_opt_keys/0]).
+-export([handler_opt_keys/0, name_in_use/2]).
 -export([
     start_listener/2,
     stop_listener/1,
@@ -60,6 +60,12 @@
 -spec start_listener(listener_name(), listener_opts()) ->
     {ok, pid()} | {error, term()}.
 start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
+    case name_in_use(Name, h3) of
+        none -> start_h3_listener(Name, Opts0);
+        Transport -> {error, {name_in_use, Transport}}
+    end.
+
+start_h3_listener(Name, Opts0) ->
     persistent_term:erase({masque_drain, Name}),
     Opts = defaults(Opts0),
     Port = maps:get(port, Opts),
@@ -144,7 +150,7 @@ h3_handlers(Opts0) ->
         fallback => Fallback,
         name => DrainKey
     },
-    MaxTunnels = maps:get(max_tunnels_per_connection, Opts, 0),
+    MaxTunnels = maps:get(max_tunnels_per_connection, Opts, ?MASQUE_DEFAULT_MAX_TUNNELS),
     ConnectionHandler = fun(ConnPid) ->
         {ok, Router} = masque_server_connection:start_link(MaxTunnels, ConnPid),
         #{
@@ -326,7 +332,11 @@ spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req) ->
                 {error, already_activated} ->
                     %% Session started after timeout. Tunnel is live.
                     ok
-            end
+            end;
+        exit:_ ->
+            %% The router is gone, so is the connection: nothing to
+            %% answer on.
+            ok
     end.
 
 add_peer_info(Conn, Req) ->
@@ -513,8 +523,10 @@ reject(Conn, StreamId, Reason, ExtraHeaders) ->
         {<<"proxy-status">>, proxy_status_field(Reason)}
     ],
     Headers = merge_extra_headers(Base, ExtraHeaders),
-    ok = quic_h3:send_response(Conn, StreamId, Status, Headers),
-    ok = quic_h3:send_data(Conn, StreamId, Body, true).
+    %% The stream may already be gone (client reset): nothing to do.
+    _ = quic_h3:send_response(Conn, StreamId, Status, Headers),
+    _ = quic_h3:send_data(Conn, StreamId, Body, true),
+    ok.
 
 %% Caller-supplied headers win on collision so apps can override the
 %% proxy-status / content-type defaults. Order: ExtraHeaders first
@@ -563,6 +575,11 @@ handler_opt_keys() ->
         address_pool,
         routes,
         mtu,
+        max_assignments,
+        allowed_source_prefixes,
+        allow_ip,
+        allow_self,
+        self_addresses,
         resolver,
         allow,
         family,
@@ -583,3 +600,23 @@ handler_opt_keys() ->
         max_compression_contexts_out,
         max_pending_compression_responses
     ].
+
+%% Listener names are shared by the drain flags of every transport, so
+%% one name may only be used by one listener. Returns the transport
+%% (other than `Self') already using `Name', or `none'.
+-spec name_in_use(atom(), h3 | h2 | h1) -> none | h3 | h2 | h1.
+name_in_use(Name, Self) ->
+    Used = [
+        T
+     || {T, InUse} <- [
+            {h3, fun() -> element(1, quic:get_server_port(Name)) =:= ok end},
+            {h2, fun() -> persistent_term:get({masque_h2_ref, Name}, undefined) =/= undefined end},
+            {h1, fun() -> persistent_term:get({masque_h1_ref, Name}, undefined) =/= undefined end}
+        ],
+        T =/= Self,
+        InUse()
+    ],
+    case Used of
+        [T | _] -> T;
+        [] -> none
+    end.

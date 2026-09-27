@@ -17,6 +17,11 @@ start_link() ->
 
 -spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
+    %% CONNECT-IP address assignments: owned here so a registry
+    %% restart does not lose them.
+    ok = masque_ip_session_registry:new_table(),
+    %% Cache of the host's interface addresses (`masque_ip:is_self/2').
+    _ = ets:new(masque_self_addrs, [set, public, named_table, {read_concurrency, true}]),
     %% ETS table for h2 per-connection tunnel counting.
     _ = ets:new(
         masque_h2_tunnel_counts,

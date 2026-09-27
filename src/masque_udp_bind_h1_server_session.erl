@@ -15,6 +15,7 @@
 
 -export([
     init/1,
+    handle_continue/2,
     handle_call/3,
     handle_cast/2,
     handle_info/2,
@@ -58,7 +59,37 @@ start_link(Args) ->
 
 %% A tunnel counts as open once `init_session/1' succeeded: the 2xx is
 %% sent and the stream (or socket) is ours. `terminate/2' closes it.
+%% With a `starter' (h2 and h1 listeners) the real start runs in
+%% `handle_continue/2' so the session supervisor is not held up (see
+%% `masque_session_start'). `start/1' returns `{stop, R}' when nothing
+%% was sent, `{stop, R, S}' once the handler started, so `terminate/2'
+%% cleans up and the listener stays silent.
 init(Args) ->
+    case masque_session_start:deferred(Args) of
+        true ->
+            {ok, {starting, Args}, {continue, start}};
+        false ->
+            case start(Args) of
+                {ok, S} -> {ok, S};
+                {stop, Reason} -> {stop, Reason};
+                {stop, Reason, _S} -> {stop, Reason}
+            end
+    end.
+
+handle_continue(start, {starting, Args}) ->
+    case start(Args) of
+        {ok, S} ->
+            masque_session_start:report(Args, ok),
+            {noreply, S};
+        {stop, Reason} ->
+            masque_session_start:report(Args, {error, Reason}),
+            {stop, normal, {starting, Args}};
+        {stop, Reason, S} ->
+            masque_session_start:report(Args, {error, {responded, Reason}}),
+            {stop, {shutdown, Reason}, S}
+    end.
+
+start(Args) ->
     case init_session(Args) of
         {ok, S} ->
             masque_metrics:tunnel_opened(#{protocol => udp_bind, transport => h1}),
@@ -119,7 +150,6 @@ init_session(#{
                         ),
                         cap_buf = Buffer,
                         max_cap = MaxCap,
-                        start_time = erlang:monotonic_time(millisecond),
                         idle_ms = IdleMs,
                         max_pending = maps:get(
                             max_pending_compression_responses,
@@ -130,9 +160,8 @@ init_session(#{
                     case drain_and_arm(State0) of
                         {ok, State1} ->
                             apply_init_actions(OtherActions, State1);
-                        {stop, Reason, _S} ->
-                            _ = close_socket(State0),
-                            {stop, Reason}
+                        {stop, Reason, S2} ->
+                            {stop, Reason, S2}
                     end;
                 {error, Reason} ->
                     try_callback(
@@ -158,7 +187,7 @@ handle_info(
 ) ->
     S1 = arm_idle(S),
     New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> {stop, capsule_buffer_overflow, S1};
         false -> step(S1#state{cap_buf = New})
     end;
@@ -168,7 +197,7 @@ handle_info(
 ) ->
     S1 = arm_idle(S),
     New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> {stop, capsule_buffer_overflow, S1};
         false -> step(S1#state{cap_buf = New})
     end;
@@ -184,9 +213,12 @@ handle_info({tcp_error, Sock, Reason}, #state{socket = Sock} = S) ->
     {stop, {tcp_error, Reason}, S};
 handle_info({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
+%% Target-side traffic counts for the idle timer too.
 handle_info(Msg, S) ->
-    dispatch(handle_info, [Msg], S).
+    dispatch(handle_info, [Msg], arm_idle(S)).
 
+terminate(_Reason, {starting, Args}) ->
+    masque_session_start:abandon(Args);
 terminate(
     Reason,
     #state{
@@ -235,10 +267,7 @@ drain_and_arm(S) ->
     end.
 
 apply_init_actions(Actions, State) ->
-    case do_actions(Actions, State) of
-        {ok, S2} -> {ok, S2};
-        {stop, R, _} -> {stop, R}
-    end.
+    do_actions(Actions, State).
 
 dispatch_capsule(datagram, Inner, S) ->
     handle_inbound_datagram(Inner, S);
@@ -278,8 +307,21 @@ handle_context_zero(Inner, #state{bind_scope = scoped} = S) ->
 handle_context_zero(_Inner, S) ->
     drop(context_zero, S).
 
+%% Contexts are two-way: a datagram may use one the client opened
+%% (peer table) or an installed one we opened (own table).
+lookup_context(Ctx, #state{peer_table = PT, own_table = OT}) ->
+    case masque_compression_table:lookup_by_id(PT, Ctx) of
+        {ok, _} = Found ->
+            Found;
+        not_found ->
+            case masque_compression_table:lookup_by_id(OT, Ctx) of
+                {ok, #compression_entry{state = installed}} = Found -> Found;
+                _ -> not_found
+            end
+    end.
+
 handle_known_context(Ctx, Inner, S) ->
-    case masque_compression_table:lookup_by_id(S#state.peer_table, Ctx) of
+    case lookup_context(Ctx, S) of
         {ok, #compression_entry{ip_version = 0}} ->
             case masque_udp_bind_payload:decode_uncompressed(Inner) of
                 {ok, {_V, IP, Port}, Pkt} ->
@@ -400,7 +442,7 @@ do_actions([{compression_ack, Id} | Rest], S) ->
     do_actions(Rest, S);
 do_actions([{compression_close, Id} | Rest], S) ->
     send_capsule(#compression_close{context_id = Id}, S),
-    do_actions(Rest, S);
+    do_actions(Rest, forget_context(Id, S));
 do_actions([{send_capsule, Type, Value} | Rest], S) ->
     Bytes = iolist_to_binary(masque_capsule:encode(Type, Value)),
     send_bytes(Bytes, S),
@@ -435,6 +477,20 @@ open_compression(IP, Port, #state{own_table = OT} = S) ->
                 {error, _} ->
                     masque_metrics:bind_drop_inc(other),
                     S
+            end
+    end.
+
+%% Our own CLOSE removes the context from whichever table holds it,
+%% so we stop using it and ignore a CLOSE or ACK that crosses ours.
+forget_context(Id, #state{own_table = OT, peer_table = PT} = S) ->
+    Close = #compression_close{context_id = Id},
+    case masque_compression_table:install_close(OT, Close) of
+        {ok, OT2} ->
+            S#state{own_table = OT2};
+        {error, _} ->
+            case masque_compression_table:install_close(PT, Close) of
+                {ok, PT2} -> S#state{peer_table = PT2};
+                {error, _} -> S
             end
     end.
 
@@ -485,7 +541,19 @@ send_bind_payload({IP, Port}, UdpPayload, S) ->
         ->
             send_compressed_inline(Id, UdpPayload, S);
         _ ->
-            try_uncompressed_fallback(Tuple, UdpPayload, S)
+            case peer_compressed(S#state.peer_table, Tuple) of
+                {ok, Id} -> send_compressed_inline(Id, UdpPayload, S);
+                not_found -> try_uncompressed_fallback(Tuple, UdpPayload, S)
+            end
+    end.
+
+%% A compressed context the client opened for this peer.
+peer_compressed(Table, Tuple) ->
+    case masque_compression_table:lookup_by_tuple(Table, Tuple) of
+        {ok, #compression_entry{context_id = Id, ip_version = V}} when V =:= 4; V =:= 6 ->
+            {ok, Id};
+        _ ->
+            not_found
     end.
 
 try_uncompressed_fallback(Tuple, UdpPayload, S) ->

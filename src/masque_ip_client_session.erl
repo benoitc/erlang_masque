@@ -45,6 +45,8 @@
     ]}
 ).
 
+-define(MAX_PEER_PENDING, 64).
+
 -record(data, {
     owner :: pid(),
     owner_ref :: reference(),
@@ -291,6 +293,13 @@ connecting(
     #data{owner_ref = Ref}
 ) ->
     {stop, owner_gone};
+%% Stream data that overtakes the 2xx (a pooled stream gets its data
+%% straight from the transport, the response through the pool owner)
+%% waits until the tunnel is open.
+connecting(info, {Tag, _Conn, {data, StreamId, _, _}}, #data{stream_id = StreamId}) when
+    is_integer(StreamId), (Tag =:= quic_h3 orelse Tag =:= h2)
+->
+    {keep_state_and_data, [postpone]};
 connecting(info, _Msg, Data) ->
     {keep_state, Data};
 connecting({call, From}, info, Data) ->
@@ -361,7 +370,7 @@ open(
     Tag =:= quic_h3; Tag =:= h2
 ->
     New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> client_stream_abort(capsule_buffer_overflow, Data);
         false -> drain_capsules(New, Fin, Data)
     end;
@@ -426,7 +435,7 @@ closing(internal, do_close, Data) ->
                     _:_ -> ok
                 end
         end,
-    _ = session_teardown(Data),
+    _ = session_teardown(Data, graceful),
     {stop, normal, Data};
 closing({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, closing}}]};
@@ -451,6 +460,15 @@ terminate(_Reason, _State, Data) ->
 
 %% Close path abstraction: release the pooled stream back to the
 %% owner, or shut down the owned transport connection.
+%% After our FIN a pooled stream is handed back without a reset, so
+%% bytes still in flight reach the proxy.
+session_teardown(#data{pool_owner = Pool, stream_id = StreamId}, graceful) when
+    is_pid(Pool), is_integer(StreamId)
+->
+    masque_upstream_owner:release_stream(Pool, StreamId, graceful);
+session_teardown(Data, graceful) ->
+    session_teardown(Data).
+
 session_teardown(#data{pool_owner = Pool, stream_id = StreamId}) when
     is_pid(Pool), is_integer(StreamId)
 ->
@@ -666,12 +684,14 @@ sanitise_extra_headers(List) when is_list(List) ->
         <<":protocol">>,
         <<"capsule-protocol">>
     ],
+    %% h2 and h3 field names are lowercase; compare and send them so.
     [
-        {K, V}
+        {Name, V}
      || {K, V} <- List,
         is_binary(K),
         is_binary(V),
-        not lists:member(K, Reserved)
+        Name <- [string:lowercase(K)],
+        not lists:member(Name, Reserved)
     ].
 
 split_url(<<"https://", Rest/binary>>) ->
@@ -752,7 +772,10 @@ decode_one_capsule(#data{transport = h3}, Buf) ->
     end.
 
 deliver_capsule(datagram, Inner, Data) ->
-    %% Only reached on H2.
+    %% h2: `h2_capsule' names the DATAGRAM capsule.
+    handle_inbound_datagram(Inner, Data);
+deliver_capsule(0, Inner, Data) ->
+    %% h3: a DATAGRAM capsule on the stream (RFC 9297 sec 3.5).
     handle_inbound_datagram(Inner, Data);
 deliver_capsule(
     ?MASQUE_CAPSULE_ADDRESS_ASSIGN,
@@ -772,7 +795,11 @@ deliver_capsule(
     #data{owner = Owner, peer_pending = Pend} = Data
 ) ->
     case masque_ip_capsule:decode_address_request(Inner) of
-        {ok, Entries} ->
+        {ok, Entries0} ->
+            %% Keep at most 64 unanswered proxy requests; a proxy that
+            %% floods them gets the rest ignored.
+            Room = max(0, ?MAX_PEER_PENDING - map_size(Pend)),
+            Entries = lists:sublist(Entries0, Room),
             masque_client_owner:send(Owner, {masque_address_request, self(), Entries}),
             Pend1 = lists:foldl(
                 fun(R, Acc) ->

@@ -10,7 +10,7 @@ Every listener runs the same eight steps for each request. The steps are written
 2. **Validate.** Method, `:protocol` (or `Upgrade` on h1), `:scheme` and `:authority` presence, then the path is matched against the protocol's URI template (`masque_uri`, `masque_uri_ip`, `masque_uri_udp_bind`). The result is the request map `Req` that handlers receive.
 3. **Target resolution.** `masque_ip:resolve_target/3` resolves only CONNECT-IP hostname targets, with the listener's `resolver` (default: `inet_res` A + AAAA), and stores `resolved_addresses` in `Req`. UDP and TCP targets pass through untouched: their handler resolves them in `init/2`.
 4. **Accept gate.** The handler's `accept/1`, or `masque_handler:default_accept/1` when not exported. `{reject, Reason}` and `{reject, Reason, ExtraHeaders}` end the request here.
-5. **Tunnel limit.** `max_tunnels_per_connection` (default 0, unlimited). Where it is counted differs per transport, see below.
+5. **Tunnel limit.** `max_tunnels_per_connection` (default 100; `0` means unlimited). Where it is counted differs per transport, see below.
 6. **Spawn session.** One server session process per tunnel. The session runs the handler's `init/2`.
 7. **2xx.** Sent only after `init/2` succeeded, so a 2xx means the tunnel is ready (RFC 9298 section 3). On h3 this is the separate [finalize](#async-finalize) step.
 8. **Reject.** Any failure above is answered by the listener's `reject/3,4`: the status from `masque_errors:handshake_status/1`, a `text/plain` body with `masque_errors:status_reason/1`, and a `proxy-status: masque; error=...` header (RFC 9209). Caller headers from `{reject, _, Extra}` win on collision. `masque_metrics:tunnel_rejected/1` is bumped.
@@ -33,7 +33,7 @@ So a handler that wants a specific status from `init/2` returns `{stop, {reject,
 | Request shape | Extended CONNECT | Extended CONNECT | `GET` + Upgrade (udp, ip, udp-bind), classic `CONNECT host:port` (tcp) |
 | Non-MASQUE requests | `fallback` fun if set, else reject | `fallback` fun if set, else reject | always rejected |
 | `peer` / `peer_cert` in `Req` | yes (`add_peer_info/2`) | no | no |
-| Top-level opts lifted into `handler_opts` | IP, TCP and bind keys | only `address_pool`, `routes`, `mtu` plus the bind keys | IP, TCP and bind keys |
+| Top-level opts lifted into `handler_opts` | `handler_opt_keys/0` in `masque_server` | same | same |
 | Tunnel limit | router counts live + pending sessions | ETS counter `masque_h2_tunnel_counts`, reserved after `accept/1` | none: one tunnel per connection |
 | Session start | router spawns it, unsupervised | `masque_h2_session_sup` (per protocol, `temporary`) | `masque_h1_session_sup` (per protocol, `temporary`) |
 | 2xx sent by | the session, on `{finalize, Router}` | the session, at the end of `init/1` | `h1:accept_upgrade/3` (101) or `h1:accept_connect/3` (200) inside session `init/1` |
@@ -122,7 +122,7 @@ Why each piece exists, as the code comments state it:
 
 The listener's `start_session` call times out after 30 s (the init worker's `gen_server:start` also has a 30 s timeout). On timeout the listener calls `cancel_pending/2`:
 
-- stream still in the worker stage: the entry is removed and the listener rejects with 502; when the worker finishes, the router finds no entry and stops the session with reason `cancelled`;
+- stream still in the worker stage: the entry is removed and the listener rejects with 502; when the worker finishes, the router finds no entry and casts `connection_closed` to the session, which stops without writing to the stream (the 502 is already there) and without the router waiting for it;
 - stream in the finalizing stage, or already live: `{error, already_activated}`; the listener sends nothing, because a 2xx may already be on the wire.
 
 A finalize that fails (the stream is gone) makes the session stop with `stream_dead` and the router reply `{error, stream_dead}`; the listener then stays silent for the same reason.
@@ -133,7 +133,13 @@ A peer reset of a pending stream reaches the router, which drops the pending ent
 
 There is no router. `h2` delivers stream events to whichever process registered with `h2:set_stream_handler/3`, and connection-wide events (`{closed, R}`, `{goaway, LastId, Code}`) to every registered stream handler. So the session can register itself and needs nobody to demultiplex.
 
-`dispatch_request_1/6` in `masque_h2_server` runs the pipeline, reserves a slot with `try_reserve_tunnel/2` when a limit is set, and starts the session under the per-protocol supervisor. The session runs `init/2`, sends the 200, claims the stream and runs the init actions, all inside its own `init/1`. If the session fails to start, the listener rejects and gives the slot back with `release_tunnel/1`; otherwise the session releases it in `terminate/2`. The counter row for a connection is created on first reservation, and a small watcher process deletes it when the h2 connection dies.
+`dispatch_request_1/6` in `masque_h2_server` runs the pipeline, reserves a slot with `try_reserve_tunnel/2` when a limit is set, and starts the session under the per-protocol supervisor through `await/2` in `masque_session_start`. The session's `init/1` returns at once (`{continue, start}`), so the supervisor is never held up by a slow handler; `handle_continue/2` runs `init/2`, sends the 200, claims the stream and runs the init actions, then reports to the waiting dispatch process:
+
+- `ok`: the tunnel is open;
+- `{error, R}`: nothing was sent; the listener rejects;
+- `{error, {responded, R}}`: the 200 is out; the listener stays silent and the session resets the stream itself.
+
+The session always gives the tunnel slot back in `terminate/2` (including the `{starting, Args}` state of a start that failed). The listener releases it only when no session ran: the supervisor refused the child, or the start timed out (30 s) and the session was killed. The counter row for a connection is created on first reservation, and a small watcher process deletes it when the h2 connection dies.
 
 The UDP path has its own module, `masque_h2_server_session`; TCP, IP and udp-bind reuse the h3 modules with `transport = h2`.
 
@@ -141,9 +147,9 @@ The UDP path has its own module, `masque_h2_server_session`; TCP, IP and udp-bin
 
 `validate/6` in `masque_h1_server` splits on the method: `GET` needs `Host`, `Connection: Upgrade`, `Upgrade: connect-udp | connect-ip` and `Capsule-Protocol: ?1`; `CONNECT` needs an authority-form target whose `Host` header names the same host and port. See [transports](transports.md) for the wire difference.
 
-The session runs `init/2` first, so a handler rejection still has a plain HTTP connection to answer on. Then it calls `h1:accept_upgrade/3` (writes 101) or `h1:accept_connect/3` (writes 200). Both hand the raw TLS socket and any bytes already read past the header block to the session. From then on the session owns the socket, reads it with `{active, once}`, and there is no HTTP layer left.
+The session starts the same way as on h2 (`masque_session_start`, reported from `handle_continue/2`). It runs `init/2` first, so a handler rejection still has a plain HTTP connection to answer on. Then it calls `h1:accept_upgrade/3` (writes 101) or `h1:accept_connect/3` (writes 200). Both hand the raw TLS socket and any bytes already read past the header block to the session. From then on the session owns the socket, reads it with `{active, once}`, and there is no HTTP layer left.
 
-h1 sessions also have an idle timer, `idle_timeout_ms` in `handler_opts` (default 300 000 ms; `infinity` disables it, and so does `0` except in the udp-bind h1 session, where `0` fires at once). It is re-armed on inbound socket bytes only, so a tunnel that only sends toward the client still idles out. h2 and h3 sessions have no idle timer (Q6 in [decisions](decisions.md)).
+Every server session has an idle timer, `idle_timeout_ms` in `handler_opts` (default 300 000 ms; `infinity` disables it). Traffic in either direction re-arms it: on h1, inbound socket bytes and any message from the handler's target; on h3 and h2, every message the session handles (`masque_idle` keeps a timestamp and one timer, so a busy tunnel costs no timer churn). An idle tunnel stops with `idle_timeout`.
 
 ## Session anatomy
 
@@ -168,7 +174,7 @@ Which module serves which cell:
 
 The h3 module for a request is chosen by `session_module/1` in `masque_server_connection`; h2 and h1 pick it through the supervisor that `start_session/1` routes to by `protocol`.
 
-The capsule decode loop is the same everywhere: bytes append to `cap_buf`; above `max_capsule_size` (`handler_opts`, default 65 536) the session stops with `capsule_buffer_overflow`; a FIN on a capsule boundary is a clean end; a FIN inside a capsule is `truncated_capsule`; a decode error is `malformed_capsule`. h3 decodes with `masque_capsule` (a wrapper over `quic_h3_capsule`), h2 with `h2_capsule`, h1 with `h1_capsule`.
+The capsule decode loop is the same everywhere: bytes append to `cap_buf`; when the capsule still being received (`masque_capsule:pending_size/1`: the declared size of the trailing partial capsule, complete capsules excluded) is above `max_capsule_size` (`handler_opts`, default 65 536) the session stops with `capsule_buffer_overflow`; a DATAGRAM capsule (type 0) is handled as an HTTP datagram on every transport; a FIN on a capsule boundary is a clean end; a FIN inside a capsule is `truncated_capsule`; a decode error is `malformed_capsule`. h3 decodes with `masque_capsule` (a wrapper over `quic_h3_capsule`), h2 with `h2_capsule`, h1 with `h1_capsule`.
 
 ## Teardown matrix
 
@@ -187,18 +193,20 @@ What the server session does when each event happens. "Reset" means the stream i
 | Target error (handler returns `{stop, Reason, S}`) | udp: reset `H3_MESSAGE_ERROR`; tcp: `target_closed` or `eof_timeout` end with FIN, anything else resets with `H3_CONNECT_ERROR`; ip: FIN; udp-bind: reset `H3_INTERNAL_ERROR` | same shape with `protocol_error`, `connect_error`, FIN, `internal_error` | the socket is closed |
 | `close_session` action | stop `normal`, FIN (tcp skips it if a FIN was already sent) | same | the socket is closed |
 | Capsule buffer overflow | reset | reset | stop, socket closed |
-| Idle | none | none | `idle_timeout` after `idle_timeout_ms` without inbound bytes |
+| Idle | `idle_timeout` after `idle_timeout_ms` without traffic; reset | same | same; socket closed |
 
 In every case the handler's `terminate/2` runs (through `try_callback/3`, errors swallowed), which is where built-in handlers close their target sockets and where `masque_ip_proxy_handler` releases its addresses. The client side of the same events is in [client internals](client-internals.md#teardown-seen-from-the-client).
 
 ## Backpressure
 
-Two mechanisms keep a fast side from flooding a slow one.
+These mechanisms keep a fast side from flooding a slow one.
 
 - **Target reads.** The built-in handlers open target sockets in `{active, N}` (`active_n`: 16 for TCP, 32 for UDP and udp-bind). The kernel stops delivering after N messages and sends `{tcp_passive, _}` / `{udp_passive, _}`. That message sits behind the N data messages in the session mailbox, so when the handler sees it every earlier chunk has been relayed, and only then does it re-arm the socket.
 - **Tunnel writes (tcp).** A CONNECT-TCP write either lands or stops the session: on h2 `h2:send_data/5` with `#{block => 30000}` waits for flow-control window; on h3 `quic_h3:send_data/4` returns `{error, send_queue_full}` and the session retries every 5 ms for up to 30 s. A failure stops the session with `{tunnel_send_failed, Reason}`. Because the write blocks the session, the passive message is handled late and the target read stalls, which is the point.
+- **Client reads (tcp, h2).** The session claims h2 streams with `#{flow_control => manual}` and returns receive credit with `h2:consume/3` only after `handle_data/2` returned, so a target that stops reading stops the client instead of filling the session mailbox. The TCP handler's target socket has a 30 s `send_timeout`, so a target that never reads ends the tunnel. `quic_h3` has no manual receive credit, so CONNECT-TCP over h3 does not get this.
+- **Router datagrams (h3).** The router drops a datagram, and counts it with `backlog_drop_inc/0`, when its session already has 10 000 unprocessed messages. Stream data is never dropped.
 
-Datagram writes (udp, ip, udp-bind) never block: oversize UDP payloads are dropped (RFC 9298 section 5), and on h3 payloads larger than `quic_h3:max_datagram_size/2` are dropped too. h1 sessions read the client socket with `{active, once}` and re-arm after each chunk is processed.
+Datagram writes (udp, ip, udp-bind) never block: oversize UDP payloads are dropped (RFC 9298 section 5), and the h3 UDP session also drops payloads larger than `quic_h3:max_datagram_size/2`; the IP and udp-bind sessions ignore the send error `quic_h3` returns for them. h1 sessions read the client socket with `{active, once}` and re-arm after each chunk is processed.
 
 ## Duplicated code and drift
 

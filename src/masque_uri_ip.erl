@@ -294,8 +294,6 @@ inet_addr_bin(IP) -> list_to_binary(inet:ntoa(IP)).
     inet:ip4_address() | inet:ip6_address(),
     non_neg_integer()
 ) -> boolean().
-prefix_host_bits_zero(_V, _IP, 0) ->
-    true;
 prefix_host_bits_zero(4, {A, B, C, D}, Pfx) when Pfx =< 32 ->
     N = (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D,
     HostBits = 32 - Pfx,

@@ -49,15 +49,20 @@ The library never opens a context on its own. The client opens contexts with `ma
 Client to peer:
 
 - Context 0: in a scoped bind it goes to the handler's `handle_packet/2`, which the default bind handler does not export, so it is dropped; in an unscoped bind it is dropped (`context_zero`).
-- Another context: looked up in the peer table only. The client's uncompressed context carries the peer address in the payload; a compressed one takes the peer from the entry. Unknown ids are dropped (`unknown_context`). The packet then goes to the handler's `handle_bind_packet/3`.
+- Another context: looked up in the peer table, then among the installed contexts of the own table (contexts are two-way). The client's uncompressed context carries the peer address in the payload; a compressed one takes the peer from the entry. Unknown ids are dropped (`unknown_context`). The packet then goes to the handler's `handle_bind_packet/3`.
 
 Peer to client (`{send_bind_packet, Peer, Bytes}` from the handler):
 
 1. An installed own context for that peer: send compressed.
-2. Otherwise, the client's uncompressed context if it is open: send with the peer address inline.
-3. Otherwise the packet is dropped without a count.
+2. Otherwise, a compressed context the client opened for that peer.
+3. Otherwise, the client's uncompressed context if it is open: send with the peer address inline.
+4. Otherwise the packet is dropped without a count.
 
-So the proxy never sends on a compressed context the client opened, and ignores client datagrams on a context the proxy opened. The client session, whose comment says a context carries datagrams both ways, accepts both. See Q24 in [decisions](decisions.md).
+Contexts are two-way on both sides: whoever opened a context, either endpoint may send on it once it is installed. The client's `send_to/3` follows the same order.
+
+Each table keeps the last 64 closed ids. An ACK or CLOSE for one of them, which crossed our own CLOSE on the wire, is ignored instead of ending the tunnel with `malformed_capsule`. A `compression_close` action removes the context from the proxy's table right away.
+
+A proxy ASSIGN for a tuple the client already opened is acknowledged and then closed by the client (the client keeps its own), which mirrors what the proxy does for a client ASSIGN.
 
 ## Bind socket lifecycle
 

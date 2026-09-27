@@ -28,14 +28,18 @@ On h1 there is no half-close: OTP `ssl` drops the connection when the peer sends
 
 Handlers get `handle_data/2` for client bytes and `handle_eof/1` for the client FIN, and answer with `{send_data, Bytes}` or `{send_data, Bytes, true}` (see [handlers](handlers.md#actions)). A tunnel write blocks until the transport takes it; if it fails, or waits more than 30 seconds on h3 and h2, the tunnel ends with `{tunnel_send_failed, _}`.
 
-The built-in `masque_tcp_proxy_handler` opens a `gen_tcp` connection to the target and relays both ways. A FIN from the client shuts down the write side of the target socket; a FIN from the target is passed on to the client. A half-closed tunnel with no traffic for 30 seconds ends with `eof_timeout`. A target reset resets the tunnel.
+The built-in `masque_tcp_proxy_handler` opens a `gen_tcp` connection to the target and relays both ways. A FIN from the client shuts down the write side of the target socket; a FIN from the target is passed on to the client. A half-closed tunnel with no traffic for 30 seconds ends with `eof_timeout`. A target reset resets the tunnel; a tunnel the client aborts (stream reset, connection gone) aborts the target connection with an RST, while a clean end closes it with FIN. A target that stops reading ends the tunnel after 30 seconds.
+
+On the client, `close/1` sends the FIN and returns at once; the session then waits up to 2 seconds for the proxy to finish the stream before closing its connection, so the last bytes are not cut off. A pooled stream is handed back to the pool without a reset.
 
 | `handler_opts` key | Default | Meaning |
 |---|---|---|
 | `allow` | allow all | `fun({Host, Port}) -> boolean()`, checked in `accept/1`. |
 | `resolver` | `inet:getaddr/2`, IPv4 first | `fun(Host) -> {ok, Address} \| {ok, [Address]} \| {error, _}`. With a list, the first address is used. |
-| `family` | `auto` | `inet`, `inet6` or `auto`. |
+| `family` | `auto` | `inet`, `inet6` or `auto` (follows the resolved address, so an IPv6-only name works). |
 | `allow_private` | `false` | Allow non-public targets. Otherwise refused with 502. |
+| `allow_self` | `false` | Allow targets that are the proxy host's own addresses (its non-loopback interfaces and `self_addresses`). Otherwise refused with 502. |
+| `self_addresses` | `[]` | Extra addresses that count as the proxy's own, for example a NAT public address. |
 | `connect_timeout` | `5000` | Timeout of the connection to the target, in ms. |
 | `socket_opts` | `[]` | Extra `gen_tcp` options. |
 | `active_n` | `16` | Segments read before the socket pauses until the session wrote them to the tunnel. |

@@ -321,3 +321,19 @@ match_rejects_non_canonical_port_test() ->
         {error, bad_port},
         masque_uri_udp_bind:match(?TPL, <<"/.well-known/masque/udp/192.0.2.6/0443/">>)
     ).
+
+ppa(Value) ->
+    masque_uri_udp_bind:parse_proxy_public_address([{<<"proxy-public-address">>, Value}]).
+
+proxy_public_address_parameters_ignored_test() ->
+    ?assertEqual({ok, [{{192, 0, 2, 1}, 443}]}, ppa(<<"\"192.0.2.1:443\";x=1">>)).
+
+proxy_public_address_empty_member_rejected_test() ->
+    ?assertEqual({error, malformed}, ppa(<<"\"192.0.2.1:443\",,\"192.0.2.2:443\"">>)),
+    ?assertEqual({error, malformed}, ppa(<<"\"192.0.2.1:443\",">>)).
+
+proxy_public_address_shorthand_ipv4_rejected_test() ->
+    ?assertEqual({error, malformed}, ppa(<<"\"127.1:443\"">>)).
+
+proxy_public_address_non_string_rejected_test() ->
+    ?assertEqual({error, malformed}, ppa(<<"192.0.2.1:443">>)).

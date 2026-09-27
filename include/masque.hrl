@@ -47,6 +47,9 @@
 %% `max_capsule_size' in `connect_opts' / listener `handler_opts'.
 -define(MASQUE_DEFAULT_MAX_CAPSULE_SIZE, 65536).
 
+%% Tunnels one client connection may hold (h3, h2); 0 means no limit.
+-define(MASQUE_DEFAULT_MAX_TUNNELS, 100).
+
 %% Default bound on a queue-mode client session's receive queue, in
 %% received items (datagrams, IP packets or TCP chunks). Override per
 %% session with `rx_queue_limit' in `masque:connect/3' opts. Datagram

@@ -27,9 +27,9 @@ Deviations and additions:
 | §2 | HTTP/3 datagrams carry a quarter stream id | Handled by `quic_h3`. | `quic_h3` (dependency) |
 | §2.1.1 | `SETTINGS_H3_DATAGRAM = 1` | The h3 listener merges `h3_datagram => 1` into its settings; h3 clients refuse a peer without it (`no_h3_datagram`). | `masque_server`, `masque_client_session`, `masque_ip_client_session` |
 | §3.2 | Capsule framing: type, length, value | Encoding and decoding go through `quic_h3_capsule`, wrapped by `masque_capsule`. h2 and h1 sessions use `h2_capsule` and `h1_capsule`. | `masque_capsule` |
-| §3.3 | Unknown capsule types are ignored; a malformed or truncated capsule is a stream error | Unknown types reach the handler's `handle_capsule/3` (server) or the owner as `masque_capsule` (client), and udp-bind drops them. Malformed or truncated capsules reset the stream with `H3_MESSAGE_ERROR` (h3) or `PROTOCOL_ERROR` (h2). The receive buffer is capped by `max_capsule_size` (default 65536). | all capsule-carrying sessions |
+| §3.3 | Unknown capsule types are ignored; a malformed or truncated capsule is a stream error | Unknown types reach the handler's `handle_capsule/3` (server) or the owner as `masque_capsule` (client), and udp-bind drops them. Malformed or truncated capsules reset the stream with `H3_MESSAGE_ERROR` (h3) or `PROTOCOL_ERROR` (h2). The partial capsule a session holds is capped by `max_capsule_size` (default 65536); complete capsules in the same read do not count. | all capsule-carrying sessions |
 | §3.4 | A capsule-protocol response carries no `content-length` / `content-type` | Clients refuse such a 2xx (`malformed_response`). Listeners only put these headers on rejections. | client sessions |
-| §3.5 | DATAGRAM capsule (type 0) | Used to carry datagrams on h2 and h1. | h2 and h1 sessions |
+| §3.5 | DATAGRAM capsule (type 0) | Used to carry datagrams on h2 and h1. On h3 a DATAGRAM capsule received on the stream is handled as an HTTP datagram too, by server and client sessions. | all datagram-carrying sessions |
 
 ## RFC 9484: Proxying IP in HTTP
 

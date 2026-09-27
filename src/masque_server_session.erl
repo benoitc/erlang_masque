@@ -22,6 +22,8 @@
 
 -include("masque.hrl").
 
+-define(DEFAULT_IDLE_MS, 300000).
+
 -record(state, {
     conn :: pid(),
     stream_id :: non_neg_integer(),
@@ -38,7 +40,10 @@
     start_time :: integer() | undefined,
     %% Handler messages that arrived before finalize, newest first.
     %% Replayed once the 2xx is sent.
-    early = [] :: [term()]
+    early = [] :: [term()],
+    %% Idle timeout (`idle_timeout_ms'), armed once the tunnel is open.
+    idle_ms = ?DEFAULT_IDLE_MS :: non_neg_integer() | infinity,
+    idle :: masque_idle:idle() | undefined
 }).
 
 %%====================================================================
@@ -84,6 +89,7 @@ init(#{
                 stream_id = StreamId,
                 router = Router,
                 handler = Handler,
+                idle_ms = maps:get(idle_timeout_ms, HOpts, ?DEFAULT_IDLE_MS),
                 h_state = HState,
                 req = Req,
                 max_cap = MaxCap,
@@ -121,13 +127,21 @@ finalize(#state{pending_actions = Actions, conn = Conn, stream_id = StreamId} = 
                     masque_metrics:tunnel_opened(
                         #{protocol => udp, transport => h3}
                     ),
-                    S1 = run_init_actions(
-                        Actions,
-                        State#state{
-                            start_time = erlang:monotonic_time(millisecond)
-                        }
-                    ),
-                    replay_early(lists:reverse(S1#state.early), S1#state{early = []});
+                    case
+                        run_init_actions(
+                            Actions,
+                            State#state{
+                                start_time = erlang:monotonic_time(millisecond),
+                                idle = masque_idle:new(State#state.idle_ms)
+                            }
+                        )
+                    of
+                        {ok, S1} ->
+                            replay_early(lists:reverse(S1#state.early), S1#state{early = []});
+                        {stop, _, _} = Stop ->
+                            %% `terminate/2' sees the state with `start_time' set.
+                            Stop
+                    end;
                 {error, _} ->
                     {error, S}
             end;
@@ -177,7 +191,19 @@ handle_cast(connection_closed, S) ->
 handle_cast(_Msg, S) ->
     {noreply, S}.
 
-handle_info(
+%% Every message counts as traffic for the idle timer; the timer's
+%% own message checks whether the tunnel has been idle long enough.
+handle_info({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
+    case masque_idle:check(Ref, Idle) of
+        expired -> {stop, idle_timeout, S};
+        {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
+    end;
+handle_info(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
+    handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
+handle_info(Msg, S) ->
+    handle_traffic(Msg, S).
+
+handle_traffic(
     {masque_datagram_in, StreamId, Payload},
     #state{stream_id = StreamId} = S
 ) ->
@@ -199,38 +225,38 @@ handle_info(
         {error, _} ->
             {noreply, S}
     end;
-handle_info(
+handle_traffic(
     {masque_stream_data, StreamId, Data, Fin},
     #state{stream_id = StreamId} = S
 ) ->
     handle_stream_bytes(Data, Fin, S);
-handle_info(
+handle_traffic(
     {quic_h3, _Conn, {data, StreamId, Data, Fin}},
     #state{stream_id = StreamId} = S
 ) ->
     handle_stream_bytes(Data, Fin, S);
-handle_info(
+handle_traffic(
     {masque_stream_reset, StreamId, _ErrorCode},
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
 %% Once the stream is claimed, quic_h3 reports resets to us directly.
-handle_info(
+handle_traffic(
     {quic_h3, _Conn, {stream_reset, StreamId, _ErrorCode}},
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
-handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
+handle_traffic({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
     %% Router died - clean up
     {stop, router_gone, S};
-handle_info(Msg, #state{pending_actions = Actions, early = Early} = S) when
+handle_traffic(Msg, #state{pending_actions = Actions, early = Early} = S) when
     Actions =/= undefined
 ->
     %% Not finalized yet: nothing may be written to the stream before
     %% the 2xx, so keep the message for `finalize'. The target socket's
     %% `{active, N}' window bounds how many pile up.
     {noreply, S#state{early = [Msg | Early]}};
-handle_info(Msg, S) ->
+handle_traffic(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
 terminate(
@@ -391,13 +417,8 @@ apply_actions_noreply(Actions, State) ->
         {stop, Reason, S2} -> {stop, Reason, S2}
     end.
 
-run_init_actions([], S) ->
-    S;
 run_init_actions(Actions, S) ->
-    case do_actions(Actions, S) of
-        {ok, S2} -> S2;
-        {stop, Reason, _} -> exit(Reason)
-    end.
+    do_actions(Actions, S).
 
 do_actions([], S) ->
     {ok, S};
@@ -450,7 +471,7 @@ handle_stream_bytes(
     } = S
 ) ->
     New = <<Buf/binary, Data/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true ->
             reset_and_stop(capsule_buffer_overflow, S);
         false ->
@@ -464,7 +485,7 @@ handle_stream_bytes(
 drain_capsules(Buf, Fin, S) ->
     case masque_capsule:decode(Buf) of
         {ok, {Type, Value, Rest}} ->
-            case dispatch(handle_capsule, [Type, Value], S) of
+            case capsule_event(Type, Value, S) of
                 {noreply, S2} ->
                     drain_capsules(Rest, Fin, S2#state{cap_buf = <<>>});
                 {stop, _, _} = Stop ->
@@ -482,6 +503,13 @@ drain_capsules(Buf, Fin, S) ->
         {error, _Reason} ->
             reset_and_stop(malformed_capsule, S)
     end.
+
+%% RFC 9297 sec 3.5: a DATAGRAM capsule on the stream is an HTTP
+%% datagram like one sent in a QUIC DATAGRAM frame.
+capsule_event(0, Value, #state{stream_id = StreamId} = S) ->
+    handle_traffic({masque_datagram_in, StreamId, Value}, S);
+capsule_event(Type, Value, S) ->
+    dispatch(handle_capsule, [Type, Value], S).
 
 reset_and_stop(Reason, #state{conn = Conn, stream_id = StreamId} = S) ->
     _ =

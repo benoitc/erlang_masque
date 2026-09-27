@@ -329,6 +329,9 @@ connect_request(#data{
     extra_headers = Extra
 }) ->
     Authority = masque_uri:build_authority(Host, Port),
+    %% The facade validates the host; refuse anything that could still
+    %% break the request line.
+    nomatch = binary:match(Authority, [<<"\r">>, <<"\n">>, <<" ">>]),
     AuthLine =
         case Auth of
             undefined ->

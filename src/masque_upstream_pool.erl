@@ -108,9 +108,9 @@ close_all() ->
     gen_server:call(?MODULE, close_all, 10000).
 
 %% Build a fingerprint from the host / port / transport and the
-%% connection-affecting subset of `Opts`. Stable under re-ordering
-%% of list-valued opts so two callers that pass `ssl_opts` in
-%% different order still hash to the same key.
+%% connection-affecting subset of `Opts`. `ssl_opts` is reduced to the
+%% options that take effect, then sorted, so the order of distinct
+%% options does not matter but a later duplicate does.
 -spec fingerprint(
     binary() | string(),
     inet:port_number(),
@@ -315,10 +315,23 @@ reply_all_dialing(Reply, #state{dialing = D}) ->
     ),
     ok.
 
+%% The options `ssl' will actually use: for a repeated key the last
+%% value wins (as in `masque_tls'), then sorted so the order callers
+%% pass them in does not matter. Sorting the raw list would hash
+%% `[{verify, verify_peer}, {verify, verify_none}]' and its reverse
+%% the same although they verify differently.
 canonical_ssl_opts(Opts) when is_list(Opts) ->
-    lists:sort(Opts);
+    Effective = lists:foldl(
+        fun(O, Acc) -> [O | [X || X <- Acc, opt_key(X) =/= opt_key(O)]] end,
+        [],
+        Opts
+    ),
+    lists:sort(Effective);
 canonical_ssl_opts(Other) ->
     Other.
+
+opt_key(T) when is_tuple(T), tuple_size(T) >= 1 -> element(1, T);
+opt_key(A) -> A.
 
 to_bin(B) when is_binary(B) -> B;
 to_bin(L) when is_list(L) -> list_to_binary(L).

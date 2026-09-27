@@ -482,8 +482,6 @@ check_zero_vs_nonzero(_Zeros, _NonZeros) ->
 
 %% RFC 9484 §4.6: ADDRESS_ASSIGN/REQUEST prefixes must be canonical
 %% (host bits zero).
-prefix_host_bits_zero(_V, _IP, 0) ->
-    true;
 prefix_host_bits_zero(4, {A, B, C, D}, Pfx) when Pfx =< 32 ->
     N = (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D,
     HostBits = 32 - Pfx,

@@ -5,7 +5,9 @@
 %%% `report_to' in the handler opts, then delegates every callback to
 %%% the built-in TCP proxy handler. With `early_data => Bin' the
 %%% session also queues a message, before the stream is finalized,
-%%% that makes the handler send `Bin' to the client.
+%%% that makes the handler send `Bin' to the client. With
+%%% `data_delay => Ms' every `handle_data/2' first sleeps, like a
+%%% target that stops reading.
 -module(masque_report_tcp_handler).
 -behaviour(masque_handler).
 
@@ -24,9 +26,12 @@ init(Req, Opts) ->
         {ok, Bin} -> self() ! {masque_test_early_data, Bin};
         error -> ok
     end,
+    put(masque_test_data_delay, maps:get(data_delay, Opts, 0)),
     ?H:init(Req, Opts).
 
-handle_data(Data, State) -> ?H:handle_data(Data, State).
+handle_data(Data, State) ->
+    timer:sleep(get(masque_test_data_delay)),
+    ?H:handle_data(Data, State).
 
 handle_eof(State) -> ?H:handle_eof(State).
 

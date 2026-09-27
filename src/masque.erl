@@ -157,7 +157,7 @@ versions.
         uri_template => binary(),
         verify => verify_peer | verify_none,
         cacerts => [public_key:der_encoded()],
-        timeout => pos_integer() | infinity,
+        timeout => pos_integer(),
         capsule_protocol => boolean(),
         owner => pid(),
         ssl_opts => [ssl:tls_client_option()],
@@ -248,9 +248,9 @@ Returns `{ok, Session}` on 2xx, `{error, Reason}` otherwise.
 """.
 -spec connect(proxy_uri(), target(), connect_opts()) ->
     {ok, session()} | {error, term()}.
-connect(ProxyURI, Target, Opts) when is_map(Opts) ->
-    case validate_connect_opts(Target, Opts) of
-        {ok, Opts0} ->
+connect(ProxyURI, Target0, Opts) when is_map(Opts) ->
+    case validate_connect_opts(Target0, Opts) of
+        {ok, Opts0, Target} ->
             case parse_proxy_uri(ProxyURI) of
                 {ok, Host, Port} ->
                     Owner = maps:get(owner, Opts0, self()),
@@ -271,19 +271,19 @@ connect(ProxyURI, Target, Opts) when is_map(Opts) ->
 %% Validate and normalize `connect_opts()`. Enforces RFC 9484
 %% invariants for CONNECT-IP (capsule protocol required, target
 %% shape matches protocol) and widens/normalizes shared keys.
-validate_connect_opts(Target, Opts) ->
+validate_connect_opts(Target0, Opts) ->
     Protocol = maps:get(protocol, Opts, udp),
-    case check_target_shape(Protocol, Target) of
-        ok ->
-            case check_capsule_protocol(Protocol, Opts) of
-                {ok, Opts1} ->
-                    check_proxy_authorization(Opts1);
-                {error, _} = Err ->
-                    Err
-            end;
-        {error, _} = Err ->
-            Err
+    maybe
+        {ok, Target} ?= check_target_shape(Protocol, Target0),
+        ok ?= check_timeout(Opts),
+        {ok, Opts1} ?= check_capsule_protocol(Protocol, Opts),
+        {ok, Opts2} ?= check_proxy_authorization(Opts1),
+        {ok, Opts2, Target}
     end.
+
+check_timeout(#{timeout := T}) when is_integer(T), T > 0 -> ok;
+check_timeout(#{timeout := T}) -> {error, {invalid_opts, {timeout, T}}};
+check_timeout(_) -> ok.
 
 %% `proxy_authorization' is embedded verbatim on the CONNECT-TCP h1
 %% wire; an embedded CR or LF would inject arbitrary headers. Reject
@@ -306,20 +306,44 @@ check_proxy_authorization(Opts) ->
 has_crlf(B) when is_binary(B) ->
     binary:match(B, [<<"\r">>, <<"\n">>]) =/= nomatch.
 
-check_target_shape(ip, {Target, IPProto}) ->
+check_target_shape(ip, {Target, IPProto} = T) ->
     case
         masque_uri_ip:validate_target(Target) andalso
             masque_uri_ip:validate_ipproto(IPProto)
     of
-        true -> ok;
+        true -> {ok, T};
         false -> {error, {bad_target_for_protocol, ip}}
     end;
 check_target_shape(ip, _) ->
     {error, {bad_target_for_protocol, ip}};
-check_target_shape(_, {_, P}) when is_integer(P), P >= 0, P =< 65535 ->
-    ok;
+check_target_shape(Proto, {Host, P}) when is_integer(P), P >= 1, P =< 65535 ->
+    %% The host ends up in a path, an authority or a raw CONNECT line:
+    %% only an IP address or a valid host name is accepted.
+    case target_host(Host) of
+        {ok, HostBin} -> {ok, {HostBin, P}};
+        error -> {error, {bad_target_for_protocol, Proto}}
+    end;
 check_target_shape(Proto, _) ->
     {error, {bad_target_for_protocol, Proto}}.
+
+target_host(IP) when is_tuple(IP) ->
+    case inet:ntoa(IP) of
+        {error, _} -> error;
+        Text -> {ok, list_to_binary(Text)}
+    end;
+target_host(Host) when is_list(Host) ->
+    try list_to_binary(Host) of
+        Bin -> target_host(Bin)
+    catch
+        error:badarg -> error
+    end;
+target_host(Host) when is_binary(Host) ->
+    case masque_uri:valid_host(Host) of
+        true -> {ok, Host};
+        false -> error
+    end;
+target_host(_) ->
+    error.
 
 check_capsule_protocol(ip, Opts) ->
     case maps:get(capsule_protocol, Opts, true) of
@@ -359,7 +383,14 @@ dial_single_or_pool(
 ->
     case masque_racer:checkout_pool(Transport, Opts) of
         {ok, Opts1} ->
-            dial_single(Mod, Target, Opts1#{transport => Transport}, Owner);
+            case dial_single(Mod, Target, Opts1#{transport => Transport}, Owner) of
+                {error, owner_gone} when not is_map_key(pool_retried, Opts) ->
+                    %% The pooled connection closed under us (idle
+                    %% timer): check out again, once.
+                    dial_single_or_pool(Mod, Transport, Target, Opts#{pool_retried => true}, Owner);
+                Result ->
+                    Result
+            end;
         {error, _} = Err ->
             Err
     end;
@@ -494,8 +525,10 @@ Send data under an explicit context-id (UDP extension use).
 """.
 -spec send(session(), non_neg_integer(), iodata()) ->
     ok | {error, term()}.
-send(Sess, ContextId, Data) ->
-    gen_statem:call(Sess, {send, ContextId, Data}).
+send(Sess, ContextId, Data) when is_integer(ContextId), ContextId >= 0 ->
+    gen_statem:call(Sess, {send, ContextId, Data});
+send(_Sess, _ContextId, _Data) ->
+    {error, badarg}.
 
 -doc """
 Block until data is received or `Timeout` ms elapses.
@@ -525,8 +558,10 @@ Send a capsule on the tunnel's request stream (RFC 9297 §3.2).
 """.
 -spec send_capsule(session(), non_neg_integer(), iodata()) ->
     ok | {error, term()}.
-send_capsule(Sess, Type, Value) ->
-    gen_statem:call(Sess, {send_capsule, Type, Value}).
+send_capsule(Sess, Type, Value) when is_integer(Type), Type >= 0 ->
+    gen_statem:call(Sess, {send_capsule, Type, Value});
+send_capsule(_Sess, _Type, _Value) ->
+    {error, badarg}.
 
 -doc """
 Switch the session between `message` and `queue` delivery modes.
@@ -535,9 +570,11 @@ Switch the session between `message` and `queue` delivery modes.
 `{masque_data, Sess, Data}`. `queue` buffers packets and requires
 the caller to pull them via `recv/2`.
 """.
--spec set_mode(session(), message | queue) -> ok.
-set_mode(Sess, Mode) ->
-    gen_statem:call(Sess, {set_mode, Mode}).
+-spec set_mode(session(), message | queue) -> ok | {error, badarg}.
+set_mode(Sess, Mode) when Mode =:= message; Mode =:= queue ->
+    gen_statem:call(Sess, {set_mode, Mode});
+set_mode(_Sess, _Mode) ->
+    {error, badarg}.
 
 -doc """
 Half-close the write side of a TCP tunnel.
@@ -621,19 +658,20 @@ messages to the owner; use `send_to/3` to send.
     unscoped | {binary() | inet:hostname(), 1..65535},
     connect_opts()
 ) -> {ok, session()} | {error, term()}.
-bind_connect(ProxyURI, Target, Opts) when is_map(Opts) ->
+bind_connect(ProxyURI, Target0, Opts) when is_map(Opts) ->
     Opts1 = Opts#{protocol => udp_bind},
-    case parse_proxy_uri(ProxyURI) of
-        {ok, Host, Port} ->
-            Owner = maps:get(owner, Opts1, self()),
-            Opts2 = Opts1#{proxy => {Host, Port}},
-            case normalize_transports(maps:get(transports, Opts2, [h3, h2])) of
-                {ok, Transports} -> connect_via(Transports, Target, Opts2, Owner);
-                {error, _} = Err -> Err
-            end;
-        {error, _} = Err ->
-            Err
+    maybe
+        {ok, Target} ?= bind_target(Target0),
+        ok ?= check_timeout(Opts1),
+        {ok, Host, Port} ?= parse_proxy_uri(ProxyURI),
+        Owner = maps:get(owner, Opts1, self()),
+        Opts2 = Opts1#{proxy => {Host, Port}},
+        {ok, Transports} ?= normalize_transports(maps:get(transports, Opts2, [h3, h2])),
+        connect_via(Transports, Target, Opts2, Owner)
     end.
+
+bind_target(unscoped) -> {ok, unscoped};
+bind_target(Target) -> check_target_shape(udp_bind, Target).
 
 -doc """
 Send a UDP payload to `Peer` via the bind tunnel. The session
@@ -646,11 +684,18 @@ returns `{error, no_compression_context}`.
     {inet:ip_address(), inet:port_number()},
     binary()
 ) -> ok | {error, term()}.
-send_to(Sess, Peer, Bytes) when
-    is_pid(Sess), is_binary(Bytes)
+send_to(Sess, {IP, Port} = Peer, Bytes) when
+    is_pid(Sess),
+    is_binary(Bytes),
+    (tuple_size(IP) =:= 4 orelse tuple_size(IP) =:= 8),
+    is_integer(Port),
+    Port >= 1,
+    Port =< 65535
 ->
     Mod = bind_session_module(Sess),
-    Mod:send_to(Sess, Peer, Bytes).
+    Mod:send_to(Sess, Peer, Bytes);
+send_to(_Sess, _Peer, _Bytes) ->
+    {error, badarg}.
 
 -doc """
 Open an outbound compressed context for `Peer`. Returns the

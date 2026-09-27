@@ -229,10 +229,25 @@ start_attempt(Racer, RRef, Deadline, Transport, Target, Opts, Mod) ->
                     end;
                 lose ->
                     stop_session(Mod, Pid);
+                {error, owner_gone} when not is_map_key(pool_retried, Opts) ->
+                    %% The pooled connection closed under us (idle
+                    %% timer): check out again, once.
+                    kill_session(Pid),
+                    retry_pooled(Racer, RRef, Deadline, Transport, Target, Opts, Mod);
                 {error, Reason} ->
                     kill_session(Pid),
                     report(Racer, {attempt_failed, self(), Transport, Reason})
             end;
+        {error, Reason} ->
+            report(Racer, {attempt_failed, self(), Transport, Reason})
+    end.
+
+retry_pooled(Racer, RRef, Deadline, Transport, Target, Opts, Mod) ->
+    case checkout_pool(Transport, maps:remove(pool_owner, Opts)) of
+        {ok, Opts1} ->
+            start_attempt(
+                Racer, RRef, Deadline, Transport, Target, Opts1#{pool_retried => true}, Mod
+            );
         {error, Reason} ->
             report(Racer, {attempt_failed, self(), Transport, Reason})
     end.
@@ -337,6 +352,7 @@ pool_fingerprint(Transport, Opts) ->
 pool_connect_opts(h3, _Host, Opts) ->
     Base = maps:with([verify, cacerts], Opts),
     Base#{
+        connect_timeout => maps:get(timeout, Opts, 5000),
         quic_opts => #{
             alpn => maps:get(alpn, Opts, [<<"h3">>]),
             max_datagram_frame_size => 65535

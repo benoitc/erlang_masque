@@ -1,6 +1,9 @@
 -module(masque_ip_proxy_handler_tests).
 
 -include_lib("eunit/include/eunit.hrl").
+
+%% Test packets are sent from 10.0.0.1 without an assignment.
+-define(SRC10, [{4, {10, 0, 0, 0}, 8}]).
 -include("masque_ip.hrl").
 
 %%====================================================================
@@ -95,7 +98,7 @@ scope_target_drop_emits_lifecycle_test() ->
     Self = self(),
     Hook = fun(Event, Detail) -> Self ! {hook, Event, Detail} end,
     Req = #{ip_target => {198, 51, 100, 1}, ip_ipproto => '*'},
-    Opts = #{allow_private => true, lifecycle_fun => Hook},
+    Opts = #{allow_private => true, allowed_source_prefixes => ?SRC10, lifecycle_fun => Hook},
     S = init_with(Req, Opts),
     Before = masque_metrics:ip_drop_count(scope_target),
     %% wrong target
@@ -114,7 +117,7 @@ scope_ipproto_drop_emits_lifecycle_test() ->
     Hook = fun(E, D) -> Self ! {hook, E, D} end,
     %% TCP only
     Req = #{ip_target => '*', ip_ipproto => 6},
-    Opts = #{allow_private => true, lifecycle_fun => Hook},
+    Opts = #{allow_private => true, allowed_source_prefixes => ?SRC10, lifecycle_fun => Hook},
     S = init_with(Req, Opts),
     Before = masque_metrics:ip_drop_count(scope_ipproto),
     %% UDP, blocked
@@ -134,6 +137,7 @@ forward_drop_counted_test() ->
     Req = #{ip_target => '*', ip_ipproto => '*'},
     Opts = #{
         allow_private => true,
+        allowed_source_prefixes => ?SRC10,
         lifecycle_fun => Hook,
         forward_fun => fun(_Pkt, St) -> {drop, St} end
     },
@@ -230,7 +234,8 @@ allocate_prefix_aligned_test() ->
     %% Pool spans 10.0.0.0/24 (256 addresses); allow up to /28 wide.
     Opts = #{
         address_pool => {4, {10, 0, 0, 0}, 24},
-        min_assignable_prefix => #{4 => 28}
+        min_assignable_prefix => #{4 => 28},
+        max_assignments => 2
     },
     {ok, S0} = masque_ip_proxy_handler:init(Req, Opts),
     Reqs = [
@@ -334,6 +339,7 @@ forward_actions_emit_drop_and_send_test() ->
     Req = #{ip_target => '*', ip_ipproto => '*'},
     Opts = #{
         allow_private => true,
+        allowed_source_prefixes => ?SRC10,
         lifecycle_fun => Hook,
         forward_fun => Forward
     },
@@ -531,7 +537,13 @@ prefix_assigned_source_passes_test() ->
 
 router_state(Opts) ->
     Req = #{ip_target => '*', ip_ipproto => '*'},
-    init_with(Req, Opts#{allow_private => true, forward_fun => forward_probe()}).
+    init_with(Req, Opts#{
+        allow_private => true,
+        allowed_source_prefixes => [
+            {4, {10, 0, 0, 0}, 8}, {6, {16#2001, 16#DB8, 0, 0, 0, 0, 0, 0}, 32}
+        ],
+        forward_fun => forward_probe()
+    }).
 
 v4_packet_ttl(TTL, Size) ->
     Payload = binary:copy(<<0>>, Size - 20),
@@ -682,3 +694,94 @@ peer_capsules_recorded_test() ->
         {hook, peer_address_assigned, #{entries := [Assign]}} -> ok
     after 100 -> ct:fail("no peer_address_assigned")
     end.
+
+%%====================================================================
+%% Policy: hostname scope, sources, quota, peer assignments
+%%====================================================================
+
+%% A static route covering private space does not widen a hostname
+%% target's scope.
+hostname_scope_ignores_static_private_route_test() ->
+    drain(),
+    Req = #{
+        ip_target => <<"example.com">>,
+        ip_ipproto => '*',
+        resolved_addresses => [{8, 8, 8, 8}]
+    },
+    Static = #ip_route{
+        version = 4, start_addr = {10, 1, 0, 0}, end_addr = {10, 1, 255, 255}, ip_protocol = 0
+    },
+    S = assigned_state(Req, #{forward_fun => forward_probe(), routes => [Static]}),
+    Priv = v4_packet(10, 0, 0, 1, 10, 1, 0, 7, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Priv, S),
+    assert_not_forwarded(),
+    Pub = v4_packet(10, 0, 0, 1, 8, 8, 8, 8, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Pub, S),
+    assert_forwarded(Pub).
+
+%% `allow_private' governs destinations only: an unassigned source is
+%% still dropped.
+unassigned_source_dropped_with_allow_private_test() ->
+    drain(),
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    S = init_with(Req, #{allow_private => true, forward_fun => forward_probe()}),
+    Pkt = v4_packet(1, 2, 3, 4, 8, 8, 8, 8, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    assert_not_forwarded().
+
+allowed_source_prefix_passes_test() ->
+    drain(),
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    S = init_with(Req, #{
+        allow_private => true,
+        allowed_source_prefixes => [{4, {1, 2, 3, 0}, 24}],
+        forward_fun => forward_probe()
+    }),
+    Pkt = v4_packet(1, 2, 3, 4, 8, 8, 8, 8, 17),
+    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    assert_forwarded(Pkt).
+
+request(Id) ->
+    #ip_prefix_request{request_id = Id, version = 4, address = {0, 0, 0, 0}, prefix_len = 32}.
+
+%% One session cannot drain the pool: past `max_assignments' (1 per
+%% family by default) a request gets the address already held.
+quota_returns_held_address_test() ->
+    drain(),
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    S0 = init_with(Req, #{address_pool => {4, {10, 0, 0, 0}, 24}}),
+    {ok, S1, [{assign, [A1]}]} =
+        masque_ip_proxy_handler:handle_address_request([request(1)], S0),
+    {ok, _S2, [{assign, Many}]} =
+        masque_ip_proxy_handler:handle_address_request([request(I) || I <- lists:seq(2, 300)], S1),
+    ?assertEqual(299, length(Many)),
+    ?assert(
+        lists:all(
+            fun(#ip_assignment{address = A}) -> A =:= A1#ip_assignment.address end, Many
+        )
+    ).
+
+%% Each ADDRESS_ASSIGN replaces the previous list (RFC 9484 4.7.1).
+peer_assign_replaces_previous_test() ->
+    drain(),
+    S0 = router_state(#{}),
+    A = fun(Id, Last) ->
+        #ip_assignment{request_id = Id, version = 4, address = {192, 0, 2, Last}, prefix_len = 32}
+    end,
+    {ok, S1} = masque_ip_proxy_handler:handle_address_assign([A(1, 1)], S0),
+    {ok, S2} = masque_ip_proxy_handler:handle_address_assign([A(2, 2)], S1),
+    {ok, Only2} = masque_ip_proxy_handler:handle_address_assign([A(2, 2)], S0),
+    ?assertEqual(Only2, S2),
+    Big = [A(I, I rem 250) || I <- lists:seq(1, 200)],
+    {ok, S3} = masque_ip_proxy_handler:handle_address_assign(Big, S0),
+    {ok, Bounded} = masque_ip_proxy_handler:handle_address_assign(lists:sublist(Big, 64), S0),
+    ?assertEqual(Bounded, S3).
+
+allow_ip_rejects_test() ->
+    Deny = fun({_Target, _Proto}) -> false end,
+    ?assertEqual(
+        {reject, forbidden},
+        masque_ip_proxy_handler:accept(
+            accept_req(<<"example.com">>, [{93, 184, 216, 34}], #{allow_ip => Deny})
+        )
+    ).

@@ -37,6 +37,7 @@ Accepts the same policy hooks as the UDP proxy (`allow`, `resolver`,
     terminate/2
 ]).
 
+-define(TARGET_SEND_TIMEOUT, 30000).
 -define(DEFAULT_ACTIVE_N, 16).
 %% Idle time allowed on a half-closed tunnel.
 -define(EOF_IDLE_MS, 30000).
@@ -67,16 +68,16 @@ accept(#{target_host := Host, target_port := Port} = Req) ->
 -spec init(masque_handler:req(), term()) -> {ok, #state{}} | {stop, term()}.
 init(#{target_host := Host, target_port := Port}, Opts) ->
     ResolverFun = maps:get(resolver, Opts, fun default_resolver/1),
-    Family = pick_family(maps:get(family, Opts, auto), Host),
+    FamilyOpt = maps:get(family, Opts, auto),
     ConnTimeout = maps:get(connect_timeout, Opts, 5000),
     AllowPrivate = maps:get(allow_private, Opts, false),
     ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
     case resolve(ResolverFun, Host) of
         {ok, IP} ->
-            case AllowPrivate orelse masque_ip:is_public(IP) of
-                false ->
-                    {stop, {resolution_failed, private_address}};
-                true ->
+            case target_allowed(IP, AllowPrivate, Opts) of
+                {error, Why} ->
+                    {stop, {resolution_failed, Why}};
+                ok ->
                     TcpOpts = [
                         binary,
                         {active, ActiveN},
@@ -87,7 +88,11 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
                         %% Keep the socket writable after the target's
                         %% FIN so the tunnel can half-close.
                         {exit_on_close, false},
-                        Family
+                        %% A target that stops reading ends the tunnel
+                        %% after 30 s instead of blocking it forever.
+                        {send_timeout, ?TARGET_SEND_TIMEOUT},
+                        {send_timeout_close, true},
+                        family(FamilyOpt, IP)
                         | maps:get(socket_opts, Opts, [])
                     ],
                     case gen_tcp:connect(IP, Port, TcpOpts, ConnTimeout) of
@@ -142,9 +147,23 @@ handle_info(_Other, State) ->
     {ok, State}.
 
 -spec terminate(term(), #state{}) -> ok.
-terminate(_Reason, #state{socket = S}) ->
+%% A clean end closes the target with FIN. Anything else (the client
+%% reset or went away, a handler crash) aborts it with RST, so the
+%% target can tell an aborted tunnel from a finished one (RFC 9113
+%% sec 8.5, RFC 9114 sec 4.4).
+terminate(Reason, #state{socket = S}) ->
+    _ =
+        case clean_end(Reason) of
+            true -> ok;
+            false -> inet:setopts(S, [{linger, {true, 0}}])
+        end,
     _ = gen_tcp:close(S),
     ok.
+
+clean_end(normal) -> true;
+clean_end(target_closed) -> true;
+clean_end(eof_timeout) -> true;
+clean_end(_) -> false.
 
 %%====================================================================
 %% Helpers
@@ -177,19 +196,23 @@ default_resolver(Host) when is_list(Host) ->
             end
     end.
 
-pick_family(inet, _Host) ->
-    inet;
-pick_family(inet6, _Host) ->
-    inet6;
-pick_family(auto, Host) ->
-    HostStr =
-        if
-            is_binary(Host) -> binary_to_list(Host);
-            true -> Host
-        end,
-    case inet:parse_address(HostStr) of
-        {ok, {_, _, _, _, _, _, _, _}} -> inet6;
-        _ -> inet
+%% `auto' follows the resolved address, so a name with only AAAA
+%% records is dialled over IPv6.
+family(auto, IP) when tuple_size(IP) =:= 8 -> inet6;
+family(auto, _IP) -> inet;
+family(Family, _IP) -> Family.
+
+%% Non-public targets need `allow_private'; the proxy's own addresses
+%% need `allow_self'.
+target_allowed(IP, AllowPrivate, Opts) ->
+    case AllowPrivate orelse masque_ip:is_public(IP) of
+        false ->
+            {error, private_address};
+        true ->
+            case maps:get(allow_self, Opts, false) orelse not masque_ip:is_self(IP, Opts) of
+                true -> ok;
+                false -> {error, self_address}
+            end
     end.
 
 %% A listener-level `resolver' returns an address list (it is shared

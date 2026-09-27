@@ -34,6 +34,10 @@
     ]}
 ).
 
+%% How long a closed tunnel waits for the proxy's FIN before closing
+%% its own connection.
+-define(CLOSE_LINGER_MS, 2000).
+
 -record(data, {
     owner :: pid(),
     owner_ref :: reference(),
@@ -219,6 +223,13 @@ connecting(
     #data{owner_ref = Ref}
 ) ->
     {stop, owner_gone};
+%% Stream data that overtakes the 2xx (a pooled stream gets its data
+%% straight from the transport, the response through the pool owner)
+%% waits until the tunnel is open.
+connecting(info, {Tag, _Conn, {data, StreamId, _, _}}, #data{stream_id = StreamId}) when
+    is_integer(StreamId), (Tag =:= quic_h3 orelse Tag =:= h2)
+->
+    {keep_state_and_data, [postpone]};
 connecting(info, _Msg, Data) ->
     {keep_state, Data};
 connecting({call, From}, info, Data) ->
@@ -345,9 +356,8 @@ open({call, From}, _Other, Data) ->
 closing({call, From}, shutdown_write, Data) ->
     {keep_state, Data, [{reply, From, {error, closing}}]};
 closing(internal, do_close, #data{write_closed = true} = Data) ->
-    %% Write FIN already sent. Just close the connection.
-    _ = session_teardown(Data),
-    {stop, normal, Data};
+    %% Write FIN already sent.
+    finish(Data);
 closing(internal, do_close, Data) ->
     _ =
         try transport_send_data(Data, <<>>, true) of
@@ -367,7 +377,20 @@ closing(internal, do_close, Data) ->
                     _:_ -> ok
                 end
         end,
-    _ = session_teardown(Data),
+    finish(Data);
+%% Our FIN is out: stop once the proxy has finished too, or after the
+%% linger time. `terminate/3' closes the connection.
+closing(state_timeout, linger_done, Data) ->
+    {stop, normal, Data};
+closing(info, {Tag, _Conn, {data, StreamId, _, true}}, #data{stream_id = StreamId} = Data) when
+    Tag =:= quic_h3; Tag =:= h2
+->
+    {stop, normal, Data};
+closing(info, {Tag, _Conn, {stream_reset, StreamId, _}}, #data{stream_id = StreamId} = Data) when
+    Tag =:= quic_h3; Tag =:= h2
+->
+    {stop, normal, Data};
+closing(info, {Tag, _Conn, {closed, _}}, Data) when Tag =:= quic_h3; Tag =:= h2 ->
     {stop, normal, Data};
 closing({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, closing}}]};
@@ -377,6 +400,15 @@ closing(_Event, _Msg, Data) ->
 %%====================================================================
 %% State: closed (peer ended the tunnel, queue-mode data unread)
 %%====================================================================
+
+%% A pooled stream is handed back at once (graceful: no reset). A
+%% connection of our own is closed only once the proxy finished the
+%% stream, so our last bytes and FIN are not cut off by the close.
+finish(#data{pool_owner = Pool} = Data) when is_pid(Pool) ->
+    _ = session_teardown(Data, graceful),
+    {stop, normal, Data#data{stream_id = undefined}};
+finish(Data) ->
+    {keep_state, Data, [{state_timeout, ?CLOSE_LINGER_MS, linger_done}]}.
 
 closed({call, From}, info, Data) ->
     {keep_state_and_data, [{reply, From, session_info(Data, closed)}]};
@@ -392,6 +424,15 @@ terminate(_Reason, _State, Data) ->
 
 %% Close path abstraction: release the pooled stream back to the
 %% owner, or shut down the owned transport connection.
+%% After our FIN a pooled stream is handed back without a reset, so
+%% bytes still in flight reach the proxy.
+session_teardown(#data{pool_owner = Pool, stream_id = StreamId}, graceful) when
+    is_pid(Pool), is_integer(StreamId)
+->
+    masque_upstream_owner:release_stream(Pool, StreamId, graceful);
+session_teardown(Data, graceful) ->
+    session_teardown(Data).
+
 session_teardown(#data{pool_owner = Pool, stream_id = StreamId}) when
     is_pid(Pool), is_integer(StreamId)
 ->
@@ -603,12 +644,14 @@ sanitise_extra_headers(List) when is_list(List) ->
         <<":protocol">>,
         <<"capsule-protocol">>
     ],
+    %% h2 and h3 field names are lowercase; compare and send them so.
     [
-        {K, V}
+        {Name, V}
      || {K, V} <- List,
         is_binary(K),
         is_binary(V),
-        not lists:member(K, Reserved)
+        Name <- [string:lowercase(K)],
+        not lists:member(Name, Reserved)
     ].
 
 %%====================================================================
@@ -629,6 +672,9 @@ handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
             }}
     end.
 
+%% An empty DATA frame (typically the one carrying FIN) is not data.
+deliver(<<>>, Data) ->
+    Data;
 deliver(Bytes, #data{mode = message, owner = Owner} = Data) ->
     masque_client_owner:send(Owner, {masque_data, self(), Bytes}),
     Data;

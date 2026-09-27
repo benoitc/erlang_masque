@@ -33,6 +33,11 @@
 
 -export_type([listener_name/0, listener_opts/0]).
 
+-ifdef(TEST).
+%% Test-only: the request validator.
+-export([validate/5]).
+-endif.
+
 %%====================================================================
 %% API
 %%====================================================================
@@ -40,6 +45,12 @@
 -spec start_listener(listener_name(), listener_opts()) ->
     {ok, h1:server_ref()} | {error, term()}.
 start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
+    case masque_server:name_in_use(Name, h1) of
+        none -> start_h1_listener(Name, Opts0);
+        Transport -> {error, {name_in_use, Transport}}
+    end.
+
+start_h1_listener(Name, Opts0) ->
     persistent_term:erase({masque_drain, Name}),
     Opts = defaults(Opts0),
     Port = maps:get(port, Opts),
@@ -221,8 +232,11 @@ spawn_session(Conn, StreamId, Protocol, Handler, HOpts, Req) ->
         handler_opts => HOpts,
         req => Req
     },
-    case masque_h1_session_sup:start_session(Args) of
-        {ok, _Pid} ->
+    case masque_session_start:await(fun masque_h1_session_sup:start_session/1, Args) of
+        ok ->
+            ok;
+        {error, {responded, _}} ->
+            %% The session already answered (101 or 200).
             ok;
         {error, Reason} ->
             reject(Conn, StreamId, map_init_error(Reason))
@@ -238,7 +252,11 @@ validate(<<"CONNECT">>, Path, Headers, _UdpTemplate, _IpTemplate) ->
     %% authority-form (`host:port' / `[ipv6]:port').
     case masque_uri:parse_authority_form(Path) of
         {ok, Host, Port} ->
-            case check_connect_host(Headers, Path) of
+            %% Same host rules as the h3 and h2 templates, so a policy
+            %% written for one transport holds on the others.
+            case masque_uri:valid_host(Host) andalso check_connect_host(Headers, Path) of
+                false ->
+                    {error, bad_host};
                 ok ->
                     Authority = header(<<"host">>, Headers, Path),
                     {ok, #{

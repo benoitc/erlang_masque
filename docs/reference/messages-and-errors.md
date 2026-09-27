@@ -56,7 +56,7 @@ When `transports` lists more than one transport, the session first belongs to a 
 | `{ssl_error, Reason}` | TLS socket error on the upgraded h1 connection. | h1 |
 | `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` | The proxy sent a bad capsule, ended the stream mid-capsule, or a capsule larger than `max_capsule_size` (default 65536). The session resets the stream. | UDP and IP on h2/h3 |
 
-udp-bind sessions report differently: they send `{masque_closed, Sess, Reason}` from `terminate/3` whenever they stop in `message` mode, with the process exit reason. A clean end (the proxy's FIN, or your own `masque:close/1`) arrives as `normal`; other values include `peer_reset`, `peer_closed`, `goaway`, `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` and `{ssl_error, _}`. A handshake failure can also be reported this way, with the handshake reason, in addition to the `{error, _}` returned by `bind_connect/3`.
+udp-bind sessions report differently: they send `{masque_closed, Sess, Reason}` from `terminate/3` whenever they stop in `message` mode, with the process exit reason. A clean end (the proxy's FIN, or your own `masque:close/1`) arrives as `normal`; other values include `peer_reset`, `peer_closed`, `goaway`, `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` and `{ssl_error, _}`. A failed handshake is only reported as the `{error, _}` returned by `bind_connect/3`; no `masque_closed` follows it.
 
 ## Results of client calls
 
@@ -69,7 +69,8 @@ Rejected before any socket opens (`connect/3` only):
 | Reason | Cause |
 | --- | --- |
 | `{invalid_proxy_uri, URI}` | not an `https://host[:port]` URI |
-| `{bad_target_for_protocol, Protocol}` | target shape does not match `protocol` (IP needs `{Target, IPProto}`, others `{Host, Port}`) |
+| `{bad_target_for_protocol, Protocol}` | target shape does not match `protocol` (IP needs `{Target, IPProto}`, others `{Host, Port}`), the host is not an IP address or a valid host name, or the port is outside 1..65535 |
+| `{invalid_opts, {timeout, T}}` | `timeout` is not a positive integer |
 | `{invalid_opts, {transports, T}}` | `transports` is not a list of `h3`, `h2` and `h1` |
 | `{invalid_opts, capsule_protocol_required_for_ip}` | `capsule_protocol => false` with `protocol => ip` |
 | `{invalid_opts, proxy_authorization_contains_crlf}` / `{invalid_opts, proxy_authorization_must_be_binary}` | bad `proxy_authorization` |
@@ -108,11 +109,13 @@ Racing and pooling (`upstream_pool => true`):
 | Reason | Cause |
 | --- | --- |
 | `{race_timeout, Last}` | no transport won before `timeout`; `Last` is the last attempt's error, or `undefined` |
-| `{owner_transfer_failed, Other}` | the winning session did not accept `{set_owner, _}`; the race continues with the others and this surfaces only if it was the last |
+| `{owner_transfer_failed, Other}` | the winning session answered `{set_owner, _}` with something other than `ok`; the race continues with the others and this surfaces only if it was the last. If the call itself fails (the session died, a timeout), that exit reason surfaces instead |
 | `timeout` | a pooled dial did not finish within `checkout_timeout_ms` (default 60 s) |
 | `{dial_failed, R}`, `{dial_crashed, {Class, R}}` | the pooled connection could not be dialed |
 | `shutdown` | the pool was closed while you waited |
 | `stream_limit` | the pooled connection was at its stream limit when the session asked for a stream |
+| `goaway` | the pooled connection received GOAWAY and takes no new streams |
+| `owner_gone` | the pooled connection closed between checkout and use; `connect/3` retries once before returning it |
 
 When several transports race, the reason you get is the last attempt's reason, not necessarily the most useful one. Dial each transport alone to see each failure.
 
@@ -134,6 +137,7 @@ When several transports race, the reason you get is the last attempt's reason, n
 | `shutdown_write/1` | `{error, not_supported}` | CONNECT-UDP, CONNECT-IP and udp-bind sessions |
 | `shutdown_write/1` | `{error, not_ready}` / `{error, closing}` / `{error, already_closed}` | TCP session still connecting, closing, or already shut down |
 | `send_capsule/3` | `{error, not_supported}` | CONNECT-TCP |
+| `set_mode/2`, `send/3`, `send_capsule/3`, `send_to/3` | `{error, badarg}` | a mode other than `message`/`queue`, a negative or non-integer context id or capsule type, a peer that is not `{IP, Port}` |
 | any call | `{error, not_ready}` | the handshake has not finished (`info/1` and `close/1` still work) |
 | any call | `{error, not_supported}` | the session's protocol has no such operation, for example `send/3` on CONNECT-TCP |
 | any call | `{error, closing}` | the session is closing |
@@ -142,7 +146,7 @@ When several transports race, the reason you get is the last attempt's reason, n
 
 Queue-mode datagram tunnels do not fail when the queue is full: they drop and count (`rx_dropped` in `masque:info/1`).
 
-Calls a session does not implement are not all handled: CONNECT-IP and udp-bind sessions have no catch-all call clause in `open`, so `masque:send/2` or `masque:shutdown_write/1` on them crashes the session.
+Every client session answers a call it does not implement: `{error, not_ready}` while connecting, `{error, not_supported}` when open, `{error, closing}` while closing. The session keeps running.
 
 `masque:close/1` always returns `ok`.
 
@@ -183,7 +187,7 @@ These are the reasons a server session process stops with. They are passed to th
 | `peer_reset`, `peer_closed` | the client reset the stream or closed the connection |
 | `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` | bad capsule from the client; the stream was reset (`H3_MESSAGE_ERROR` on h3, `PROTOCOL_ERROR` on h2) before stopping |
 | `stream_dead` | h3: the 2xx or the stream claim failed during finalize |
-| `idle_timeout` | h1: no traffic for `idle_timeout_ms` in `handler_opts` (default 300000) |
+| `idle_timeout` | no traffic in either direction for `idle_timeout_ms` in `handler_opts` (default 300000), every transport |
 | `{tunnel_send_failed, R}` | CONNECT-TCP: a write to the client failed or stayed blocked for 30 s |
 | `{handler_crash, R}` | a handler callback raised. In `init/2` this fails the handshake (502). In later callbacks only udp-bind sessions stop; the other sessions log the crash and keep running. |
 | `{bad_init, Other}` | `init/2` returned an unexpected shape; the handshake fails (502) |

@@ -30,6 +30,8 @@
     code_change/3
 ]).
 
+-define(MAX_SESSION_BACKLOG, 10000).
+
 -record(state, {
     %% StreamId -> SessionPid
     sessions = #{} :: #{non_neg_integer() => pid()},
@@ -179,12 +181,10 @@ handle_info({session_init_done, StreamId, {ok, Pid}}, S) ->
                 )
             }};
         error ->
-            %% Cancelled (caller timed out)
-            try
-                gen_server:stop(Pid, cancelled, 5000)
-            catch
-                _:_ -> ok
-            end,
+            %% Cancelled (caller timed out, or the stream was reset):
+            %% ask the session to stop without writing to the stream
+            %% and without waiting for it, so routing never stalls.
+            gen_server:cast(Pid, connection_closed),
             {noreply, S}
     end;
 handle_info({masque_finalized, StreamId, Pid, Result}, S) ->
@@ -314,7 +314,7 @@ code_change(_OldVsn, S, _Extra) ->
 route_to_session(StreamId, Msg, S) ->
     case maps:find(StreamId, S#state.sessions) of
         {ok, Pid} ->
-            Pid ! Msg,
+            forward(Pid, Msg),
             {noreply, S};
         error ->
             case maps:find(StreamId, S#state.pending) of
@@ -335,6 +335,20 @@ route_to_session(StreamId, Msg, S) ->
                     {noreply, S}
             end
     end.
+
+%% Datagrams are unreliable: when a session cannot keep up, drop them
+%% here rather than let its mailbox grow. Stream data is never dropped.
+forward(Pid, {masque_datagram_in, _, _} = Msg) ->
+    case erlang:process_info(Pid, message_queue_len) of
+        {message_queue_len, N} when N >= ?MAX_SESSION_BACKLOG ->
+            masque_metrics:backlog_drop_inc();
+        _ ->
+            Pid ! Msg,
+            ok
+    end;
+forward(Pid, Msg) ->
+    Pid ! Msg,
+    ok.
 
 find_pending_by_worker(WorkerPid, Pending) ->
     maps:fold(

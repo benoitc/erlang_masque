@@ -68,13 +68,13 @@ flowchart TD
 
 - **Per listener**: the `h2` server. Its reference is stored in `persistent_term` so you can stop it by name.
 - **Per connection**: only the `h2` library's processes. There is no router: `h2` delivers stream events to whichever process registered with `h2:set_stream_handler/3`, and h2 has no separate datagram channel. If `max_tunnels_per_connection` is set, the dispatch process counts tunnels in the `masque_h2_tunnel_counts` ETS table and spawns one small unlinked watcher per connection that deletes the row when the connection dies.
-- **Per tunnel**: a child of the protocol's h2 session supervisor (`masque_h2_session_sup` for UDP, `masque_h2_tcp_session_sup`, `masque_h2_ip_session_sup`, `masque_h2_udp_bind_session_sup`). The session's `init/1` runs the handler's `init/2`, sends the 2xx, and registers as the stream handler, all before `supervisor:start_child/2` returns. Sessions release their tunnel count slot on exit.
+- **Per tunnel**: a child of the protocol's h2 session supervisor (`masque_h2_session_sup` for UDP, `masque_h2_tcp_session_sup`, `masque_h2_ip_session_sup`, `masque_h2_udp_bind_session_sup`). `supervisor:start_child/2` returns at once; the session then runs the handler's `init/2`, sends the 2xx and registers as the stream handler in `handle_continue/2`, and reports the outcome to the dispatch process (`masque_session_start`). A slow handler therefore never holds up other starts. Sessions release their tunnel count slot on exit.
 
 ### HTTP/1.1
 
 - **Per listener**: the `h1` server, TLS only, reference in `persistent_term`.
 - **Per connection**: the `h1` library's connection process until the handshake; one tunnel at most per connection.
-- **Per tunnel**: a child of `masque_h1_session_sup` (UDP), `masque_h1_ip_session_sup`, `masque_h1_tcp_session_sup` or `masque_h1_udp_bind_session_sup`. The session runs the handler's `init/2`, then calls `h1:accept_upgrade/3` (writes 101) or, for classic CONNECT, `h1:accept_connect/3` (writes 200). Either call hands the TLS socket to the session, which from then on reads and writes it directly. h1 sessions are the only server sessions with an idle timeout (`idle_timeout_ms` in `handler_opts`, default 300000). A rejected h1 request closes the connection.
+- **Per tunnel**: a child of `masque_h1_session_sup` (UDP), `masque_h1_ip_session_sup`, `masque_h1_tcp_session_sup` or `masque_h1_udp_bind_session_sup`, started like the h2 sessions (`masque_session_start`). The session runs the handler's `init/2`, then calls `h1:accept_upgrade/3` (writes 101) or, for classic CONNECT, `h1:accept_connect/3` (writes 200). Either call hands the TLS socket to the session, which from then on reads and writes it directly. Like every server session, h1 sessions have an idle timeout (`idle_timeout_ms` in `handler_opts`, default 300000). A rejected h1 request closes the connection.
 
 ### Where handler code runs
 
@@ -137,7 +137,7 @@ Records and `sys:get_state/1` do not show this state. Look here when behaviour d
 | `masque_ip_drop_counters`, `masque_ip_lifecycle_counters`, `masque_bind_drop_counters` | `persistent_term` holding `counters` refs | none | `masque_metrics` setup, created once | CONNECT-IP and udp-bind counters |
 | `{masque_chain_handler, node_token}` | `persistent_term` | none | `masque_chain_handler:init_node_token/0` at application start | Default `via` token for loop detection |
 | `masque_h2_tunnel_counts` | public named ETS `set` | `masque_sup` process | h2 dispatch processes, h2 sessions, per-connection watchers | Per-connection tunnel limit on h2 |
-| `masque_ip_session_registry` | public named ETS `ordered_set` | `masque_ip_session_registry` | the registry gen_server (writes); anyone reads | Which CONNECT-IP session serves which address |
+| `masque_ip_session_registry` | public named ETS `ordered_set` | `masque_sup` (survives a registry restart) | the registry gen_server (writes); anyone reads | Which CONNECT-IP session serves which address |
 | `{masque_client_owner, held}` | process dictionary of a client session | the session | `masque_client_owner` | Owner messages held until the racer calls `set_owner` |
 
 Registered names: `masque_sup`, the eight session supervisors, `masque_upstream_pool` and `masque_ip_session_registry`.
@@ -165,7 +165,6 @@ Open questions (no answer in the repository):
 - Open question: why are h3 server sessions started by the router with `gen_server:start` and linked, instead of living under a session supervisor like h2 and h1 sessions?
 - Open question: is the h3-only router a requirement of `quic_h3` ownership alone, or also a deliberate choice to keep routing state per connection?
 - Open question: why does CONNECT-UDP have separate h3 and h2 modules on both sides (`masque_client_session` / `masque_h2_client_session`, `masque_server_session` / `masque_h2_server_session`) while TCP, IP and udp-bind use one module for h3 and h2 with a `transport` field?
-- Open question: should idle timeouts exist only on h1 server sessions?
 - Open question: should client sessions stay outside any supervisor?
 
 ## Where to go next

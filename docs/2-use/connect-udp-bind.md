@@ -29,7 +29,9 @@ With `accept_bind => true`, a CONNECT-UDP request carrying `connect-udp-bind: ?1
 | `public_addresses` | none | `[{IP, Port}]` sent in `proxy-public-address`. Required when the socket is bound to a wildcard address; otherwise the socket name is used. With neither, the tunnel is refused. |
 | `public_address_fun` | none | `fun(SockName) -> [{IP, Port}]`, takes precedence over `public_addresses`. |
 | `peer_filter_fun` | public peers only | `fun(IP, Port) -> ok \| {drop, Reason}`, called for every packet the client sends. |
+| `allow` | accept all | The listener target policy, `fun({HostBin, Port}) -> boolean()`, asked once per peer (host as text, for example `<<"192.0.2.1">>`). A refused peer is dropped (`peer_filter`). |
 | `allow_loopback`, `allow_private` | `false` | Widen the default peer filter. |
+| `allow_self`, `self_addresses` | `false`, `[]` | The proxy's own addresses (interfaces, `self_addresses`, `public_addresses`) are refused as peers unless `allow_self`. |
 | `scrub_fun` | pass | `fun(Payload, UserState) -> {pass, Payload, UserState} \| {drop, Reason, UserState}`, per-packet filter; `user_state` seeds `UserState`. |
 | `active_n` | `32` | Datagrams read before the socket pauses until the session relayed them. |
 | `max_compression_contexts` | `1024` | Entries per compression table. |
@@ -63,7 +65,9 @@ receive {masque_bind_packet, Sess, {IP, Port}, Bytes} -> {IP, Port, Bytes} end.
 - In queue mode `masque:recv/2` returns `{ok, {IP, Port}, Bytes}`.
 - On a scoped bind, datagrams the proxy sends on context 0 reach you as `masque_bind_packet` from the scoped target.
 
-Open question: on a scoped bind the default `masque_udp_bind_proxy_handler` applies only the peer filter, not the scoped `{Host, Port}`, and it does not export `handle_packet/2`, so context-0 datagrams from the client are ignored. Whether scoped binds are meant to be enforced by the default handler is not stated in the code.
+On a scoped bind the default `masque_udp_bind_proxy_handler` resolves the scoped `{Host, Port}` once and only exchanges packets with it, in both directions. It does not export `handle_packet/2`, so context-0 datagrams from the client are ignored (Q16 in [decisions](../3-change/decisions.md)).
+
+`send_to/3` uses a context the proxy opened for the peer when there is one; contexts carry datagrams both ways.
 
 ## Compression contexts
 

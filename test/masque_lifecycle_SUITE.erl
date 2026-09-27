@@ -42,6 +42,16 @@
     h1_bind_handler_crash_closes_tunnel/1,
     unsupported_call_keeps_session/1,
     udp_bind_skips_pool/1,
+    h2_slow_start_does_not_block_others/1,
+    default_tunnel_cap_is_100/1,
+    h3_datagram_capsule_is_a_datagram/1,
+    h3_many_small_capsules_in_one_write/1,
+    listener_name_unique_across_transports/1,
+    h3_idle_tunnel_ends/1,
+    h2_tcp_receive_window_is_bounded/1,
+    h2_init_close_session_frees_slot/1,
+    h3_init_close_session_balances_metrics/1,
+    h3_send_to_on_proxy_context/1,
     h1_every_tunnel_counts_open_and_close/1,
     h1_udp_bind_assign_by_address/1,
     h1_udp_bind_pending_limit/1,
@@ -100,6 +110,16 @@ all() ->
         h1_bind_handler_crash_closes_tunnel,
         unsupported_call_keeps_session,
         udp_bind_skips_pool,
+        h2_slow_start_does_not_block_others,
+        default_tunnel_cap_is_100,
+        h3_datagram_capsule_is_a_datagram,
+        h3_many_small_capsules_in_one_write,
+        listener_name_unique_across_transports,
+        h3_idle_tunnel_ends,
+        h2_tcp_receive_window_is_bounded,
+        h2_init_close_session_frees_slot,
+        h3_init_close_session_balances_metrics,
+        h3_send_to_on_proxy_context,
         h1_every_tunnel_counts_open_and_close,
         h1_udp_bind_assign_by_address,
         h1_udp_bind_pending_limit,
@@ -215,6 +235,26 @@ extra_opts(h3_udp_bind_output_before_finalize_is_kept) ->
     };
 extra_opts(h1_bind_handler_crash_closes_tunnel) ->
     (bind_opts())#{bind_handler => masque_crash_bind_handler};
+extra_opts(h3_send_to_on_proxy_context) ->
+    B = bind_opts(),
+    HOpts = maps:get(handler_opts, B),
+    B#{
+        bind_handler => masque_crash_bind_handler,
+        handler_opts => HOpts#{early_assign => {{127, 0, 0, 1}, send_to_peer_port()}}
+    };
+extra_opts(h3_many_small_capsules_in_one_write) ->
+    #{handler_opts => #{max_capsule_size => 600}};
+extra_opts(h3_idle_tunnel_ends) ->
+    #{handler_opts => #{idle_timeout_ms => 300}};
+extra_opts(h2_tcp_receive_window_is_bounded) ->
+    #{tcp_handler => masque_report_tcp_handler, handler_opts => #{data_delay => 2000}};
+extra_opts(h2_slow_start_does_not_block_others) ->
+    #{handler_opts => #{delay_ports => #{7001 => 3000}}};
+extra_opts(Case) when
+    Case =:= h2_init_close_session_frees_slot;
+    Case =:= h3_init_close_session_balances_metrics
+->
+    #{handler_opts => #{init_actions => [close_session]}, max_tunnels_per_connection => 1};
 extra_opts(udp_bind_skips_pool) ->
     bind_opts();
 extra_opts(h1_every_tunnel_counts_open_and_close) ->
@@ -563,6 +603,167 @@ h1_udp_bind_pending_limit(Config) ->
     end,
     {open, _} = sys:get_state(Sess),
     ok = masque:close(Sess).
+
+%% RFC 9297 sec 3.5: a DATAGRAM capsule on an h3 stream carries an
+%% HTTP datagram; the proxy handles it like a QUIC DATAGRAM frame.
+h3_datagram_capsule_is_a_datagram(Config) ->
+    {Conn, Sid} = h3_open_udp(Config),
+    Cap = iolist_to_binary(masque_capsule:encode(0, <<0, "via-capsule">>)),
+    ok = quic_h3:send_data(Conn, Sid, Cap, false),
+    receive
+        {quic_h3, Conn, {datagram, Sid, <<0, "via-capsule">>}} -> ok
+    after 5000 -> ct:fail(no_echo)
+    end,
+    quic_h3:close(Conn).
+
+%% Many small complete capsules in one read are not mistaken for one
+%% oversized capsule.
+h3_many_small_capsules_in_one_write(Config) ->
+    {Conn, Sid} = h3_open_udp(Config),
+    Pid = await_session(),
+    One = iolist_to_binary(masque_capsule:encode(16#20, binary:copy(<<1>>, 60))),
+    %% About 1 KiB in one packet, over the 600-byte `max_capsule_size'.
+    ok = quic_h3:send_data(Conn, Sid, binary:copy(One, 16), false),
+    timer:sleep(500),
+    ?assert(is_process_alive(Pid)),
+    quic_h3:close(Conn).
+
+%% One name, one listener: the drain flag is keyed by name.
+listener_name_unique_across_transports(Config) ->
+    #{cert_file := CertFile, key_file := KeyFile} = ?config(certs, Config),
+    H2Name = maps:get(name, ?config(h2, Config)),
+    ?assertEqual(
+        {error, {name_in_use, h2}},
+        masque:start_listener_h1(H2Name, #{port => 0, cert => CertFile, key => KeyFile})
+    ).
+
+%% Without `max_tunnels_per_connection', a connection holds at most 100
+%% tunnels (h3 router, h2 dispatch).
+default_tunnel_cap_is_100(Config) ->
+    Sess = connect(Config, h3),
+    Pid = await_session(),
+    Router = element(4, sys:get_state(Pid)),
+    ?assertEqual(100, element(5, sys:get_state(Router))),
+    ok = masque:close(Sess).
+
+%% A tunnel with no traffic either way ends after `idle_timeout_ms'.
+h3_idle_tunnel_ends(Config) ->
+    Sess = connect(Config, h3),
+    Pid = await_session(),
+    MRef = erlang:monitor(process, Pid),
+    receive
+        {'DOWN', MRef, process, Pid, idle_timeout} -> ok
+    after 3000 -> ct:fail(not_idled_out)
+    end,
+    await_closed(Sess).
+
+%% h2 receive credit is returned only as the handler consumes data, so
+%% a target that stops reading bounds what piles up in the session.
+h2_tcp_receive_window_is_bounded(Config) ->
+    {EchoPid, EchoPort} = start_tcp_echo(),
+    Sess = tcp_connect(Config, h2, EchoPort),
+    Pid = await_session(),
+    Chunk = binary:copy(<<0>>, 16384),
+    Sender = spawn(fun() -> [masque:send(Sess, Chunk) || _ <- lists:seq(1, 64)] end),
+    timer:sleep(1500),
+    {messages, Msgs} = erlang:process_info(Pid, messages),
+    Queued = lists:sum([byte_size(B) || {h2, _, {data, _, B, _}} <- Msgs]),
+    %% One stream window (64 KiB by default) at most, not the 1 MiB sent.
+    ?assert(Queued =< 131072),
+    exit(Sender, kill),
+    exit(EchoPid, kill),
+    _ = masque:close(Sess).
+
+%% A slow handler start on one h2 tunnel does not hold up the start of
+%% another: sessions no longer start inside the supervisor call.
+h2_slow_start_does_not_block_others(Config) ->
+    Self = self(),
+    Port = maps:get(port, ?config(h2, Config)),
+    Proxy = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    Opts = #{verify => verify_none, transports => [h2], timeout => 10000},
+    spawn(fun() -> Self ! {slow, masque:connect(Proxy, {<<"192.0.2.6">>, 7001}, Opts)} end),
+    _ = await_session(),
+    T0 = erlang:monotonic_time(millisecond),
+    {ok, Fast} = masque:connect(Proxy, {<<"192.0.2.6">>, 443}, Opts),
+    ?assert(erlang:monotonic_time(millisecond) - T0 < 1500),
+    ok = masque:close(Fast),
+    receive
+        {slow, {ok, Slow}} -> masque:close(Slow)
+    after 10000 -> ct:fail(slow_never_finished)
+    end.
+
+%% A handler that closes the tunnel from `init/2' gets its 200, then a
+%% clean end; the per-connection tunnel slot is given back.
+h2_init_close_session_frees_slot(Config) ->
+    Sess = connect(Config, h2),
+    receive
+        {masque_closed, Sess, _} -> ok
+    after 5000 -> ct:fail(not_closed)
+    end,
+    ok = wait_until(
+        fun() -> lists:all(fun({_, N}) -> N =:= 0 end, ets:tab2list(masque_h2_tunnel_counts)) end,
+        50
+    ),
+    %% The slot is free: with a limit of 1, a second tunnel is accepted.
+    Sess2 = connect(Config, h2),
+    receive
+        {masque_closed, Sess2, _} -> ok
+    after 5000 -> ct:fail(second_not_closed)
+    end.
+
+%% Init actions that end the tunnel during an h3 finalize still count
+%% the close.
+h3_init_close_session_balances_metrics(Config) ->
+    Opened = {masque_metrics, tunnel_opened, 1},
+    Closed = {masque_metrics, tunnel_closed, 2},
+    _ = erlang:trace_pattern(Opened, true, [call_count]),
+    _ = erlang:trace_pattern(Closed, true, [call_count]),
+    try
+        {call_count, O0} = erlang:trace_info(Opened, call_count),
+        {call_count, C0} = erlang:trace_info(Closed, call_count),
+        Sess = connect(Config, h3),
+        receive
+            {masque_closed, Sess, _} -> ok
+        after 5000 -> ct:fail(not_closed)
+        end,
+        ok = wait_until(
+            fun() ->
+                {call_count, O} = erlang:trace_info(Opened, call_count),
+                {call_count, C} = erlang:trace_info(Closed, call_count),
+                {O - O0, C - C0} =:= {1, 1}
+            end,
+            50
+        )
+    after
+        _ = erlang:trace_pattern(Opened, false, [call_count]),
+        _ = erlang:trace_pattern(Closed, false, [call_count])
+    end.
+
+%% Contexts are two-way: a context the proxy opened for a peer also
+%% carries the client's packets to that peer.
+h3_send_to_on_proxy_context(Config) ->
+    {ok, Peer} = gen_udp:open(send_to_peer_port(), [binary, {ip, {127, 0, 0, 1}}, {active, true}]),
+    Sess = bind_connect(Config, h3),
+    PeerAddr = {{127, 0, 0, 1}, send_to_peer_port()},
+    receive
+        {masque_compression_assigned, Sess, _Id, PeerAddr} -> ok
+    after 5000 -> ct:fail(no_proxy_assign)
+    end,
+    %% The datagram may overtake our ACK on the stream: retry.
+    ok = send_until_received(Sess, PeerAddr, Peer, 20),
+    ok = masque:close(Sess),
+    gen_udp:close(Peer).
+
+send_until_received(_Sess, _PeerAddr, _Peer, 0) ->
+    ct:fail(peer_never_received);
+send_until_received(Sess, PeerAddr, Peer, N) ->
+    ok = masque:send_to(Sess, PeerAddr, <<"via-proxy-context">>),
+    receive
+        {udp, Peer, _, _, <<"via-proxy-context">>} -> ok
+    after 200 -> send_until_received(Sess, PeerAddr, Peer, N - 1)
+    end.
+
+send_to_peer_port() -> 47811.
 
 %% `upstream_pool => true' has no effect on a bind: no pooled
 %% connection is checked out, on the single-transport path or in a race.

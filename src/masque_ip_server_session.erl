@@ -15,6 +15,7 @@
 
 -export([
     init/1,
+    handle_continue/2,
     handle_call/3,
     handle_cast/2,
     handle_info/2,
@@ -28,6 +29,8 @@
 %% Most ADDRESS_REQUEST entries left unanswered at once.
 -define(MAX_PEER_PENDING, 64).
 -define(H3_INTERNAL_ERROR, 16#102).
+
+-define(DEFAULT_IDLE_MS, 300000).
 
 -record(state, {
     conn :: pid(),
@@ -50,7 +53,10 @@
     peer_pending = #{} :: #{pos_integer() => true},
     %% Monitor on the router (H3 path).
     router_ref :: reference() | undefined,
-    start_time :: integer() | undefined
+    start_time :: integer() | undefined,
+    %% Idle timeout (`idle_timeout_ms'), armed once the tunnel is open.
+    idle_ms = ?DEFAULT_IDLE_MS :: non_neg_integer() | infinity,
+    idle :: masque_idle:idle() | undefined
 }).
 
 %%====================================================================
@@ -65,14 +71,42 @@ start_link(Args) ->
 %% gen_server
 %%====================================================================
 
-init(
+%% With a `starter' (h2 and h1 listeners) the real start runs in
+%% `handle_continue/2' so the session supervisor is not held up (see
+%% `masque_session_start'). `start/1' returns `{stop, R}' when nothing
+%% was sent, `{stop, R, S}' once the handler started, so `terminate/2'
+%% cleans up and the listener stays silent.
+init(Args) ->
+    case masque_session_start:deferred(Args) of
+        true ->
+            {ok, {starting, Args}, {continue, start}};
+        false ->
+            case start(Args) of
+                {ok, S} -> {ok, S};
+                {stop, Reason} -> {stop, Reason};
+                {stop, Reason, _S} -> {stop, Reason}
+            end
+    end.
+
+handle_continue(start, {starting, Args}) ->
+    case start(Args) of
+        {ok, S} ->
+            masque_session_start:report(Args, ok),
+            {noreply, S};
+        {stop, Reason} ->
+            masque_session_start:report(Args, {error, Reason}),
+            {stop, normal, {starting, Args}};
+        {stop, Reason, S} ->
+            masque_session_start:report(Args, {error, {responded, Reason}}),
+            {stop, {shutdown, Reason}, S}
+    end.
+
+start(
     #{
         conn := Conn,
         stream_id := StreamId,
         transport := Transport,
-        handler := Handler,
-        handler_opts := HOpts,
-        req := Req
+        handler_opts := HOpts
     } = Args
 ) ->
     process_flag(trap_exit, true),
@@ -87,6 +121,39 @@ init(
         HOpts,
         ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE
     ),
+    case check_datagram_mtu(Transport, Conn, StreamId) of
+        ok -> init_session(Args, Router, RouterRef, MaxCap);
+        {error, _} = Err -> {stop, Err}
+    end.
+
+%% RFC 9484 sec 9.1: an h3 tunnel whose datagrams cannot carry a
+%% 1280-byte IPv6 packet (plus the context id) is refused before the
+%% handler runs. h2 capsules have no such limit.
+check_datagram_mtu(h3, Conn, StreamId) ->
+    try quic_h3:max_datagram_size(Conn, StreamId) of
+        N when is_integer(N), N > 0, N < ?MASQUE_IPV6_MIN_MTU + 1 ->
+            {error, {mtu_too_low, N, ?MASQUE_IPV6_MIN_MTU}};
+        _ ->
+            ok
+    catch
+        _:_ -> ok
+    end;
+check_datagram_mtu(_, _Conn, _StreamId) ->
+    ok.
+
+init_session(
+    #{
+        conn := Conn,
+        stream_id := StreamId,
+        transport := Transport,
+        handler := Handler,
+        handler_opts := HOpts,
+        req := Req
+    },
+    Router,
+    RouterRef,
+    MaxCap
+) ->
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, Actions} ->
             State = #state{
@@ -96,6 +163,7 @@ init(
                 router_ref = RouterRef,
                 transport = Transport,
                 handler = Handler,
+                idle_ms = maps:get(idle_timeout_ms, HOpts, ?DEFAULT_IDLE_MS),
                 h_state = HState,
                 req = Req,
                 max_cap = MaxCap
@@ -114,11 +182,14 @@ init(
 finalize_h2(State0, Actions) ->
     case send_response(State0, 200, response_headers()) of
         ok ->
-            State1 = claim_stream_and_buffer(State0),
-            State = maybe_flush_buf(mark_open(State1)),
-            apply_init_actions(Actions, State);
+            case claim_stream_and_buffer(State0) of
+                {ok, State1} ->
+                    do_actions(Actions, maybe_flush_buf(mark_open(State1)));
+                {error, _} ->
+                    {stop, stream_dead, State0}
+            end;
         {error, _} ->
-            {stop, stream_dead}
+            {stop, stream_dead, State0}
     end.
 
 %% Bytes that landed on the stream before the handler was claimed
@@ -134,28 +205,19 @@ claim_stream_and_buffer(
 ) ->
     case h2:set_stream_handler(C, Sid, self()) of
         ok ->
-            S;
+            {ok, S};
         {ok, Chunks} ->
             More = iolist_to_binary([D || {D, _Fin} <- Chunks]),
-            S#state{cap_buf = <<Buf/binary, More/binary>>};
-        _ ->
-            S
-    end;
-claim_stream_and_buffer(#state{transport = h3} = S) ->
-    _ = claim_stream(S),
-    S.
+            {ok, S#state{cap_buf = <<Buf/binary, More/binary>>}};
+        {error, _} = Err ->
+            Err
+    end.
 
 maybe_flush_buf(#state{cap_buf = <<>>} = S) ->
     S;
 maybe_flush_buf(S) ->
     self() ! flush_cap_buf,
     S.
-
-apply_init_actions(Actions, State) ->
-    case do_actions(Actions, State) of
-        {ok, S2} -> {ok, S2};
-        {stop, Reason, _} -> {stop, Reason}
-    end.
 
 response_headers() ->
     [{<<"capsule-protocol">>, <<"?1">>}].
@@ -185,11 +247,18 @@ finalize(#state{pending_actions = Actions} = S) ->
                 {error, _} ->
                     {error, S};
                 _ ->
-                    S1 = run_init_actions(
-                        Actions,
-                        mark_open(S#state{pending_actions = undefined})
-                    ),
-                    replay_early(lists:reverse(S1#state.early), S1#state{early = []})
+                    case
+                        run_init_actions(
+                            Actions,
+                            mark_open(S#state{pending_actions = undefined})
+                        )
+                    of
+                        {ok, S1} ->
+                            replay_early(lists:reverse(S1#state.early), S1#state{early = []});
+                        {stop, _, _} = Stop ->
+                            %% `terminate/2' sees the state with `start_time' set.
+                            Stop
+                    end
             end;
         {error, _} ->
             {error, S}
@@ -257,54 +326,68 @@ handle_cast(_Msg, S) ->
 %%====================================================================
 
 %% H3 datagram path (via connection router).
-handle_info(
+%% Every message counts as traffic for the idle timer; the timer's
+%% own message checks whether the tunnel has been idle long enough.
+handle_info({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
+    case masque_idle:check(Ref, Idle) of
+        expired -> {stop, idle_timeout, S};
+        {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
+    end;
+handle_info(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
+    handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
+handle_info(Msg, S) ->
+    handle_traffic(Msg, S).
+
+handle_traffic(
     {masque_datagram_in, StreamId, Payload},
     #state{stream_id = StreamId} = S
 ) ->
     dispatch_datagram(Payload, S);
-handle_info(
+handle_traffic(
     {masque_stream_data, StreamId, Data, Fin},
     #state{stream_id = StreamId} = S
 ) ->
     handle_stream_bytes(Data, Fin, S);
-handle_info(
+handle_traffic(
     {masque_stream_reset, StreamId, _},
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
-handle_info(
+handle_traffic(
     {Tag, _Conn, {data, StreamId, Bytes, Fin}},
     #state{stream_id = StreamId} = S
 ) when
     Tag =:= quic_h3; Tag =:= h2
 ->
     handle_stream_bytes(Bytes, Fin, S);
-handle_info(
+handle_traffic(
     {Tag, _Conn, {stream_reset, StreamId, _}},
     #state{stream_id = StreamId} = S
 ) when
     Tag =:= quic_h3; Tag =:= h2
 ->
     {stop, peer_reset, S};
-handle_info({h2, _Conn, {closed, _Reason}}, S) ->
+handle_traffic({h2, _Conn, {closed, _Reason}}, S) ->
     {stop, peer_closed, S};
-handle_info(flush_cap_buf, #state{cap_buf = Buf} = S) when Buf =/= <<>> ->
+handle_traffic(flush_cap_buf, #state{cap_buf = Buf} = S) when Buf =/= <<>> ->
     drain_capsules(Buf, false, S#state{cap_buf = <<>>});
-handle_info(flush_cap_buf, S) ->
+handle_traffic(flush_cap_buf, S) ->
     {noreply, S};
-handle_info({'EXIT', _Pid, _Reason}, S) ->
+handle_traffic({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
-handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
+handle_traffic({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
     {stop, router_gone, S};
-handle_info(Msg, #state{pending_actions = Actions, early = Early} = S) when
+handle_traffic(Msg, #state{pending_actions = Actions, early = Early} = S) when
     Actions =/= undefined
 ->
     %% Not finalized yet: nothing may be written to the stream before
     %% the 2xx, so keep the message for `finalize'.
     {noreply, S#state{early = [Msg | Early]}};
-handle_info(Msg, S) ->
+handle_traffic(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
+terminate(_Reason, {starting, Args}) ->
+    masque_session_start:abandon(Args);
 terminate(
     Reason,
     #state{
@@ -374,7 +457,10 @@ unregister_from_router(Router, StreamId) ->
 %% until `terminate/2'.
 mark_open(#state{transport = Transport} = S) ->
     masque_metrics:tunnel_opened(#{protocol => ip, transport => Transport}),
-    S#state{start_time = erlang:monotonic_time(millisecond)}.
+    S#state{
+        start_time = erlang:monotonic_time(millisecond),
+        idle = masque_idle:new(S#state.idle_ms)
+    }.
 
 emit_tunnel_closed(#state{start_time = undefined}) ->
     ok;
@@ -395,7 +481,7 @@ code_change(_OldVsn, S, _Extra) ->
 dispatch_datagram(Payload, S) ->
     case masque_datagram:decode(Payload) of
         {ok, {?MASQUE_CONTEXT_ID_IP, IPPkt}} ->
-            dispatch(handle_ip_packet, [IPPkt], S);
+            dispatch(handle_ip_packet, [IPPkt], count_in(IPPkt, S));
         {ok, {_OtherCtx, _}} ->
             %% unknown context-id — silently drop
             {noreply, S};
@@ -409,7 +495,7 @@ dispatch_datagram(Payload, S) ->
 
 handle_stream_bytes(Data, Fin, #state{cap_buf = Buf, max_cap = Max} = S) ->
     New = <<Buf/binary, Data/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> reset_and_stop(capsule_buffer_overflow, S);
         false -> drain_capsules(New, Fin, S)
     end.
@@ -452,7 +538,11 @@ decode_one_capsule(#state{transport = h3}, Buf) ->
     end.
 
 dispatch_capsule(datagram, Inner, S) ->
-    %% H2-only: datagram is a capsule carrying a Context-ID+Payload.
+    %% h2: `h2_capsule' names the DATAGRAM capsule.
+    dispatch_datagram(Inner, S);
+dispatch_capsule(0, Inner, S) ->
+    %% h3: a DATAGRAM capsule on the stream is an HTTP datagram too
+    %% (RFC 9297 sec 3.5).
     dispatch_datagram(Inner, S);
 dispatch_capsule(
     ?MASQUE_CAPSULE_ADDRESS_REQUEST,
@@ -584,13 +674,8 @@ apply_actions_noreply(Actions, State) ->
         {stop, Reason, S2} -> {stop, Reason, S2}
     end.
 
-run_init_actions([], S) ->
-    S;
 run_init_actions(Actions, S) ->
-    case do_actions(Actions, S) of
-        {ok, S2} -> S2;
-        {stop, Reason, _} -> exit(Reason)
-    end.
+    do_actions(Actions, S).
 
 %%====================================================================
 %% Action interpreter
@@ -599,6 +684,7 @@ run_init_actions(Actions, S) ->
 do_actions([], S) ->
     {ok, S};
 do_actions([{send_ip_packet, Pkt} | Rest], S) ->
+    ok = count_out(Pkt, S),
     _ = transport_send_datagram(S, ?MASQUE_CONTEXT_ID_IP, Pkt),
     do_actions(Rest, S);
 do_actions([{assign, Entries} | Rest], S) ->
@@ -775,3 +861,11 @@ try_callback(Mod, Fun, Args) ->
         false ->
             ok
     end.
+
+%% Tunnel payload bytes for the `masque.bytes.*' counters.
+count_in(Bytes, #state{transport = T} = S) ->
+    masque_metrics:bytes_in(iolist_size(Bytes), #{protocol => ip, transport => T}),
+    S.
+
+count_out(Bytes, #state{transport = T}) ->
+    masque_metrics:bytes_out(iolist_size(Bytes), #{protocol => ip, transport => T}).

@@ -93,6 +93,7 @@ init_per_testcase(Case, Config) ->
         ip_handler => EgressHandler,
         handler_opts => #{
             allow_private => true,
+            max_assignments => 2,
             address_pool => #ip_route{
                 version = 4,
                 start_addr = {10, 77, 0, 1},

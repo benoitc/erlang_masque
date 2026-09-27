@@ -69,10 +69,10 @@ init(#{target_host := Host, target_port := Port} = Req, Opts) ->
     AllowPrivate = maps:get(allow_private, Opts, false),
     case resolve(ResolverFun, Host, Family) of
         {ok, IP, BindFamily} ->
-            case AllowPrivate orelse masque_ip:is_public(IP) of
-                false ->
-                    {stop, {resolution_failed, private_address}};
-                true ->
+            case target_allowed(IP, AllowPrivate, Opts) of
+                {error, Why} ->
+                    {stop, {resolution_failed, Why}};
+                ok ->
                     open_udp(IP, Port, BindPort, BindFamily, SocketOpts, ActiveN)
             end;
         {error, Reason} ->
@@ -120,6 +120,10 @@ handle_info(
 handle_info({udp_passive, Socket}, #state{socket = Socket, active_n = N} = State) ->
     %% Every datagram delivered before this message has been relayed.
     _ = inet:setopts(Socket, [{active, N}]),
+    {ok, State};
+%% An ICMP port unreachable on the connected socket: the target is not
+%% listening right now. Datagrams are unreliable; keep the tunnel.
+handle_info({udp_error, Socket, econnrefused}, #state{socket = Socket} = State) ->
     {ok, State};
 handle_info({udp_error, Socket, Reason}, #state{socket = Socket} = State) ->
     {stop, {target_socket_error, Reason}, State};
@@ -190,6 +194,19 @@ pick_family(auto, Host) ->
     case inet:parse_address(HostStr) of
         {ok, {_, _, _, _, _, _, _, _}} -> inet6;
         _ -> inet
+    end.
+
+%% Non-public targets need `allow_private'; the proxy's own addresses
+%% need `allow_self'.
+target_allowed(IP, AllowPrivate, Opts) ->
+    case AllowPrivate orelse masque_ip:is_public(IP) of
+        false ->
+            {error, private_address};
+        true ->
+            case maps:get(allow_self, Opts, false) orelse not masque_ip:is_self(IP, Opts) of
+                true -> ok;
+                false -> {error, self_address}
+            end
     end.
 
 %% A listener-level `resolver' returns an address list (it is shared

@@ -35,6 +35,10 @@ are stored in `persistent_term` for zero-overhead lookups.
     ip_advertised_count/0
 ]).
 
+%% Datagrams the h3 router dropped because the session's mailbox was
+%% backed up.
+-export([backlog_drop_inc/0, backlog_drop_count/0]).
+
 %% Simple drop counters for Connect-UDP-Bind sessions, same shape as
 %% the CONNECT-IP ones.
 -export([
@@ -48,6 +52,7 @@ are stored in `persistent_term` for zero-overhead lookups.
 setup() ->
     setup_ip_counters(),
     setup_bind_counters(),
+    persistent_term:put(masque_backlog_drops, counters:new(1, [write_concurrency])),
     Meter = instrument_meter:get_meter(<<"masque">>),
     persistent_term:put(
         masque_tunnels_total,
@@ -303,4 +308,23 @@ bind_reason_index(Reason) ->
     case index_of(Reason, bind_drop_reasons(), 1) of
         not_found -> index_of(other, bind_drop_reasons(), 1);
         I -> I
+    end.
+
+-doc """
+Count a datagram the h3 router dropped because the session it was
+meant for had too many unprocessed messages.
+""".
+-spec backlog_drop_inc() -> ok.
+backlog_drop_inc() ->
+    case persistent_term:get(masque_backlog_drops, undefined) of
+        undefined -> ok;
+        Ref -> counters:add(Ref, 1, 1)
+    end.
+
+-doc "Datagrams dropped so far because a session was backed up.".
+-spec backlog_drop_count() -> non_neg_integer().
+backlog_drop_count() ->
+    case persistent_term:get(masque_backlog_drops, undefined) of
+        undefined -> 0;
+        Ref -> counters:get(Ref, 1)
     end.

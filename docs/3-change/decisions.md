@@ -38,6 +38,13 @@ This page records design decisions that are visible in the code, with the reason
 - **Why.** Settled by the maintainer (former Q13). Continuing with the handler state from before the crash can leave the handler's sockets and its state out of step, and a reset tells the client the tunnel failed rather than ended.
 - **Where.** `dispatch/3` and `safe_apply/3` in every server session.
 
+### h2 and h1 sessions start outside the supervisor call
+
+- **Decision.** An h2 or h1 session's `init/1` returns at once; the handler's `init/2`, the 2xx and the stream claim run in `handle_continue/2`, and the session reports the outcome to the listener (`masque_session_start`).
+- **Why.** `supervisor:start_child/2` waits for `init/1`, so a slow handler start (TCP connect, DNS, a relay's upstream connect) serialised every session start of that protocol, and a same-node h2 relay waited on its own supervisor until its upstream timed out.
+- **Consequences.** The listener waits for a report instead of the supervisor call. A failure after the 2xx is reported as `{responded, R}`: the listener stays silent and the session resets the stream. The session always releases the h2 tunnel slot.
+- **Where.** `masque_session_start`, `init/1` and `handle_continue/2` of every h2 and h1 server session, `spawn_session/6` in `masque_h2_server` and `masque_h1_server`.
+
 ### h2 and h1 sessions live under per-protocol supervisors
 
 - **Decision.** One `simple_one_for_one` supervisor per protocol and transport under `masque_sup`, children `temporary`.
@@ -176,7 +183,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q3.** Is the router needed only because `quic_h3` delivers datagrams to the connection owner, or is there another reason h2 and h1 sessions sit under supervisors while h3 has a router?
 - **Q4.** Why are h3 server sessions unsupervised (started by the router with `gen_server:start/3`, then linked and monitored)?
 - **Q5.** All h2 sessions send the 2xx from their own `init/1`, and the h2 UDP session is the only one in a separate module without a `transport` field or metrics. Is that separation intended?
-- **Q6.** Should idle timeouts exist only on h1 sessions?
+- **Q6.** Settled: every server session has an idle timeout (300 s by default).
 - **Q7.** Settled: `masque.tunnels.*` covers every protocol and transport; each server session reports one open and one close.
 - **Q8.** How stable are internal message shapes (`masque_datagram_in`, `masque_finalized`, `dial_result`, `owner_capacity`)?
 - **Q9.** Versioning: the 0.6.0 CHANGELOG entry and the v0.5/v0.6 tags are missing; is hex publishing planned?
@@ -190,11 +197,11 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q17.** Settled: the h1 udp-bind server session enforces the same rules as the h3/h2 one (see [udp-bind internals](udp-bind-internals.md#the-h1-session)).
 - **Q18.** Settled: pooled h3 owners default to 100 streams and report full on a transport `stream_limit` error, so the pool opens another connection (see [pool](pool.md)).
 - **Q19.** The `masque_ip_proxy_handler` allocator is first-fit (its moduledoc used to say round-robin). Is round-robin wanted, so a released address is not handed out again at once?
-- **Q20.** h1 idle timers are re-armed by inbound bytes only, so a tunnel that only sends toward the client idles out. Should outbound traffic count?
+- **Q20.** Settled: traffic in either direction re-arms the idle timer.
 - **Q21.** `dial_single_or_pool/5` waits for the pool checkout up to `checkout_timeout_ms` (60 s), regardless of the connect `timeout`. Intended?
 - **Q22.** The chain listeners set `handler`, `tcp_handler` and `ip_handler` to `masque_chain_handler` but not `bind_handler`, so udp-bind is not chained. Intended?
 - **Q23.** Are the listener gaps intended: h1 has no `fallback`, no `peer` / `peer_cert` and no tunnel limit; h2 has no `peer` / `peer_cert`? (Option lifting into `handler_opts` is now the same on all three.)
-- **Q24.** The udp-bind proxy sends only on its own compressed contexts (or the client's uncompressed one) and reads client datagrams only on client-opened contexts, while the client session treats every installed context as two-way. Which reading of the draft is intended?
+- **Q24.** Settled: compression contexts are two-way on both sides (see [udp-bind internals](udp-bind-internals.md)).
 - **Q25.** Error stops end the stream differently per protocol: UDP resets with `H3_MESSAGE_ERROR`, TCP with `H3_CONNECT_ERROR`, udp-bind with `H3_INTERNAL_ERROR`, IP with a FIN. Intended?
 - **Q26.** The h1 IP session has no limit on pending ADDRESS_REQUEST ids (h3/h2 cap it at 64). Intended?
 - **Q27.** Settled: in `connecting` a call answers `{error, not_ready}` except `info` and `stop`; in `open` an unsupported call answers `{error, not_supported}`; in `closing`, `{error, closing}`.

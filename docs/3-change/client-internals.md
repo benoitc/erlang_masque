@@ -9,7 +9,7 @@ This page follows one `masque:connect/3` call from the facade to a live tunnel a
 1. `validate_connect_opts/2`: the target shape must match `protocol` (`{Host, Port}` with a port in 0..65535, or `{IpTarget, IpProto}` for `ip`); CONNECT-IP forces `capsule_protocol => true` and refuses `false`; `proxy_authorization` must be a binary without CR or LF.
 2. `parse_proxy_uri/1`: only `https://host[:port]`, port 443 by default.
 3. The application owner is `maps:get(owner, Opts, self())`.
-4. `normalize_transports/1`: default `[h3, h2]`; unknown atoms are filtered out.
+4. `normalize_transports/1`: default `[h3, h2]`; duplicates are removed and anything that is not `h3`, `h2` or `h1` returns `{error, {invalid_opts, {transports, T}}}`.
 
 `masque:bind_connect/3` skips step 1 and sets `protocol => udp_bind`.
 
@@ -152,7 +152,7 @@ With `upstream_pool => true` on h2 or h3, the checkout (in the racer worker, or 
 - Stream data reaches the session directly from the transport; responses, h3 datagrams, resets, close and h3 GOAWAY come through the upstream owner, in the same message shapes, so the `open` clauses do not change.
 - `session_teardown/1` calls `release_stream/2` instead of closing the connection, and a capsule error releases the stream instead of cancelling it.
 
-Pooling is implemented in `masque_client_session`, `masque_h2_client_session`, `masque_tcp_client_session` and `masque_ip_client_session`. The udp-bind sessions ignore `pool_owner`: the checkout still happens (and may dial a pooled connection), but the session dials its own (Q11 in [decisions](decisions.md)). See [pool](pool.md) for the owner side.
+Pooling is implemented in `masque_client_session`, `masque_h2_client_session`, `masque_tcp_client_session` and `masque_ip_client_session`. Connect-UDP-Bind is never pooled: the facade and the racer skip the checkout for `protocol => udp_bind`, and the session dials its own connection. See [pool](pool.md) for the owner side.
 
 ## Inside a session module
 

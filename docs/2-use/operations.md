@@ -17,18 +17,11 @@ This page is for running `masque` in production: what the metrics mean and which
 
 `protocol` is `udp`, `tcp`, `ip` or `udp_bind`; `transport` is `h3`, `h2` or `h1`. There is no listener-name attribute.
 
-Every server session reports `masque.tunnels.total`, `masque.tunnels.active` and `masque.tunnel.duration_ms`: a tunnel counts as opened once its 2xx (101 or 200 on h1) is sent, and as closed when its session ends. The byte counters are not reported everywhere:
-
-| Session | bytes |
-|---|---|
-| UDP over h3 | in, out |
-| udp-bind over h3, h2 | in, out |
-| udp-bind over h1 | out |
-| every other session | none |
+Every server session reports `masque.tunnels.total`, `masque.tunnels.active` and `masque.tunnel.duration_ms`: a tunnel counts as opened once its 2xx (101 or 200 on h1) is sent, and as closed when its session ends. `masque.bytes.in` and `masque.bytes.out` are reported by every server session too (udp-bind over h1 reports `out` only).
 
 ## Counters
 
-Two sets of plain `counters` sit beside the meters. They are node-wide totals, cheap to read, and meant for scrapers and tests.
+Plain `counters` sit beside the meters. `masque_metrics:backlog_drop_count/0` counts the HTTP/3 datagrams the router dropped because their session had 10 000 unprocessed messages. They are node-wide totals, cheap to read, and meant for scrapers and tests.
 
 ### Drop counters
 
@@ -84,12 +77,14 @@ Clients that race transports reconnect to whichever instance your DNS or load ba
 | Client TLS | Verify the proxy certificate against the system store, check the host name, send SNI (not for IP literals on h2 and h1). | `cacerts`, `verify => verify_none`, `ssl_opts` |
 | Chain upstream TLS | Same as the client. | `upstream_opts` |
 | UDP and TCP targets | Only public addresses; others refused with 502. | `allow_private` |
-| CONNECT-IP | `*` and non-public targets refused with 403; packets limited to the target, the requested protocol and the assigned source prefix. | `allow_private` |
+| The proxy's own addresses | Refused as UDP/TCP targets (502), CONNECT-IP destinations and udp-bind peers: non-loopback interface addresses, `self_addresses`, bind `public_addresses`. | `allow_self` |
+| CONNECT-IP | `*` and non-public targets refused with 403; packets limited to the target, the requested protocol, public destinations and the assigned source prefix; one address per version per tunnel. | `allow_private`, `allowed_source_prefixes`, `max_assignments`, `allow_ip` |
 | udp-bind peers | Only public peers. | `allow_loopback`, `allow_private`, `peer_filter_fun` |
 | Capsule size | 64 KiB per capsule. | `max_capsule_size` |
 | Client queue | 1000 items. | `rx_queue_limit` |
-| Tunnels per connection | Unlimited. | `max_tunnels_per_connection` |
-| h1 idle tunnel | Ends after 5 minutes without client bytes. | `idle_timeout_ms` |
+| Tunnels per connection | 100 on h3 and h2 (h1 carries one). | `max_tunnels_per_connection` |
+| Idle tunnel | Ends after 5 minutes without traffic in either direction, on every transport. | `idle_timeout_ms` |
+| CONNECT-TCP target writes | A target that stops reading ends the tunnel after 30 s; on h2 the client is flow-controlled meanwhile. | - |
 | Request headers | Library headers cannot be overridden; CR/LF refused on h1 (except udp-bind). | - |
 | h1 rejection | Connection closed after every refused request. | - |
 

@@ -380,3 +380,6 @@ parse_ipproto_strict_digits_test() ->
     ],
     ?assertEqual({ok, 0}, masque_uri_ip:parse_ipproto(<<"0">>)),
     ?assertEqual({ok, 17}, masque_uri_ip:parse_ipproto(<<"17">>)).
+
+parse_target_non_canonical_zero_prefix_test() ->
+    ?assertEqual({error, bad_target}, masque_uri_ip:parse_target(<<"1.2.3.4/0">>)).

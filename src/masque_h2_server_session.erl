@@ -16,6 +16,7 @@
 
 -export([
     init/1,
+    handle_continue/2,
     handle_call/3,
     handle_cast/2,
     handle_info/2,
@@ -25,6 +26,8 @@
 
 -include("masque.hrl").
 
+-define(DEFAULT_IDLE_MS, 300000).
+
 -record(state, {
     conn :: pid(),
     stream_id :: non_neg_integer(),
@@ -33,7 +36,10 @@
     req :: map(),
     cap_buf = <<>> :: binary(),
     max_cap :: pos_integer(),
-    start_time :: integer() | undefined
+    start_time :: integer() | undefined,
+    %% Idle timeout (`idle_timeout_ms'), armed once the tunnel is open.
+    idle_ms = ?DEFAULT_IDLE_MS :: non_neg_integer() | infinity,
+    idle :: masque_idle:idle() | undefined
 }).
 
 %%====================================================================
@@ -48,13 +54,45 @@ start_link(Args) ->
 %% gen_server
 %%====================================================================
 
-%% A tunnel counts as open once `init_session/1' succeeded: the 2xx is
-%% sent and the stream (or socket) is ours. `terminate/2' closes it.
+%% With a `starter' the real start runs in `handle_continue/2' so the
+%% session supervisor is not held up (see `masque_session_start').
 init(Args) ->
+    case masque_session_start:deferred(Args) of
+        true ->
+            {ok, {starting, Args}, {continue, start}};
+        false ->
+            case start(Args) of
+                {ok, S} -> {ok, S};
+                {stop, Reason} -> {stop, Reason};
+                {stop, Reason, _S} -> {stop, Reason}
+            end
+    end.
+
+handle_continue(start, {starting, Args}) ->
+    case start(Args) of
+        {ok, S} ->
+            masque_session_start:report(Args, ok),
+            {noreply, S};
+        {stop, Reason} ->
+            masque_session_start:report(Args, {error, Reason}),
+            {stop, normal, {starting, Args}};
+        {stop, Reason, S} ->
+            masque_session_start:report(Args, {error, {responded, Reason}}),
+            {stop, {shutdown, Reason}, S}
+    end.
+
+%% A tunnel counts as open once `init_session/1' succeeded: the 2xx is
+%% sent and the stream is ours. `terminate/2' closes it. `{stop, R}'
+%% means nothing was sent; `{stop, R, S}' means the handler started
+%% (and the 2xx may be out), so `terminate/2' must clean up.
+start(Args) ->
     case init_session(Args) of
         {ok, S} ->
             masque_metrics:tunnel_opened(#{protocol => udp, transport => h2}),
-            {ok, S#state{start_time = erlang:monotonic_time(millisecond)}};
+            {ok, S#state{
+                start_time = erlang:monotonic_time(millisecond),
+                idle = masque_idle:new(S#state.idle_ms)
+            }};
         Other ->
             Other
     end.
@@ -78,22 +116,30 @@ init_session(#{
                 conn = Conn,
                 stream_id = StreamId,
                 handler = Handler,
+                idle_ms = maps:get(idle_timeout_ms, HOpts, ?DEFAULT_IDLE_MS),
                 h_state = HState,
                 req = Req,
                 max_cap = MaxCap
             },
-            ok = h2:send_response(
-                Conn,
-                StreamId,
-                200,
-                response_headers()
-            ),
-            State1 = claim_stream(State0),
-            %% If `claim_stream' drained buffered data into `cap_buf',
-            %% schedule an immediate drain so capsules don't wait
-            %% until the next inbound DATA frame.
-            State = maybe_flush_buf(State1),
-            apply_actions(Actions, State);
+            case h2:send_response(Conn, StreamId, 200, response_headers()) of
+                ok ->
+                    case claim_stream(State0) of
+                        {ok, State1} ->
+                            %% If `claim_stream' drained buffered data
+                            %% into `cap_buf', schedule an immediate
+                            %% drain so capsules don't wait until the
+                            %% next inbound DATA frame.
+                            State = maybe_flush_buf(State1),
+                            case do_actions(Actions, State) of
+                                {ok, S2} -> {ok, S2};
+                                {stop, Reason, S2} -> {stop, Reason, S2}
+                            end;
+                        {error, _} ->
+                            {stop, stream_dead, State0}
+                    end;
+                {error, _} ->
+                    {stop, stream_dead, State0}
+            end;
         {stop, Reason} ->
             {stop, Reason}
     end.
@@ -107,12 +153,12 @@ claim_stream(
 ) ->
     case h2:set_stream_handler(Conn, StreamId, self()) of
         ok ->
-            S;
+            {ok, S};
         {ok, Chunks} ->
             More = iolist_to_binary([D || {D, _Fin} <- Chunks]),
-            S#state{cap_buf = <<Buf/binary, More/binary>>};
-        _ ->
-            S
+            {ok, S#state{cap_buf = <<Buf/binary, More/binary>>}};
+        {error, _} = Err ->
+            Err
     end.
 
 response_headers() ->
@@ -130,7 +176,19 @@ handle_call(_Req, _From, S) ->
 handle_cast(_Msg, S) ->
     {noreply, S}.
 
-handle_info(
+%% Every message counts as traffic for the idle timer; the timer's
+%% own message checks whether the tunnel has been idle long enough.
+handle_info({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
+    case masque_idle:check(Ref, Idle) of
+        expired -> {stop, idle_timeout, S};
+        {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
+    end;
+handle_info(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
+    handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
+handle_info(Msg, S) ->
+    handle_traffic(Msg, S).
+
+handle_traffic(
     {h2, _Conn, {data, StreamId, Bytes, Fin}},
     #state{
         stream_id = StreamId,
@@ -139,26 +197,28 @@ handle_info(
     } = S
 ) ->
     New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> reset_and_stop(capsule_buffer_overflow, S);
         false -> drain_capsules(New, Fin, S)
     end;
-handle_info(flush_cap_buf, #state{cap_buf = Buf} = S) when Buf =/= <<>> ->
+handle_traffic(flush_cap_buf, #state{cap_buf = Buf} = S) when Buf =/= <<>> ->
     drain_capsules(Buf, false, S#state{cap_buf = <<>>});
-handle_info(flush_cap_buf, S) ->
+handle_traffic(flush_cap_buf, S) ->
     {noreply, S};
-handle_info({'EXIT', _Pid, _Reason}, S) ->
+handle_traffic({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
-handle_info(
+handle_traffic(
     {h2, _Conn, {stream_reset, StreamId, _}},
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
-handle_info({h2, _Conn, {closed, _Reason}}, S) ->
+handle_traffic({h2, _Conn, {closed, _Reason}}, S) ->
     {stop, peer_closed, S};
-handle_info(Msg, S) ->
+handle_traffic(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
+terminate(_Reason, {starting, Args}) ->
+    masque_session_start:abandon(Args);
 terminate(Reason, S) ->
     emit_tunnel_closed(S),
     terminate_session(Reason, S).
@@ -243,7 +303,7 @@ dispatch_capsule(datagram, Inner, S) ->
         {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} when
             byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD
         ->
-            dispatch(handle_packet, [UdpBytes], S);
+            dispatch(handle_packet, [UdpBytes], count_in(UdpBytes, S));
         _ ->
             %% Unknown context-id or oversize: RFC 9298 §5 says drop.
             {noreply, S}
@@ -302,12 +362,6 @@ exported(Mod, Fun, Arity) ->
     _ = code:ensure_loaded(Mod),
     erlang:function_exported(Mod, Fun, Arity).
 
-apply_actions(Actions, State) ->
-    case do_actions(Actions, State) of
-        {ok, S2} -> {ok, S2};
-        {stop, Reason, _} -> {stop, Reason}
-    end.
-
 apply_actions_noreply(Actions, State) ->
     case do_actions(Actions, State) of
         {ok, S2} -> {noreply, S2};
@@ -319,6 +373,7 @@ do_actions([], S) ->
 do_actions([{send, Data} | Rest], S) ->
     do_actions([{send, ?MASQUE_CONTEXT_ID_UDP, Data} | Rest], S);
 do_actions([{send, Ctx, Data} | Rest], S) ->
+    ok = count_out(Data, S),
     PayloadSize = iolist_size(Data),
     case
         Ctx =:= ?MASQUE_CONTEXT_ID_UDP andalso
@@ -372,3 +427,11 @@ try_callback(Mod, Fun, Args) ->
         false ->
             ok
     end.
+
+%% Tunnel payload bytes for the `masque.bytes.*' counters.
+count_in(Bytes, #state{} = S) ->
+    masque_metrics:bytes_in(iolist_size(Bytes), #{protocol => udp, transport => h2}),
+    S.
+
+count_out(Bytes, #state{}) ->
+    masque_metrics:bytes_out(iolist_size(Bytes), #{protocol => udp, transport => h2}).

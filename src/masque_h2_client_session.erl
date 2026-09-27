@@ -210,6 +210,13 @@ connecting(
     #data{owner_ref = Ref}
 ) ->
     {stop, owner_gone};
+%% Stream data that overtakes the 2xx (a pooled stream gets its data
+%% straight from the transport, the response through the pool owner)
+%% waits until the tunnel is open.
+connecting(info, {Tag, _Conn, {data, StreamId, _, _}}, #data{stream_id = StreamId}) when
+    is_integer(StreamId), (Tag =:= quic_h3 orelse Tag =:= h2)
+->
+    {keep_state_and_data, [postpone]};
 connecting(info, _Msg, Data) ->
     {keep_state, Data};
 connecting({call, From}, info, Data) ->
@@ -263,7 +270,7 @@ open(
     #data{stream_id = StreamId, cap_buf = Buf, max_cap = Max} = Data
 ) ->
     New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> client_stream_abort(capsule_buffer_overflow, Data);
         false -> drain_capsules(New, Fin, Data)
     end;
@@ -318,7 +325,7 @@ closing(internal, do_close, #data{conn = Conn, stream_id = StreamId} = Data) ->
                     _:_ -> ok
                 end
         end,
-    _ = session_teardown(Data),
+    _ = session_teardown(Data, graceful),
     {stop, normal, Data};
 closing({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, closing}}]};
@@ -343,6 +350,15 @@ terminate(_Reason, _State, #data{} = D) ->
 
 %% Close path abstraction: release the pooled stream back to the
 %% owner, or shut down the owned h2 connection.
+%% After our FIN a pooled stream is handed back without a reset, so
+%% bytes still in flight reach the proxy.
+session_teardown(#data{pool_owner = Pool, stream_id = StreamId}, graceful) when
+    is_pid(Pool), is_integer(StreamId)
+->
+    masque_upstream_owner:release_stream(Pool, StreamId, graceful);
+session_teardown(Data, graceful) ->
+    session_teardown(Data).
+
 session_teardown(#data{pool_owner = Pool, stream_id = StreamId}) when
     is_pid(Pool), is_integer(StreamId)
 ->
@@ -482,12 +498,14 @@ sanitise_extra_headers(List) when is_list(List) ->
         <<":protocol">>,
         <<"capsule-protocol">>
     ],
+    %% h2 and h3 field names are lowercase; compare and send them so.
     [
-        {K, V}
+        {Name, V}
      || {K, V} <- List,
         is_binary(K),
         is_binary(V),
-        not lists:member(K, Reserved)
+        Name <- [string:lowercase(K)],
+        not lists:member(Name, Reserved)
     ].
 
 %% Outbound: UDP payloads become DATAGRAM capsules whose inner

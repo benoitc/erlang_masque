@@ -230,6 +230,13 @@ connecting(
     #data{owner_ref = Ref}
 ) ->
     {stop, owner_gone};
+%% Stream data that overtakes the 2xx (a pooled stream gets its data
+%% straight from the transport, the response through the pool owner)
+%% waits until the tunnel is open.
+connecting(info, {Tag, _Conn, {data, StreamId, _, _}}, #data{stream_id = StreamId}) when
+    is_integer(StreamId), (Tag =:= quic_h3 orelse Tag =:= h2)
+->
+    {keep_state_and_data, [postpone]};
 connecting(info, _Msg, Data) ->
     {keep_state, Data};
 connecting({call, From}, info, Data) ->
@@ -295,7 +302,7 @@ open(
     #data{stream_id = StreamId, cap_buf = Buf, max_cap = Max} = Data
 ) ->
     New = <<Buf/binary, Bytes/binary>>,
-    case byte_size(New) > Max of
+    case masque_capsule:pending_size(New) > Max of
         true -> client_stream_abort(capsule_buffer_overflow, Data);
         false -> drain_client_capsules(New, Fin, Data)
     end;
@@ -455,8 +462,21 @@ deliver_packet(
             end
     end.
 
+capsule_datagram(Payload, Data) ->
+    case masque_datagram:decode(Payload) of
+        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} when
+            byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD
+        ->
+            deliver_packet(UdpBytes, Data);
+        _ ->
+            Data
+    end.
+
 drain_client_capsules(Buf, Fin, #data{owner = Owner} = Data) ->
     case masque_capsule:decode(Buf) of
+        {ok, {0, Value, Rest}} ->
+            %% RFC 9297 sec 3.5: a DATAGRAM capsule is an HTTP datagram.
+            drain_client_capsules(Rest, Fin, capsule_datagram(Value, Data#data{cap_buf = <<>>}));
         {ok, {Type, Value, Rest}} ->
             masque_client_owner:send(Owner, {masque_capsule, self(), Type, Value}),
             drain_client_capsules(Rest, Fin, Data#data{cap_buf = <<>>});
@@ -540,7 +560,7 @@ closing(internal, do_close, #data{conn = Conn, stream_id = StreamId} = Data) ->
                 _:_ -> ok
             end
     end,
-    _ = session_teardown(Data),
+    _ = session_teardown(Data, graceful),
     {stop, normal, Data};
 closing({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, closing}}]};
@@ -565,6 +585,15 @@ terminate(_Reason, _State, #data{} = D) ->
 
 %% Close path abstraction: release the pooled stream back to the
 %% owner, or shut down the owned quic_h3 connection.
+%% After our FIN a pooled stream is handed back without a reset, so
+%% bytes still in flight reach the proxy.
+session_teardown(#data{pool_owner = Pool, stream_id = StreamId}, graceful) when
+    is_pid(Pool), is_integer(StreamId)
+->
+    masque_upstream_owner:release_stream(Pool, StreamId, graceful);
+session_teardown(Data, graceful) ->
+    session_teardown(Data).
+
 session_teardown(#data{pool_owner = Pool, stream_id = StreamId}) when
     is_pid(Pool), is_integer(StreamId)
 ->
@@ -713,12 +742,14 @@ sanitise_extra_headers(List) when is_list(List) ->
         <<":protocol">>,
         <<"capsule-protocol">>
     ],
+    %% h2 and h3 field names are lowercase; compare and send them so.
     [
-        {K, V}
+        {Name, V}
      || {K, V} <- List,
         is_binary(K),
         is_binary(V),
-        not lists:member(K, Reserved)
+        Name <- [string:lowercase(K)],
+        not lists:member(Name, Reserved)
     ].
 
 reply_handshake(#data{handshake_from = undefined}, _Reply) ->

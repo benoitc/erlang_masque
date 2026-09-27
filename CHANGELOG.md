@@ -8,6 +8,49 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- Client: target hosts must be an IP address or a valid host name and
+  ports 1..65535, so a user-supplied host can no longer inject into the
+  h1 CONNECT request line; the h1 CONNECT-TCP session also refuses
+  control characters there.
+
+- Pool: the connection fingerprint uses the TLS options that take
+  effect, so reordered duplicate `ssl_opts` (for example two `verify`
+  values) can no longer share a connection dialed with other checks.
+
+- Listeners default to `max_tunnels_per_connection => 100` on h3 and
+  h2 (`0` still means no limit). **Breaking**.
+- Every server session has an idle timeout (`idle_timeout_ms`, default
+  300 s); traffic in either direction re-arms it. **Breaking** for h3
+  and h2 tunnels that stayed open silently.
+- CONNECT-TCP over h2 returns receive credit only as data reaches the
+  target, and target writes time out after 30 s, so a stalled target no
+  longer lets a client fill the session's memory.
+- The h3 router drops datagrams for a session with 10 000 unprocessed
+  messages (`masque_metrics:backlog_drop_count/0`).
+
+- udp-bind: the listener `allow` policy applies to every peer, and a
+  scoped bind only exchanges packets with its scoped target.
+
+- The proxy host's own addresses (non-loopback interfaces, the new
+  `self_addresses` option, bind `public_addresses`) are refused as UDP
+  and TCP targets, CONNECT-IP destinations and udp-bind peers unless
+  `allow_self => true`. **Breaking**.
+
+- CONNECT-IP: a host name target only reaches its resolved addresses
+  (static `routes` no longer widen it), and every destination must be
+  public unless `allow_private`.
+- CONNECT-IP: sources must be in an assigned prefix or in the new
+  `allowed_source_prefixes`; `allow_private` no longer lets unassigned
+  sources through. **Breaking**.
+- CONNECT-IP: at most `max_assignments` addresses per version per
+  tunnel (default 1); further requests get the address already held,
+  and allocation probes a bounded number of candidates. **Breaking**.
+- CONNECT-IP: a client ADDRESS_ASSIGN replaces the previous list
+  (RFC 9484 section 4.7.1), bounded at 64 entries.
+- CONNECT-IP: the h1 session bounds unanswered ADDRESS_REQUEST ids at
+  64 like h3 and h2; new `allow_ip` target policy; h3 tunnels that
+  cannot carry 1280-byte datagrams are refused.
+
 - TLS: every client transport (h2, udp-bind on h1/h2/h3, pooled h2 in
   the racer, chain upstreams) now uses `verify_peer` with the system CA
   store, hostname check and SNI by default. **Breaking**: self-signed
@@ -150,6 +193,69 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `bad_ip_version` and `unknown_capsule_type`.
 
 ### Fixed
+
+- `1.2.3.4/0` is no longer accepted as a canonical prefix (capsules and
+  CONNECT-IP targets).
+- `masque_ip:is_public/1` also rejects 2001:2::/48, 2001:10::/28 and
+  ::ffff:0:0:0/96.
+- The CONNECT-IP address registry keeps its assignments across a
+  restart of its process (its table is owned by `masque_sup`).
+
+- Client: IP tuple targets work (they crashed session init);
+  `timeout => infinity` is refused with `{invalid_opts, {timeout, _}}`
+  instead of crashing (it is no longer in `connect_opts()`); bad
+  arguments to `set_mode/2`, `send/3`, `send_capsule/3`, `send_to/3`
+  return `{error, badarg}`; `bind_connect/3` validates its target; an h1
+  upgrade timeout returns `handshake_timeout`; extra headers are
+  filtered and sent lowercase on h2/h3; an empty DATA frame carrying FIN
+  is not delivered as data; CONNECT-IP clients keep at most 64
+  unanswered proxy ADDRESS_REQUEST ids.
+
+- Pool: a connection that received GOAWAY is no longer handed out
+  (`{error, goaway}`); a checkout that races the owner's idle timer is
+  retried once (`owner_gone`); pooled h3 dials honour the connect
+  `timeout`; data that overtakes the 2xx on a pooled stream is kept; a
+  stream released after its FIN is no longer reset.
+- CONNECT-TCP client: `close/1` waits up to 2 s for the proxy's FIN
+  before closing its own connection, so the last bytes are not lost.
+
+- A DATAGRAM capsule on an h3 stream is handled as an HTTP datagram by
+  server and client sessions (RFC 9297 section 3.5).
+- `max_capsule_size` applies to the capsule still being received, not
+  to complete capsules in the same read (`masque_capsule:pending_size/1`).
+
+- CONNECT-TCP: `family => auto` follows the resolved address (IPv6-only
+  names work); an aborted tunnel aborts the target with RST (RFC 9113
+  section 8.5) instead of FIN.
+- CONNECT-UDP: an ICMP port unreachable no longer ends the tunnel.
+- The h1 listener validates CONNECT-TCP hosts like h3 and h2.
+- A relay ends a UDP or IP tunnel cleanly when the upstream closes
+  cleanly.
+- A listener name already used by another transport is refused with
+  `{error, {name_in_use, Transport}}`, so drain flags cannot collide.
+- Byte counters are reported by every server session.
+
+- h2 and h1 session starts no longer run inside the session
+  supervisor's call: a slow handler start (TCP connect, DNS, relay
+  upstream) no longer holds up other tunnels, and a same-node h2 or h1
+  relay no longer deadlocks.
+- h2: a session that fails after its 200 no longer gets a 502 after it,
+  and always gives its tunnel slot back; a failed stream claim stops
+  the UDP and IP sessions instead of leaving them running.
+- h3: init actions that end a tunnel during finalize keep the tunnel
+  metrics balanced; the router no longer blocks up to 5 s stopping a
+  cancelled session, and that session no longer resets a stream that
+  already carries the 502; a dead router no longer crashes the
+  request process.
+
+- udp-bind: an ACK or CLOSE that crosses a local CLOSE no longer ends
+  the tunnel; a proxy `compression_close` action removes the context;
+  contexts are two-way on both sides (`send_to/3` uses proxy-opened
+  contexts, the proxy accepts client datagrams on its own contexts);
+  the client handles a conflicting proxy ASSIGN; `recv/2` timeouts no
+  longer answer a waiter twice; no stray `masque_closed` after a failed
+  handshake; `Proxy-Public-Address` is parsed as a Structured Field
+  list with strict addresses.
 
 - h1 and h2 clients dial an IPv6 literal proxy (`https://[::1]:443`)
   without `ssl_opts => [inet6]`.
