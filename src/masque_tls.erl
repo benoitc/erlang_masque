@@ -7,7 +7,8 @@
 %%% check the hostname against the certificate, and advertise
 %%% `http/1.1` in ALPN (`h2` for the HTTP/2 rung via `client_opts/3`). IPv6 literals are not valid SNI values
 %%% (RFC 6066 section 3), so SNI is omitted when the proxy host is
-%%% an IP literal.
+%%% an IP literal. An IPv6 literal also gets `inet6` so `ssl:connect/4`
+%%% can dial it.
 %%%
 %%% Caller overrides win: anything on `ssl_opts` in the session opts
 %%% is merged on top of the defaults, and the top-level `verify` opt
@@ -53,7 +54,7 @@ client_opts(Host, Opts, Alpn) ->
             {customize_hostname_check, [
                 {match_fun, public_key:pkix_verify_hostname_match_fun(https)}
             ]}
-        ] ++ sni_opt(HostBin, IsIpLiteral),
+        ] ++ sni_opt(HostBin, IsIpLiteral) ++ family_opt(HostBin),
     User = maps:get(ssl_opts, Opts, []),
     merge(Base, User).
 
@@ -72,6 +73,14 @@ sni_opt(_HostBin, true) ->
     [];
 sni_opt(HostBin, false) ->
     [{server_name_indication, binary_to_list(HostBin)}].
+
+%% `ssl:connect/4` resolves the host as IPv4 unless told otherwise, so
+%% an IPv6 literal needs `inet6` to be dialable.
+family_opt(HostBin) ->
+    case inet:parse_address(binary_to_list(HostBin)) of
+        {ok, {_, _, _, _, _, _, _, _}} -> [inet6];
+        _ -> []
+    end.
 
 is_ip_literal(HostBin) when is_binary(HostBin) ->
     case inet:parse_address(binary_to_list(HostBin)) of

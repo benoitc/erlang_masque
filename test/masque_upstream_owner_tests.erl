@@ -251,21 +251,25 @@ conn_death_stops_owner_test() ->
 %% Idle timeout
 %%====================================================================
 
+%% Waits are generous: they return as soon as the owner stops, and a
+%% loaded host (CI) can delay a 100 ms timer well past 500 ms.
 idle_timeout_stops_owner_when_refs_empty_test() ->
     {Owner, Mock} = start_owner(h2, #{idle_timeout_ms => 100}),
     %% No acquires; the initial idle timer fires and stops the owner.
-    true = wait_dead(Owner, 500),
+    true = wait_dead(Owner, 5000),
     ?MOCK:stop(Mock).
 
 idle_timer_rearms_after_last_release_test() ->
-    {Owner, Mock} = start_owner(h2, #{idle_timeout_ms => 100}),
+    %% The idle window must outlast the gap between start and the first
+    %% acquire, or the initial timer can stop the owner first.
+    {Owner, Mock} = start_owner(h2, #{idle_timeout_ms => 300}),
     {ok, StreamId, _} =
         ?M:acquire_stream(Owner, sample_headers(), self(), #{}),
-    timer:sleep(200),
+    timer:sleep(600),
     %% Still alive: the acquire cancelled the initial idle timer.
     ?assert(is_process_alive(Owner)),
     ok = ?M:release_stream(Owner, StreamId),
-    true = wait_dead(Owner, 500),
+    true = wait_dead(Owner, 5000),
     ?MOCK:stop(Mock).
 
 %%====================================================================

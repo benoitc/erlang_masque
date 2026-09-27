@@ -151,6 +151,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- h1 and h2 clients dial an IPv6 literal proxy (`https://[::1]:443`)
+  without `ssl_opts => [inet6]`.
+
 - The UDP and TCP proxy handlers accept a resolver returning
   `{ok, [Address]}` (the listener-level shape); a listener `resolver`
   no longer causes 502 or skips the private-address check on TCP.
