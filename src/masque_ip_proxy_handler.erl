@@ -525,15 +525,12 @@ accept_inbound(
 %% Every destination must be public unless `allow_private': a prefix
 %% may cover private space, and a static route may too.
 dst_filter(Packet, #state{opts = Opts}) ->
-    case maps:get(allow_private, Opts, false) of
-        true ->
-            ok;
-        false ->
-            {ok, _, Dst} = masque_ip_packet:destination(Packet),
-            case masque_ip:is_public(Dst) of
-                true -> ok;
-                false -> {drop, scope_target}
-            end
+    {ok, _, Dst} = masque_ip_packet:destination(Packet),
+    Public = maps:get(allow_private, Opts, false) orelse masque_ip:is_public(Dst),
+    NotSelf = maps:get(allow_self, Opts, false) orelse not masque_ip:is_self(Dst, Opts),
+    case Public andalso NotSelf of
+        true -> ok;
+        false -> {drop, scope_target}
     end.
 
 forward(Packet, #state{opts = Opts} = S) ->

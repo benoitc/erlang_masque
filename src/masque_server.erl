@@ -566,6 +566,8 @@ handler_opt_keys() ->
         max_assignments,
         allowed_source_prefixes,
         allow_ip,
+        allow_self,
+        self_addresses,
         resolver,
         allow,
         family,

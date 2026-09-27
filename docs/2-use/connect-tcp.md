@@ -36,6 +36,8 @@ The built-in `masque_tcp_proxy_handler` opens a `gen_tcp` connection to the targ
 | `resolver` | `inet:getaddr/2`, IPv4 first | `fun(Host) -> {ok, Address} \| {ok, [Address]} \| {error, _}`. With a list, the first address is used. |
 | `family` | `auto` | `inet`, `inet6` or `auto`. |
 | `allow_private` | `false` | Allow non-public targets. Otherwise refused with 502. |
+| `allow_self` | `false` | Allow targets that are the proxy host's own addresses (its non-loopback interfaces and `self_addresses`). Otherwise refused with 502. |
+| `self_addresses` | `[]` | Extra addresses that count as the proxy's own, for example a NAT public address. |
 | `connect_timeout` | `5000` | Timeout of the connection to the target, in ms. |
 | `socket_opts` | `[]` | Extra `gen_tcp` options. |
 | `active_n` | `16` | Segments read before the socket pauses until the session wrote them to the tunnel. |

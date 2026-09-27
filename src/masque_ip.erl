@@ -6,9 +6,19 @@ IP address classification for SSRF protection.
 link-local, multicast, and reserved address ranges in both
 IPv4 and IPv6. The built-in proxy handlers call this after DNS
 resolution to reject tunnels targeting internal networks.
+
+`is_self/2` returns `true` for the proxy host's own non-loopback
+addresses (its interfaces, plus the `self_addresses` and
+`public_addresses` handler options), so a client cannot reach
+services on the proxy host through its public address. The handlers
+refuse those targets unless `allow_self` is set.
 """.
 
 -export([is_public/1, reject_requests/1, inject_packet/2, resolve_target/3]).
+-export([is_self/2]).
+
+%% Interface addresses are read at most this often.
+-define(SELF_TTL_MS, 5000).
 
 -include("masque_ip.hrl").
 
@@ -80,6 +90,51 @@ resolve_target(ip, Req, _Resolver) ->
     {ok, Req#{resolved_addresses => []}};
 resolve_target(_, Req, _Resolver) ->
     {ok, Req}.
+
+-doc """
+Return `true` when `IP` is one of the proxy host's own non-loopback
+addresses: an interface address, or an address listed in the
+`self_addresses` or `public_addresses` (`{IP, Port}`) handler
+options. Loopback is left to `is_public/1` and `allow_private`.
+""".
+-spec is_self(inet:ip_address(), map()) -> boolean().
+is_self(IP, Opts) ->
+    Extra =
+        maps:get(self_addresses, Opts, []) ++
+            [A || {A, _Port} <- maps:get(public_addresses, Opts, [])],
+    lists:member(IP, Extra) orelse lists:member(IP, interface_addresses()).
+
+%% Cached in the `masque_self_addrs' table (owned by `masque_sup')
+%% when the application runs; read directly otherwise.
+interface_addresses() ->
+    Now = erlang:monotonic_time(millisecond),
+    try ets:lookup(masque_self_addrs, addrs) of
+        [{addrs, Stamp, Addrs}] when Now - Stamp < ?SELF_TTL_MS ->
+            Addrs;
+        _ ->
+            Addrs = read_interface_addresses(),
+            ets:insert(masque_self_addrs, {addrs, Now, Addrs}),
+            Addrs
+    catch
+        error:badarg -> read_interface_addresses()
+    end.
+
+read_interface_addresses() ->
+    case inet:getifaddrs() of
+        {ok, Ifs} ->
+            lists:usort([
+                A
+             || {_Name, Props} <- Ifs,
+                {addr, A} <- Props,
+                not is_loopback(A)
+            ]);
+        {error, _} ->
+            []
+    end.
+
+is_loopback({127, _, _, _}) -> true;
+is_loopback({0, 0, 0, 0, 0, 0, 0, 1}) -> true;
+is_loopback(_) -> false.
 
 -spec is_public(inet:ip_address()) -> boolean().
 

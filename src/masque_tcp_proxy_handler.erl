@@ -73,10 +73,10 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
     ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
     case resolve(ResolverFun, Host) of
         {ok, IP} ->
-            case AllowPrivate orelse masque_ip:is_public(IP) of
-                false ->
-                    {stop, {resolution_failed, private_address}};
-                true ->
+            case target_allowed(IP, AllowPrivate, Opts) of
+                {error, Why} ->
+                    {stop, {resolution_failed, Why}};
+                ok ->
                     TcpOpts = [
                         binary,
                         {active, ActiveN},
@@ -190,6 +190,19 @@ pick_family(auto, Host) ->
     case inet:parse_address(HostStr) of
         {ok, {_, _, _, _, _, _, _, _}} -> inet6;
         _ -> inet
+    end.
+
+%% Non-public targets need `allow_private'; the proxy's own addresses
+%% need `allow_self'.
+target_allowed(IP, AllowPrivate, Opts) ->
+    case AllowPrivate orelse masque_ip:is_public(IP) of
+        false ->
+            {error, private_address};
+        true ->
+            case maps:get(allow_self, Opts, false) orelse not masque_ip:is_self(IP, Opts) of
+                true -> ok;
+                false -> {error, self_address}
+            end
     end.
 
 %% A listener-level `resolver' returns an address list (it is shared

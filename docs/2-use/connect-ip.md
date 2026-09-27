@@ -102,6 +102,7 @@ Things the client enforces:
 | `allow_ip` | accept all | `fun({IpTarget, IpProto}) -> boolean()`, called in `accept/1`; `false` answers 403. |
 | `mtu` | `1500` | Largest packet forwarded; larger ones get an ICMP error. |
 | `allow_private` | `false` | Lets the tunnel reach non-public destinations. It does not relax the source check. See [target scoping](#target-scoping). |
+| `allow_self`, `self_addresses` | `false`, `[]` | Packets to the proxy's own addresses are dropped unless `allow_self`. |
 | `forward_fun` | none (drop) | What to do with accepted packets. See [forwarding](#forwarding). |
 | `lifecycle_fun` | none | Event callback. See [plumbing](#plumbing-for-external-consumers). |
 

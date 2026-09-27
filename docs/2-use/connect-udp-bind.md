@@ -30,6 +30,7 @@ With `accept_bind => true`, a CONNECT-UDP request carrying `connect-udp-bind: ?1
 | `public_address_fun` | none | `fun(SockName) -> [{IP, Port}]`, takes precedence over `public_addresses`. |
 | `peer_filter_fun` | public peers only | `fun(IP, Port) -> ok \| {drop, Reason}`, called for every packet the client sends. |
 | `allow_loopback`, `allow_private` | `false` | Widen the default peer filter. |
+| `allow_self`, `self_addresses` | `false`, `[]` | The proxy's own addresses (interfaces, `self_addresses`, `public_addresses`) are refused as peers unless `allow_self`. |
 | `scrub_fun` | pass | `fun(Payload, UserState) -> {pass, Payload, UserState} \| {drop, Reason, UserState}`, per-packet filter; `user_state` seeds `UserState`. |
 | `active_n` | `32` | Datagrams read before the socket pauses until the session relayed them. |
 | `max_compression_contexts` | `1024` | Entries per compression table. |

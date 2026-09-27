@@ -8,6 +8,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- The proxy host's own addresses (non-loopback interfaces, the new
+  `self_addresses` option, bind `public_addresses`) are refused as UDP
+  and TCP targets, CONNECT-IP destinations and udp-bind peers unless
+  `allow_self => true`. **Breaking**.
+
 - CONNECT-IP: a host name target only reaches its resolved addresses
   (static `routes` no longer widen it), and every destination must be
   public unless `allow_private`.

@@ -258,7 +258,14 @@ family_of({_, _, _, _, _, _, _, _}) -> 6.
 default_peer_filter(Opts) ->
     AllowPrivate = maps:get(allow_private, Opts, false),
     AllowLoopback = maps:get(allow_loopback, Opts, false),
-    fun(IP, _Port) -> peer_allowed(unmap(IP), AllowPrivate, AllowLoopback) end.
+    AllowSelf = maps:get(allow_self, Opts, false),
+    fun(IP0, _Port) ->
+        IP = unmap(IP0),
+        case AllowSelf orelse not masque_ip:is_self(IP, Opts) of
+            true -> peer_allowed(IP, AllowPrivate, AllowLoopback);
+            false -> {drop, peer_filter}
+        end
+    end.
 
 peer_allowed(_IP, true, _AllowLoopback) ->
     ok;
