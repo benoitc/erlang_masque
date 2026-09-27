@@ -113,6 +113,8 @@ Racing and pooling (`upstream_pool => true`):
 | `{dial_failed, R}`, `{dial_crashed, {Class, R}}` | the pooled connection could not be dialed |
 | `shutdown` | the pool was closed while you waited |
 | `stream_limit` | the pooled connection was at its stream limit when the session asked for a stream |
+| `goaway` | the pooled connection received GOAWAY and takes no new streams |
+| `owner_gone` | the pooled connection closed between checkout and use; `connect/3` retries once before returning it |
 
 When several transports race, the reason you get is the last attempt's reason, not necessarily the most useful one. Dial each transport alone to see each failure.
 

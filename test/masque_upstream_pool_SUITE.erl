@@ -22,7 +22,8 @@
     h3_pool_shares_one_owner/1,
     h2_pool_shares_one_owner/1,
     pool_disabled_opens_per_tunnel/1,
-    different_verify_uses_different_owner/1
+    different_verify_uses_different_owner/1,
+    pooled_tcp_early_banner/1
 ]).
 
 all() ->
@@ -30,7 +31,8 @@ all() ->
         h3_pool_shares_one_owner,
         h2_pool_shares_one_owner,
         pool_disabled_opens_per_tunnel,
-        different_verify_uses_different_owner
+        different_verify_uses_different_owner,
+        pooled_tcp_early_banner
     ].
 
 init_per_suite(Config) ->
@@ -155,6 +157,37 @@ different_verify_uses_different_owner(Config) ->
     round_trip(Sess2),
     ?assertEqual(2, pool_entry_count()),
     close_all_sessions([Sess1, Sess2]).
+
+%% A banner the target sends at once follows the 2xx on the stream; on
+%% a pooled stream it can reach the session before the response the
+%% pool owner forwards. It must still be delivered.
+pooled_tcp_early_banner(Config) ->
+    {ok, L} = gen_tcp:listen(0, [binary, {ip, {127, 0, 0, 1}}, {active, false}, {reuseaddr, true}]),
+    {ok, TPort} = inet:port(L),
+    Target = spawn(fun() ->
+        {ok, S} = gen_tcp:accept(L, 10000),
+        ok = gen_tcp:send(S, <<"banner">>),
+        receive
+            stop -> gen_tcp:close(S)
+        end
+    end),
+    ok = gen_tcp:controlling_process(L, Target),
+    {ok, Sess} = masque:connect(
+        upstream_uri(?config(egress_h3_port, Config)),
+        {<<"127.0.0.1">>, TPort},
+        #{
+            protocol => tcp,
+            transports => [h3],
+            upstream_pool => true,
+            verify => verify_none
+        }
+    ),
+    receive
+        {masque_data, Sess, <<"banner">>} -> ok
+    after 5000 -> ct:fail(no_banner)
+    end,
+    ok = masque:close(Sess),
+    Target ! stop.
 
 cert_der(Config) ->
     maps:get(cert, ?config(certs, Config)).

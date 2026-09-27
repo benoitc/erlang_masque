@@ -30,6 +30,8 @@ Handlers get `handle_data/2` for client bytes and `handle_eof/1` for the client 
 
 The built-in `masque_tcp_proxy_handler` opens a `gen_tcp` connection to the target and relays both ways. A FIN from the client shuts down the write side of the target socket; a FIN from the target is passed on to the client. A half-closed tunnel with no traffic for 30 seconds ends with `eof_timeout`. A target reset resets the tunnel; a tunnel the client aborts (stream reset, connection gone) aborts the target connection with an RST, while a clean end closes it with FIN. A target that stops reading ends the tunnel after 30 seconds.
 
+On the client, `close/1` sends the FIN and returns at once; the session then waits up to 2 seconds for the proxy to finish the stream before closing its connection, so the last bytes are not cut off. A pooled stream is handed back to the pool without a reset.
+
 | `handler_opts` key | Default | Meaning |
 |---|---|---|
 | `allow` | allow all | `fun({Host, Port}) -> boolean()`, checked in `accept/1`. |

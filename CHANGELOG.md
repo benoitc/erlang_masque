@@ -8,6 +8,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- Pool: the connection fingerprint uses the TLS options that take
+  effect, so reordered duplicate `ssl_opts` (for example two `verify`
+  values) can no longer share a connection dialed with other checks.
+
 - Listeners default to `max_tunnels_per_connection => 100` on h3 and
   h2 (`0` still means no limit). **Breaking**.
 - Every server session has an idle timeout (`idle_timeout_ms`, default
@@ -184,6 +188,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `bad_ip_version` and `unknown_capsule_type`.
 
 ### Fixed
+
+- Pool: a connection that received GOAWAY is no longer handed out
+  (`{error, goaway}`); a checkout that races the owner's idle timer is
+  retried once (`owner_gone`); pooled h3 dials honour the connect
+  `timeout`; data that overtakes the 2xx on a pooled stream is kept; a
+  stream released after its FIN is no longer reset.
+- CONNECT-TCP client: `close/1` waits up to 2 s for the proxy's FIN
+  before closing its own connection, so the last bytes are not lost.
 
 - A DATAGRAM capsule on an h3 stream is handled as an HTTP datagram by
   server and client sessions (RFC 9297 section 3.5).

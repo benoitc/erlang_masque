@@ -13,7 +13,7 @@ Two processes are involved:
 
 ## Fingerprint
 
-`fingerprint/4` in `masque_upstream_pool` returns `{Host, Port, Transport, Hash}`, where `Transport` is `quic_h3` or `h2` and `Hash` is a SHA-256 of `verify`, `cacerts`, `ssl_opts` (sorted) and `alpn`. Callers with different trust or ALPN settings never share a connection. Per-tunnel options (`protocol`, `timeout`, `owner`, request headers) are not part of the key. The fingerprint is built by `pool_fingerprint/2` in `masque_racer`, which also builds the dial options (`pool_connect_opts/3`) and merges `upstream_pool_opts` (`idle_timeout_ms`, `max_streams`, `checkout_timeout_ms`).
+`fingerprint/4` in `masque_upstream_pool` returns `{Host, Port, Transport, Hash}`, where `Transport` is `quic_h3` or `h2` and `Hash` is a SHA-256 of `verify`, `cacerts`, `ssl_opts` and `alpn`. `ssl_opts` is first reduced to the options that take effect (for a repeated key the last one wins, as in `masque_tls`), then sorted, so reordering distinct options keeps the key but a later duplicate changes it. Callers with different trust or ALPN settings never share a connection. Per-tunnel options (`protocol`, `timeout`, `owner`, request headers) are not part of the key. The fingerprint is built by `pool_fingerprint/2` in `masque_racer`, which also builds the dial options (`pool_connect_opts/3`) and merges `upstream_pool_opts` (`idle_timeout_ms`, `max_streams`, `checkout_timeout_ms`).
 
 ## Checkout
 
@@ -51,7 +51,11 @@ Whenever an owner crosses its limit it sends `{owner_capacity, Self, Full}` to t
 
 ## Streams and events
 
-`acquire_stream/4` sends the request (`Mod:request/3`), registers the session as the stream handler with `drain_buffer => false`, monitors the session and returns `{ok, StreamId, Conn}`. The owner then routes `response`, h3 `datagram` and `stream_reset` events to the session, broadcasts `closed` (and h3 `goaway`) to every session, and stops on `closed` or when the connection process dies. `release_stream/2` (or the session's death) unsets the handler, cancels the stream and reports capacity.
+`acquire_stream/4` sends the request (`Mod:request/3`), registers the session as the stream handler with `drain_buffer => false`, monitors the session and returns `{ok, StreamId, Conn}`. The owner then routes `response`, h3 `datagram` and `stream_reset` events to the session, broadcasts `closed` (and h3 `goaway`) to every session, and stops on `closed` or when the connection process dies. `release_stream/2` (or the session's death) unsets the handler, cancels the stream and reports capacity. `release_stream/3` with `graceful`, used after the session sent its FIN, unsets the handler without cancelling, so bytes still in flight are kept.
+
+A GOAWAY (h3 or h2) puts the owner in draining: it reports itself full for good, `acquire_stream/4` returns `{error, goaway}`, and the idle timer closes the connection once its last stream is gone. An `acquire_stream/4` on an owner that stopped in the meantime (its idle timer fired after the pool handed it out) returns `{error, owner_gone}`; the facade and the racer then check out again, once. Pooled h3 dials use the connect `timeout` as `connect_timeout`.
+
+A pooled session gets its stream data straight from the transport and its 2xx through the owner, so data can overtake the 2xx. Client sessions postpone data for their stream while `connecting` and handle it once the tunnel is open.
 
 ## Idle eviction
 

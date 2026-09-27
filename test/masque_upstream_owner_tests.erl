@@ -401,3 +401,22 @@ wait_refs_drop_to_zero(Owner, Remaining) ->
             timer:sleep(10),
             wait_refs_drop_to_zero(Owner, Remaining - 10)
     end.
+
+%% After GOAWAY the owner reports full and refuses new streams.
+goaway_drains_owner_test() ->
+    {Owner, Mock} = start_owner(h2, #{pool => self()}),
+    Owner ! {h2, Mock, {goaway, 0, no_error}},
+    receive
+        {owner_capacity, Owner, true} -> ok
+    after 1000 -> ?assert(false)
+    end,
+    ?assertEqual({error, goaway}, ?M:acquire_stream(Owner, sample_headers(), self(), #{})),
+    ok = ?M:stop(Owner),
+    ?MOCK:stop(Mock).
+
+%% An owner that stopped before the call is reported, not raised.
+acquire_on_stopped_owner_test() ->
+    {Owner, Mock} = start_owner(h2),
+    ok = ?M:stop(Owner),
+    ?assertEqual({error, owner_gone}, ?M:acquire_stream(Owner, sample_headers(), self(), #{})),
+    ?MOCK:stop(Mock).

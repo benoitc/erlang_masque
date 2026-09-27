@@ -319,3 +319,22 @@ drain_mailbox() ->
         Msg -> [Msg | drain_mailbox()]
     after 0 -> []
     end.
+
+%% The fingerprint follows the TLS options that take effect: a later
+%% duplicate wins, the order of distinct options does not matter.
+fingerprint_uses_effective_ssl_opts_test() ->
+    FP = fun(SslOpts) ->
+        masque_upstream_pool:fingerprint(<<"p">>, 443, h2, #{ssl_opts => SslOpts})
+    end,
+    ?assertNotEqual(
+        FP([{verify, verify_peer}, {verify, verify_none}]),
+        FP([{verify, verify_none}, {verify, verify_peer}])
+    ),
+    ?assertEqual(
+        FP([{verify, verify_none}, {depth, 2}]),
+        FP([{depth, 2}, {verify, verify_none}])
+    ),
+    ?assertEqual(
+        FP([{verify, verify_peer}, {verify, verify_none}]),
+        FP([{verify, verify_none}])
+    ).

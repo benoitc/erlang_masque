@@ -38,7 +38,7 @@
 
 -export([start_link/1, stop/1]).
 -export([start_for_pool/3]).
--export([acquire_stream/4, release_stream/2]).
+-export([acquire_stream/4, release_stream/2, release_stream/3]).
 -export([info/1]).
 
 -export([
@@ -90,7 +90,9 @@
     idle_ref :: undefined | reference(),
     %% Registry told about capacity changes (self-dialed owners only).
     pool :: pid() | undefined,
-    full = false :: boolean()
+    full = false :: boolean(),
+    %% The peer sent GOAWAY: no new streams on this connection.
+    draining = false :: boolean()
 }).
 
 %%====================================================================
@@ -136,17 +138,26 @@ stop(Owner) ->
 -spec acquire_stream(pid(), [{binary(), binary()}], pid(), map()) ->
     {ok, non_neg_integer(), pid()} | {error, term()}.
 acquire_stream(Owner, Headers, SessionPid, ReqOpts) ->
-    gen_server:call(
-        Owner,
-        {acquire, Headers, SessionPid, ReqOpts},
-        30000
-    ).
+    try
+        gen_server:call(Owner, {acquire, Headers, SessionPid, ReqOpts}, 30000)
+    catch
+        %% The owner stopped (idle timer, connection closed) between the
+        %% pool handing it out and this call: the caller checks out again.
+        exit:{Reason, _} when Reason =:= noproc; Reason =:= normal; Reason =:= shutdown ->
+            {error, owner_gone}
+    end.
 
 %% Release the stream previously acquired by this session.
 %% Safe to call multiple times (second call is a no-op).
 -spec release_stream(pid(), non_neg_integer()) -> ok.
 release_stream(Owner, StreamId) ->
     gen_server:cast(Owner, {release, StreamId}).
+
+%% Release a stream that ended cleanly (FIN sent): the owner stops
+%% routing it but does not reset it, so data still in flight is kept.
+-spec release_stream(pid(), non_neg_integer(), graceful) -> ok.
+release_stream(Owner, StreamId, graceful) ->
+    gen_server:cast(Owner, {release, StreamId, graceful}).
 
 %% Diagnostic snapshot.
 -spec info(pid()) -> map().
@@ -186,6 +197,8 @@ init(#{transport := Transport, conn := Conn} = Args) ->
     %% does not sit open forever.
     {ok, arm_idle(State0)}.
 
+handle_call({acquire, _Headers, _SessionPid, _ReqOpts}, _From, #state{draining = true} = S) ->
+    {reply, {error, goaway}, S};
 handle_call(
     {acquire, Headers, SessionPid, ReqOpts},
     _From,
@@ -231,6 +244,8 @@ handle_call(_Req, _From, S) ->
 
 handle_cast({release, StreamId}, S) ->
     {noreply, drop_stream(StreamId, S)};
+handle_cast({release, StreamId, graceful}, S) ->
+    {noreply, drop_stream(StreamId, S, graceful)};
 handle_cast(_Msg, S) ->
     {noreply, S}.
 
@@ -307,7 +322,11 @@ handle_info(
     #state{transport = quic_h3} = S
 ) ->
     broadcast(Evt, S),
-    {noreply, S};
+    {noreply, drain(S)};
+%% h2 tells every stream handler itself; the owner only stops handing
+%% out this connection.
+handle_info({h2, _Conn, {goaway, _LastId, _Code}}, #state{transport = h2} = S) ->
+    {noreply, drain(S)};
 %% The monitored conn died without a graceful close - same outcome.
 handle_info(
     {'DOWN', Ref, process, _Pid, Reason},
@@ -350,6 +369,8 @@ at_capacity(N, Max) when is_integer(Max) -> N >= Max.
 %% limit so checkout can skip it.
 report_capacity(#state{pool = undefined} = S) ->
     S;
+report_capacity(#state{draining = true} = S) ->
+    S;
 report_capacity(#state{pool = Pool, refs = Refs, max_streams = MS, full = Was} = S) ->
     case at_capacity(maps:size(Refs), MS) of
         Was ->
@@ -358,6 +379,11 @@ report_capacity(#state{pool = Pool, refs = Refs, max_streams = MS, full = Was} =
             Pool ! {owner_capacity, self(), Full},
             S#state{full = Full}
     end.
+
+%% After GOAWAY the connection stays full for good; its idle timer
+%% closes it once its last stream is gone.
+drain(S) ->
+    (mark_full(S))#state{draining = true}.
 
 mark_full(#state{pool = undefined} = S) ->
     S;
@@ -443,12 +469,19 @@ register_stream(
             Err
     end.
 
-drop_stream(StreamId, #state{refs = Refs} = S) ->
+drop_stream(StreamId, S) ->
+    drop_stream(StreamId, S, reset).
+
+drop_stream(StreamId, #state{refs = Refs} = S, How) ->
     case maps:take(StreamId, Refs) of
         {#ref{monitor_ref = MRef}, Refs1} ->
             _ = erlang:demonitor(MRef, [flush]),
             _ = unset_stream_handler(S, StreamId),
-            _ = cancel_transport_stream(S, StreamId),
+            _ =
+                case How of
+                    reset -> cancel_transport_stream(S, StreamId);
+                    graceful -> ok
+                end,
             report_capacity(maybe_arm_idle(S#state{refs = Refs1}));
         error ->
             S

@@ -291,6 +291,13 @@ connecting(
     #data{owner_ref = Ref}
 ) ->
     {stop, owner_gone};
+%% Stream data that overtakes the 2xx (a pooled stream gets its data
+%% straight from the transport, the response through the pool owner)
+%% waits until the tunnel is open.
+connecting(info, {Tag, _Conn, {data, StreamId, _, _}}, #data{stream_id = StreamId}) when
+    is_integer(StreamId), (Tag =:= quic_h3 orelse Tag =:= h2)
+->
+    {keep_state_and_data, [postpone]};
 connecting(info, _Msg, Data) ->
     {keep_state, Data};
 connecting({call, From}, info, Data) ->
@@ -426,7 +433,7 @@ closing(internal, do_close, Data) ->
                     _:_ -> ok
                 end
         end,
-    _ = session_teardown(Data),
+    _ = session_teardown(Data, graceful),
     {stop, normal, Data};
 closing({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, closing}}]};
@@ -451,6 +458,15 @@ terminate(_Reason, _State, Data) ->
 
 %% Close path abstraction: release the pooled stream back to the
 %% owner, or shut down the owned transport connection.
+%% After our FIN a pooled stream is handed back without a reset, so
+%% bytes still in flight reach the proxy.
+session_teardown(#data{pool_owner = Pool, stream_id = StreamId}, graceful) when
+    is_pid(Pool), is_integer(StreamId)
+->
+    masque_upstream_owner:release_stream(Pool, StreamId, graceful);
+session_teardown(Data, graceful) ->
+    session_teardown(Data).
+
 session_teardown(#data{pool_owner = Pool, stream_id = StreamId}) when
     is_pid(Pool), is_integer(StreamId)
 ->
