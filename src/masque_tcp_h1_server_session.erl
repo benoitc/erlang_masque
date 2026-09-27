@@ -176,8 +176,9 @@ handle_info({tcp_error, Sock, Reason}, #state{socket = Sock} = S) ->
     {stop, {tcp_error, Reason}, S};
 handle_info({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
+%% Target-side traffic counts for the idle timer too.
 handle_info(Msg, S) ->
-    dispatch(handle_info, [Msg], S).
+    dispatch(handle_info, [Msg], arm_idle(S)).
 
 terminate(_Reason, {starting, Args}) ->
     masque_session_start:abandon(Args);

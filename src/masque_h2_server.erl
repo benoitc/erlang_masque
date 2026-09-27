@@ -162,7 +162,7 @@ build_dispatch(Opts) ->
             maps:get(handler_opts, Opts, #{})
         ),
         fallback => maps:get(fallback, Opts, undefined),
-        max_tunnels => maps:get(max_tunnels_per_connection, Opts, 0),
+        max_tunnels => maps:get(max_tunnels_per_connection, Opts, ?MASQUE_DEFAULT_MAX_TUNNELS),
         name => maps:get(drain_key, Opts, undefined)
     }.
 

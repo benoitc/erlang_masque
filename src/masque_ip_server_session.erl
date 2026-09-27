@@ -30,6 +30,8 @@
 -define(MAX_PEER_PENDING, 64).
 -define(H3_INTERNAL_ERROR, 16#102).
 
+-define(DEFAULT_IDLE_MS, 300000).
+
 -record(state, {
     conn :: pid(),
     stream_id :: non_neg_integer(),
@@ -51,7 +53,10 @@
     peer_pending = #{} :: #{pos_integer() => true},
     %% Monitor on the router (H3 path).
     router_ref :: reference() | undefined,
-    start_time :: integer() | undefined
+    start_time :: integer() | undefined,
+    %% Idle timeout (`idle_timeout_ms'), armed once the tunnel is open.
+    idle_ms = ?DEFAULT_IDLE_MS :: non_neg_integer() | infinity,
+    idle :: masque_idle:idle() | undefined
 }).
 
 %%====================================================================
@@ -158,6 +163,7 @@ init_session(
                 router_ref = RouterRef,
                 transport = Transport,
                 handler = Handler,
+                idle_ms = maps:get(idle_timeout_ms, HOpts, ?DEFAULT_IDLE_MS),
                 h_state = HState,
                 req = Req,
                 max_cap = MaxCap
@@ -320,52 +326,64 @@ handle_cast(_Msg, S) ->
 %%====================================================================
 
 %% H3 datagram path (via connection router).
-handle_info(
+%% Every message counts as traffic for the idle timer; the timer's
+%% own message checks whether the tunnel has been idle long enough.
+handle_info({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
+    case masque_idle:check(Ref, Idle) of
+        expired -> {stop, idle_timeout, S};
+        {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
+    end;
+handle_info(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
+    handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
+handle_info(Msg, S) ->
+    handle_traffic(Msg, S).
+
+handle_traffic(
     {masque_datagram_in, StreamId, Payload},
     #state{stream_id = StreamId} = S
 ) ->
     dispatch_datagram(Payload, S);
-handle_info(
+handle_traffic(
     {masque_stream_data, StreamId, Data, Fin},
     #state{stream_id = StreamId} = S
 ) ->
     handle_stream_bytes(Data, Fin, S);
-handle_info(
+handle_traffic(
     {masque_stream_reset, StreamId, _},
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
-handle_info(
+handle_traffic(
     {Tag, _Conn, {data, StreamId, Bytes, Fin}},
     #state{stream_id = StreamId} = S
 ) when
     Tag =:= quic_h3; Tag =:= h2
 ->
     handle_stream_bytes(Bytes, Fin, S);
-handle_info(
+handle_traffic(
     {Tag, _Conn, {stream_reset, StreamId, _}},
     #state{stream_id = StreamId} = S
 ) when
     Tag =:= quic_h3; Tag =:= h2
 ->
     {stop, peer_reset, S};
-handle_info({h2, _Conn, {closed, _Reason}}, S) ->
+handle_traffic({h2, _Conn, {closed, _Reason}}, S) ->
     {stop, peer_closed, S};
-handle_info(flush_cap_buf, #state{cap_buf = Buf} = S) when Buf =/= <<>> ->
+handle_traffic(flush_cap_buf, #state{cap_buf = Buf} = S) when Buf =/= <<>> ->
     drain_capsules(Buf, false, S#state{cap_buf = <<>>});
-handle_info(flush_cap_buf, S) ->
+handle_traffic(flush_cap_buf, S) ->
     {noreply, S};
-handle_info({'EXIT', _Pid, _Reason}, S) ->
+handle_traffic({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
-handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
+handle_traffic({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
     {stop, router_gone, S};
-handle_info(Msg, #state{pending_actions = Actions, early = Early} = S) when
+handle_traffic(Msg, #state{pending_actions = Actions, early = Early} = S) when
     Actions =/= undefined
 ->
     %% Not finalized yet: nothing may be written to the stream before
     %% the 2xx, so keep the message for `finalize'.
     {noreply, S#state{early = [Msg | Early]}};
-handle_info(Msg, S) ->
+handle_traffic(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
 terminate(_Reason, {starting, Args}) ->
@@ -439,7 +457,10 @@ unregister_from_router(Router, StreamId) ->
 %% until `terminate/2'.
 mark_open(#state{transport = Transport} = S) ->
     masque_metrics:tunnel_opened(#{protocol => ip, transport => Transport}),
-    S#state{start_time = erlang:monotonic_time(millisecond)}.
+    S#state{
+        start_time = erlang:monotonic_time(millisecond),
+        idle = masque_idle:new(S#state.idle_ms)
+    }.
 
 emit_tunnel_closed(#state{start_time = undefined}) ->
     ok;

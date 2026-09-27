@@ -52,7 +52,7 @@ Opts = #{
 | `ip_uri_template` | all | `/.well-known/masque/ip/{target}/{ipproto}/` | CONNECT-IP path. |
 | `accept_bind` | all | `false` | Accept Connect-UDP-Bind on the UDP template. See [connect-udp-bind](connect-udp-bind.md). |
 | `resolver` | all | A + AAAA lookup | Resolves CONNECT-IP host name targets before `accept/1`. Returns `{ok, [Address]}`. |
-| `max_tunnels_per_connection` | h3, h2 | `0` (no limit) | Tunnels one client connection may hold. Extra requests get 503. |
+| `max_tunnels_per_connection` | h3, h2 | `100` | Tunnels one client connection may hold; `0` means no limit. Extra requests get 503. |
 | `fallback` | h3, h2 | none | `fun(Conn, StreamId, Method, Path, Headers)` for requests that are not MASQUE. Without it they are rejected. |
 | `settings` | h3, h2 | `#{}` | Extra transport settings; the MASQUE ones are always forced on. |
 | `acceptors` | h2, h1 | library default | Acceptor processes. |
@@ -134,9 +134,9 @@ Draining works by listener name on all three transports. Tunnels already open ke
 
 | Limit | Where | Default | When it trips |
 |---|---|---|---|
-| `max_tunnels_per_connection` | listener, h3 and h2 | unlimited | 503 `overload`. h1 carries one tunnel per connection anyway. |
+| `max_tunnels_per_connection` | listener, h3 and h2 | 100 (`0`: no limit) | 503 `overload`. h1 carries one tunnel per connection anyway. |
 | `max_capsule_size` | `handler_opts` | 65536 bytes | A capsule larger than this aborts the tunnel. |
-| `idle_timeout_ms` | `handler_opts`, h1 sessions | 300000 | An h1 tunnel with no bytes from the client for this long ends with `idle_timeout`. `infinity` disables it. |
+| `idle_timeout_ms` | `handler_opts`, every session | 300000 | A tunnel with no traffic in either direction for this long ends with `idle_timeout` (the stream is reset; on h1 the socket is closed). `infinity` disables it. |
 | Session `init/2` time | h3 | 30 s | The request is refused with 502. |
 
 ## Security defaults

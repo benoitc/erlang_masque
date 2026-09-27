@@ -144,7 +144,7 @@ h3_handlers(Opts0) ->
         fallback => Fallback,
         name => DrainKey
     },
-    MaxTunnels = maps:get(max_tunnels_per_connection, Opts, 0),
+    MaxTunnels = maps:get(max_tunnels_per_connection, Opts, ?MASQUE_DEFAULT_MAX_TUNNELS),
     ConnectionHandler = fun(ConnPid) ->
         {ok, Router} = masque_server_connection:start_link(MaxTunnels, ConnPid),
         #{

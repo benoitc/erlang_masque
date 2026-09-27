@@ -74,7 +74,7 @@ flowchart TD
 
 - **Per listener**: the `h1` server, TLS only, reference in `persistent_term`.
 - **Per connection**: the `h1` library's connection process until the handshake; one tunnel at most per connection.
-- **Per tunnel**: a child of `masque_h1_session_sup` (UDP), `masque_h1_ip_session_sup`, `masque_h1_tcp_session_sup` or `masque_h1_udp_bind_session_sup`, started like the h2 sessions (`masque_session_start`). The session runs the handler's `init/2`, then calls `h1:accept_upgrade/3` (writes 101) or, for classic CONNECT, `h1:accept_connect/3` (writes 200). Either call hands the TLS socket to the session, which from then on reads and writes it directly. h1 sessions are the only server sessions with an idle timeout (`idle_timeout_ms` in `handler_opts`, default 300000). A rejected h1 request closes the connection.
+- **Per tunnel**: a child of `masque_h1_session_sup` (UDP), `masque_h1_ip_session_sup`, `masque_h1_tcp_session_sup` or `masque_h1_udp_bind_session_sup`, started like the h2 sessions (`masque_session_start`). The session runs the handler's `init/2`, then calls `h1:accept_upgrade/3` (writes 101) or, for classic CONNECT, `h1:accept_connect/3` (writes 200). Either call hands the TLS socket to the session, which from then on reads and writes it directly. Like every server session, h1 sessions have an idle timeout (`idle_timeout_ms` in `handler_opts`, default 300000). A rejected h1 request closes the connection.
 
 ### Where handler code runs
 
@@ -165,7 +165,6 @@ Open questions (no answer in the repository):
 - Open question: why are h3 server sessions started by the router with `gen_server:start` and linked, instead of living under a session supervisor like h2 and h1 sessions?
 - Open question: is the h3-only router a requirement of `quic_h3` ownership alone, or also a deliberate choice to keep routing state per connection?
 - Open question: why does CONNECT-UDP have separate h3 and h2 modules on both sides (`masque_client_session` / `masque_h2_client_session`, `masque_server_session` / `masque_h2_server_session`) while TCP, IP and udp-bind use one module for h3 and h2 with a `transport` field?
-- Open question: should idle timeouts exist only on h1 server sessions?
 - Open question: should client sessions stay outside any supervisor?
 
 ## Where to go next

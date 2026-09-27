@@ -37,6 +37,7 @@ Accepts the same policy hooks as the UDP proxy (`allow`, `resolver`,
     terminate/2
 ]).
 
+-define(TARGET_SEND_TIMEOUT, 30000).
 -define(DEFAULT_ACTIVE_N, 16).
 %% Idle time allowed on a half-closed tunnel.
 -define(EOF_IDLE_MS, 30000).
@@ -87,6 +88,10 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
                         %% Keep the socket writable after the target's
                         %% FIN so the tunnel can half-close.
                         {exit_on_close, false},
+                        %% A target that stops reading ends the tunnel
+                        %% after 30 s instead of blocking it forever.
+                        {send_timeout, ?TARGET_SEND_TIMEOUT},
+                        {send_timeout_close, true},
                         Family
                         | maps:get(socket_opts, Opts, [])
                     ],

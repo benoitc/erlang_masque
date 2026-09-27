@@ -28,7 +28,7 @@ Every server session reports `masque.tunnels.total`, `masque.tunnels.active` and
 
 ## Counters
 
-Two sets of plain `counters` sit beside the meters. They are node-wide totals, cheap to read, and meant for scrapers and tests.
+Plain `counters` sit beside the meters. `masque_metrics:backlog_drop_count/0` counts the HTTP/3 datagrams the router dropped because their session had 10 000 unprocessed messages. They are node-wide totals, cheap to read, and meant for scrapers and tests.
 
 ### Drop counters
 
@@ -89,8 +89,9 @@ Clients that race transports reconnect to whichever instance your DNS or load ba
 | udp-bind peers | Only public peers. | `allow_loopback`, `allow_private`, `peer_filter_fun` |
 | Capsule size | 64 KiB per capsule. | `max_capsule_size` |
 | Client queue | 1000 items. | `rx_queue_limit` |
-| Tunnels per connection | Unlimited. | `max_tunnels_per_connection` |
-| h1 idle tunnel | Ends after 5 minutes without client bytes. | `idle_timeout_ms` |
+| Tunnels per connection | 100 on h3 and h2 (h1 carries one). | `max_tunnels_per_connection` |
+| Idle tunnel | Ends after 5 minutes without traffic in either direction, on every transport. | `idle_timeout_ms` |
+| CONNECT-TCP target writes | A target that stops reading ends the tunnel after 30 s; on h2 the client is flow-controlled meanwhile. | - |
 | Request headers | Library headers cannot be overridden; CR/LF refused on h1 (except udp-bind). | - |
 | h1 rejection | Connection closed after every refused request. | - |
 

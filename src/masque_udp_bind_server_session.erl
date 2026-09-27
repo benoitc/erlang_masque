@@ -61,6 +61,8 @@
 -include("masque.hrl").
 -include("masque_udp_bind.hrl").
 
+-define(DEFAULT_IDLE_MS, 300000).
+
 -record(state, {
     transport :: h2 | h3,
     conn :: pid(),
@@ -89,7 +91,10 @@
     start_time :: integer() | undefined,
     %% h3: handler messages (e.g. peer packets) that arrived before
     %% finalize, newest first. Replayed once the 2xx is sent.
-    early = [] :: [term()]
+    early = [] :: [term()],
+    %% Idle timeout (`idle_timeout_ms'), armed once the tunnel is open.
+    idle_ms = ?DEFAULT_IDLE_MS :: non_neg_integer() | infinity,
+    idle :: masque_idle:idle() | undefined
 }).
 
 -define(DEFAULT_MAX_PENDING_RESPONSES, 16).
@@ -185,6 +190,7 @@ start(
                 stream_id = StreamId,
                 router = Router,
                 handler = Handler,
+                idle_ms = maps:get(idle_timeout_ms, HOpts, ?DEFAULT_IDLE_MS),
                 h_state = HState,
                 req = Req,
                 bind_scope = BindScope,
@@ -240,7 +246,8 @@ finalize(#state{pending_actions = Actions, resp_headers = Headers} = State) ->
                         run_init_actions(
                             Actions,
                             S2#state{
-                                start_time = erlang:monotonic_time(millisecond)
+                                start_time = erlang:monotonic_time(millisecond),
+                                idle = masque_idle:new(S2#state.idle_ms)
                             }
                         )
                     of
@@ -299,7 +306,19 @@ handle_cast(connection_closed, S) ->
 handle_cast(_Msg, S) ->
     {noreply, S}.
 
-handle_info(
+%% Every message counts as traffic for the idle timer; the timer's
+%% own message checks whether the tunnel has been idle long enough.
+handle_info({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
+    case masque_idle:check(Ref, Idle) of
+        expired -> {stop, idle_timeout, S};
+        {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
+    end;
+handle_info(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
+    handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
+handle_info(Msg, S) ->
+    handle_traffic(Msg, S).
+
+handle_traffic(
     {masque_datagram_in, StreamId, Payload},
     #state{transport = h3, stream_id = StreamId} = S
 ) ->
@@ -308,47 +327,47 @@ handle_info(
         #{protocol => udp_bind, transport => h3}
     ),
     handle_inbound_datagram(Payload, S);
-handle_info(
+handle_traffic(
     {masque_stream_data, StreamId, Data, Fin},
     #state{stream_id = StreamId} = S
 ) ->
     handle_stream_bytes(Data, Fin, S);
-handle_info(
+handle_traffic(
     {quic_h3, _Conn, {data, StreamId, Data, Fin}},
     #state{transport = h3, stream_id = StreamId} = S
 ) ->
     handle_stream_bytes(Data, Fin, S);
-handle_info(
+handle_traffic(
     {h2, _Conn, {data, StreamId, Data, Fin}},
     #state{transport = h2, stream_id = StreamId} = S
 ) ->
     handle_stream_bytes(Data, Fin, S);
-handle_info(
+handle_traffic(
     {masque_stream_reset, StreamId, _ErrorCode},
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
-handle_info(
+handle_traffic(
     {Tag, _Conn, {stream_reset, StreamId, _ErrorCode}},
     #state{stream_id = StreamId} = S
 ) when
     Tag =:= quic_h3; Tag =:= h2
 ->
     {stop, peer_reset, S};
-handle_info({h2, _Conn, {closed, _Reason}}, S) ->
+handle_traffic({h2, _Conn, {closed, _Reason}}, S) ->
     {stop, peer_closed, S};
-handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
+handle_traffic({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
     {stop, router_gone, S};
-handle_info({'EXIT', _Pid, _Reason}, S) ->
+handle_traffic({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
-handle_info(Msg, #state{pending_actions = Actions, early = Early} = S) when
+handle_traffic(Msg, #state{pending_actions = Actions, early = Early} = S) when
     Actions =/= undefined
 ->
     %% Not finalized yet: nothing may be written to the stream before
     %% the 2xx, so keep the message for `finalize'. The bind socket's
     %% `{active, N}' window bounds how many pile up.
     {noreply, S#state{early = [Msg | Early]}};
-handle_info(Msg, S) ->
+handle_traffic(Msg, S) ->
     %% Hand all other messages (notably {udp, ...} from the bind
     %% handler's gen_udp socket) through the handler's handle_info/2.
     dispatch(handle_info, [Msg], S).

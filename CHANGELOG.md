@@ -8,6 +8,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- Listeners default to `max_tunnels_per_connection => 100` on h3 and
+  h2 (`0` still means no limit). **Breaking**.
+- Every server session has an idle timeout (`idle_timeout_ms`, default
+  300 s); traffic in either direction re-arms it. **Breaking** for h3
+  and h2 tunnels that stayed open silently.
+- CONNECT-TCP over h2 returns receive credit only as data reaches the
+  target, and target writes time out after 30 s, so a stalled target no
+  longer lets a client fill the session's memory.
+- The h3 router drops datagrams for a session with 10 000 unprocessed
+  messages (`masque_metrics:backlog_drop_count/0`).
+
 - udp-bind: the listener `allow` policy applies to every peer, and a
   scoped bind only exchanges packets with its scoped target.
 

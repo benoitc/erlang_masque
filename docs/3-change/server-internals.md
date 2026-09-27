@@ -10,7 +10,7 @@ Every listener runs the same eight steps for each request. The steps are written
 2. **Validate.** Method, `:protocol` (or `Upgrade` on h1), `:scheme` and `:authority` presence, then the path is matched against the protocol's URI template (`masque_uri`, `masque_uri_ip`, `masque_uri_udp_bind`). The result is the request map `Req` that handlers receive.
 3. **Target resolution.** `masque_ip:resolve_target/3` resolves only CONNECT-IP hostname targets, with the listener's `resolver` (default: `inet_res` A + AAAA), and stores `resolved_addresses` in `Req`. UDP and TCP targets pass through untouched: their handler resolves them in `init/2`.
 4. **Accept gate.** The handler's `accept/1`, or `masque_handler:default_accept/1` when not exported. `{reject, Reason}` and `{reject, Reason, ExtraHeaders}` end the request here.
-5. **Tunnel limit.** `max_tunnels_per_connection` (default 0, unlimited). Where it is counted differs per transport, see below.
+5. **Tunnel limit.** `max_tunnels_per_connection` (default 100; `0` means unlimited). Where it is counted differs per transport, see below.
 6. **Spawn session.** One server session process per tunnel. The session runs the handler's `init/2`.
 7. **2xx.** Sent only after `init/2` succeeded, so a 2xx means the tunnel is ready (RFC 9298 section 3). On h3 this is the separate [finalize](#async-finalize) step.
 8. **Reject.** Any failure above is answered by the listener's `reject/3,4`: the status from `masque_errors:handshake_status/1`, a `text/plain` body with `masque_errors:status_reason/1`, and a `proxy-status: masque; error=...` header (RFC 9209). Caller headers from `{reject, _, Extra}` win on collision. `masque_metrics:tunnel_rejected/1` is bumped.
@@ -149,7 +149,7 @@ The UDP path has its own module, `masque_h2_server_session`; TCP, IP and udp-bin
 
 The session starts the same way as on h2 (`masque_session_start`, reported from `handle_continue/2`). It runs `init/2` first, so a handler rejection still has a plain HTTP connection to answer on. Then it calls `h1:accept_upgrade/3` (writes 101) or `h1:accept_connect/3` (writes 200). Both hand the raw TLS socket and any bytes already read past the header block to the session. From then on the session owns the socket, reads it with `{active, once}`, and there is no HTTP layer left.
 
-h1 sessions also have an idle timer, `idle_timeout_ms` in `handler_opts` (default 300 000 ms; `infinity` disables it, and so does `0` except in the udp-bind h1 session, where `0` fires at once). It is re-armed on inbound socket bytes only, so a tunnel that only sends toward the client still idles out. h2 and h3 sessions have no idle timer (Q6 in [decisions](decisions.md)).
+Every server session has an idle timer, `idle_timeout_ms` in `handler_opts` (default 300 000 ms; `infinity` disables it). Traffic in either direction re-arms it: on h1, inbound socket bytes and any message from the handler's target; on h3 and h2, every message the session handles (`masque_idle` keeps a timestamp and one timer, so a busy tunnel costs no timer churn). An idle tunnel stops with `idle_timeout`.
 
 ## Session anatomy
 
@@ -193,16 +193,18 @@ What the server session does when each event happens. "Reset" means the stream i
 | Target error (handler returns `{stop, Reason, S}`) | udp: reset `H3_MESSAGE_ERROR`; tcp: `target_closed` or `eof_timeout` end with FIN, anything else resets with `H3_CONNECT_ERROR`; ip: FIN; udp-bind: reset `H3_INTERNAL_ERROR` | same shape with `protocol_error`, `connect_error`, FIN, `internal_error` | the socket is closed |
 | `close_session` action | stop `normal`, FIN (tcp skips it if a FIN was already sent) | same | the socket is closed |
 | Capsule buffer overflow | reset | reset | stop, socket closed |
-| Idle | none | none | `idle_timeout` after `idle_timeout_ms` without inbound bytes |
+| Idle | `idle_timeout` after `idle_timeout_ms` without traffic; reset | same | same; socket closed |
 
 In every case the handler's `terminate/2` runs (through `try_callback/3`, errors swallowed), which is where built-in handlers close their target sockets and where `masque_ip_proxy_handler` releases its addresses. The client side of the same events is in [client internals](client-internals.md#teardown-seen-from-the-client).
 
 ## Backpressure
 
-Two mechanisms keep a fast side from flooding a slow one.
+These mechanisms keep a fast side from flooding a slow one.
 
 - **Target reads.** The built-in handlers open target sockets in `{active, N}` (`active_n`: 16 for TCP, 32 for UDP and udp-bind). The kernel stops delivering after N messages and sends `{tcp_passive, _}` / `{udp_passive, _}`. That message sits behind the N data messages in the session mailbox, so when the handler sees it every earlier chunk has been relayed, and only then does it re-arm the socket.
 - **Tunnel writes (tcp).** A CONNECT-TCP write either lands or stops the session: on h2 `h2:send_data/5` with `#{block => 30000}` waits for flow-control window; on h3 `quic_h3:send_data/4` returns `{error, send_queue_full}` and the session retries every 5 ms for up to 30 s. A failure stops the session with `{tunnel_send_failed, Reason}`. Because the write blocks the session, the passive message is handled late and the target read stalls, which is the point.
+- **Client reads (tcp, h2).** The session claims h2 streams with `#{flow_control => manual}` and returns receive credit with `h2:consume/3` only after `handle_data/2` returned, so a target that stops reading stops the client instead of filling the session mailbox. The TCP handler's target socket has a 30 s `send_timeout`, so a target that never reads ends the tunnel. `quic_h3` has no manual receive credit, so CONNECT-TCP over h3 does not get this.
+- **Router datagrams (h3).** The router drops a datagram, and counts it with `backlog_drop_inc/0`, when its session already has 10 000 unprocessed messages. Stream data is never dropped.
 
 Datagram writes (udp, ip, udp-bind) never block: oversize UDP payloads are dropped (RFC 9298 section 5), and on h3 payloads larger than `quic_h3:max_datagram_size/2` are dropped too. h1 sessions read the client socket with `{active, once}` and re-arm after each chunk is processed.
 

@@ -26,6 +26,8 @@
 
 -include("masque.hrl").
 
+-define(DEFAULT_IDLE_MS, 300000).
+
 -record(state, {
     conn :: pid(),
     stream_id :: non_neg_integer(),
@@ -34,7 +36,10 @@
     req :: map(),
     cap_buf = <<>> :: binary(),
     max_cap :: pos_integer(),
-    start_time :: integer() | undefined
+    start_time :: integer() | undefined,
+    %% Idle timeout (`idle_timeout_ms'), armed once the tunnel is open.
+    idle_ms = ?DEFAULT_IDLE_MS :: non_neg_integer() | infinity,
+    idle :: masque_idle:idle() | undefined
 }).
 
 %%====================================================================
@@ -84,7 +89,10 @@ start(Args) ->
     case init_session(Args) of
         {ok, S} ->
             masque_metrics:tunnel_opened(#{protocol => udp, transport => h2}),
-            {ok, S#state{start_time = erlang:monotonic_time(millisecond)}};
+            {ok, S#state{
+                start_time = erlang:monotonic_time(millisecond),
+                idle = masque_idle:new(S#state.idle_ms)
+            }};
         Other ->
             Other
     end.
@@ -108,6 +116,7 @@ init_session(#{
                 conn = Conn,
                 stream_id = StreamId,
                 handler = Handler,
+                idle_ms = maps:get(idle_timeout_ms, HOpts, ?DEFAULT_IDLE_MS),
                 h_state = HState,
                 req = Req,
                 max_cap = MaxCap
@@ -167,7 +176,19 @@ handle_call(_Req, _From, S) ->
 handle_cast(_Msg, S) ->
     {noreply, S}.
 
-handle_info(
+%% Every message counts as traffic for the idle timer; the timer's
+%% own message checks whether the tunnel has been idle long enough.
+handle_info({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
+    case masque_idle:check(Ref, Idle) of
+        expired -> {stop, idle_timeout, S};
+        {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
+    end;
+handle_info(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
+    handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
+handle_info(Msg, S) ->
+    handle_traffic(Msg, S).
+
+handle_traffic(
     {h2, _Conn, {data, StreamId, Bytes, Fin}},
     #state{
         stream_id = StreamId,
@@ -180,20 +201,20 @@ handle_info(
         true -> reset_and_stop(capsule_buffer_overflow, S);
         false -> drain_capsules(New, Fin, S)
     end;
-handle_info(flush_cap_buf, #state{cap_buf = Buf} = S) when Buf =/= <<>> ->
+handle_traffic(flush_cap_buf, #state{cap_buf = Buf} = S) when Buf =/= <<>> ->
     drain_capsules(Buf, false, S#state{cap_buf = <<>>});
-handle_info(flush_cap_buf, S) ->
+handle_traffic(flush_cap_buf, S) ->
     {noreply, S};
-handle_info({'EXIT', _Pid, _Reason}, S) ->
+handle_traffic({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
-handle_info(
+handle_traffic(
     {h2, _Conn, {stream_reset, StreamId, _}},
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
-handle_info({h2, _Conn, {closed, _Reason}}, S) ->
+handle_traffic({h2, _Conn, {closed, _Reason}}, S) ->
     {stop, peer_closed, S};
-handle_info(Msg, S) ->
+handle_traffic(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
 terminate(_Reason, {starting, Args}) ->

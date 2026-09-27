@@ -43,6 +43,9 @@
     unsupported_call_keeps_session/1,
     udp_bind_skips_pool/1,
     h2_slow_start_does_not_block_others/1,
+    default_tunnel_cap_is_100/1,
+    h3_idle_tunnel_ends/1,
+    h2_tcp_receive_window_is_bounded/1,
     h2_init_close_session_frees_slot/1,
     h3_init_close_session_balances_metrics/1,
     h3_send_to_on_proxy_context/1,
@@ -105,6 +108,9 @@ all() ->
         unsupported_call_keeps_session,
         udp_bind_skips_pool,
         h2_slow_start_does_not_block_others,
+        default_tunnel_cap_is_100,
+        h3_idle_tunnel_ends,
+        h2_tcp_receive_window_is_bounded,
         h2_init_close_session_frees_slot,
         h3_init_close_session_balances_metrics,
         h3_send_to_on_proxy_context,
@@ -230,6 +236,10 @@ extra_opts(h3_send_to_on_proxy_context) ->
         bind_handler => masque_crash_bind_handler,
         handler_opts => HOpts#{early_assign => {{127, 0, 0, 1}, send_to_peer_port()}}
     };
+extra_opts(h3_idle_tunnel_ends) ->
+    #{handler_opts => #{idle_timeout_ms => 300}};
+extra_opts(h2_tcp_receive_window_is_bounded) ->
+    #{tcp_handler => masque_report_tcp_handler, handler_opts => #{data_delay => 2000}};
 extra_opts(h2_slow_start_does_not_block_others) ->
     #{handler_opts => #{delay_ports => #{7001 => 3000}}};
 extra_opts(Case) when
@@ -585,6 +595,43 @@ h1_udp_bind_pending_limit(Config) ->
     end,
     {open, _} = sys:get_state(Sess),
     ok = masque:close(Sess).
+
+%% Without `max_tunnels_per_connection', a connection holds at most 100
+%% tunnels (h3 router, h2 dispatch).
+default_tunnel_cap_is_100(Config) ->
+    Sess = connect(Config, h3),
+    Pid = await_session(),
+    Router = element(4, sys:get_state(Pid)),
+    ?assertEqual(100, element(5, sys:get_state(Router))),
+    ok = masque:close(Sess).
+
+%% A tunnel with no traffic either way ends after `idle_timeout_ms'.
+h3_idle_tunnel_ends(Config) ->
+    Sess = connect(Config, h3),
+    Pid = await_session(),
+    MRef = erlang:monitor(process, Pid),
+    receive
+        {'DOWN', MRef, process, Pid, idle_timeout} -> ok
+    after 3000 -> ct:fail(not_idled_out)
+    end,
+    await_closed(Sess).
+
+%% h2 receive credit is returned only as the handler consumes data, so
+%% a target that stops reading bounds what piles up in the session.
+h2_tcp_receive_window_is_bounded(Config) ->
+    {EchoPid, EchoPort} = start_tcp_echo(),
+    Sess = tcp_connect(Config, h2, EchoPort),
+    Pid = await_session(),
+    Chunk = binary:copy(<<0>>, 16384),
+    Sender = spawn(fun() -> [masque:send(Sess, Chunk) || _ <- lists:seq(1, 64)] end),
+    timer:sleep(1500),
+    {messages, Msgs} = erlang:process_info(Pid, messages),
+    Queued = lists:sum([byte_size(B) || {h2, _, {data, _, B, _}} <- Msgs]),
+    %% One stream window (64 KiB by default) at most, not the 1 MiB sent.
+    ?assert(Queued =< 131072),
+    exit(Sender, kill),
+    exit(EchoPid, kill),
+    _ = masque:close(Sess).
 
 %% A slow handler start on one h2 tunnel does not hold up the start of
 %% another: sessions no longer start inside the supervisor call.

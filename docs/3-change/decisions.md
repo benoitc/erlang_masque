@@ -183,7 +183,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q3.** Is the router needed only because `quic_h3` delivers datagrams to the connection owner, or is there another reason h2 and h1 sessions sit under supervisors while h3 has a router?
 - **Q4.** Why are h3 server sessions unsupervised (started by the router with `gen_server:start/3`, then linked and monitored)?
 - **Q5.** All h2 sessions send the 2xx from their own `init/1`, and the h2 UDP session is the only one in a separate module without a `transport` field or metrics. Is that separation intended?
-- **Q6.** Should idle timeouts exist only on h1 sessions?
+- **Q6.** Settled: every server session has an idle timeout (300 s by default).
 - **Q7.** Settled: `masque.tunnels.*` covers every protocol and transport; each server session reports one open and one close.
 - **Q8.** How stable are internal message shapes (`masque_datagram_in`, `masque_finalized`, `dial_result`, `owner_capacity`)?
 - **Q9.** Versioning: the 0.6.0 CHANGELOG entry and the v0.5/v0.6 tags are missing; is hex publishing planned?
@@ -197,7 +197,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q17.** Settled: the h1 udp-bind server session enforces the same rules as the h3/h2 one (see [udp-bind internals](udp-bind-internals.md#the-h1-session)).
 - **Q18.** Settled: pooled h3 owners default to 100 streams and report full on a transport `stream_limit` error, so the pool opens another connection (see [pool](pool.md)).
 - **Q19.** The `masque_ip_proxy_handler` allocator is first-fit (its moduledoc used to say round-robin). Is round-robin wanted, so a released address is not handed out again at once?
-- **Q20.** h1 idle timers are re-armed by inbound bytes only, so a tunnel that only sends toward the client idles out. Should outbound traffic count?
+- **Q20.** Settled: traffic in either direction re-arms the idle timer.
 - **Q21.** `dial_single_or_pool/5` waits for the pool checkout up to `checkout_timeout_ms` (60 s), regardless of the connect `timeout`. Intended?
 - **Q22.** The chain listeners set `handler`, `tcp_handler` and `ip_handler` to `masque_chain_handler` but not `bind_handler`, so udp-bind is not chained. Intended?
 - **Q23.** Are the listener gaps intended: h1 has no `fallback`, no `peer` / `peer_cert` and no tunnel limit; h2 has no `peer` / `peer_cert`? (Option lifting into `handler_opts` is now the same on all three.)

@@ -30,6 +30,8 @@
     code_change/3
 ]).
 
+-define(MAX_SESSION_BACKLOG, 10000).
+
 -record(state, {
     %% StreamId -> SessionPid
     sessions = #{} :: #{non_neg_integer() => pid()},
@@ -312,7 +314,7 @@ code_change(_OldVsn, S, _Extra) ->
 route_to_session(StreamId, Msg, S) ->
     case maps:find(StreamId, S#state.sessions) of
         {ok, Pid} ->
-            Pid ! Msg,
+            forward(Pid, Msg),
             {noreply, S};
         error ->
             case maps:find(StreamId, S#state.pending) of
@@ -333,6 +335,20 @@ route_to_session(StreamId, Msg, S) ->
                     {noreply, S}
             end
     end.
+
+%% Datagrams are unreliable: when a session cannot keep up, drop them
+%% here rather than let its mailbox grow. Stream data is never dropped.
+forward(Pid, {masque_datagram_in, _, _} = Msg) ->
+    case erlang:process_info(Pid, message_queue_len) of
+        {message_queue_len, N} when N >= ?MAX_SESSION_BACKLOG ->
+            masque_metrics:backlog_drop_inc();
+        _ ->
+            Pid ! Msg,
+            ok
+    end;
+forward(Pid, Msg) ->
+    Pid ! Msg,
+    ok.
 
 find_pending_by_worker(WorkerPid, Pending) ->
     maps:fold(

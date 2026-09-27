@@ -30,6 +30,8 @@
 -define(SEND_TIMEOUT, 30000).
 -define(SEND_RETRY_MS, 5).
 
+-define(DEFAULT_IDLE_MS, 300000).
+
 -record(state, {
     conn :: pid(),
     stream_id :: non_neg_integer(),
@@ -46,7 +48,10 @@
     %% H3 path: handler messages (e.g. target bytes) that arrived
     %% before finalize, newest first. Replayed once the 2xx is sent.
     early = [] :: [term()],
-    start_time :: integer() | undefined
+    start_time :: integer() | undefined,
+    %% Idle timeout (`idle_timeout_ms'), armed once the tunnel is open.
+    idle_ms = ?DEFAULT_IDLE_MS :: non_neg_integer() | infinity,
+    idle :: masque_idle:idle() | undefined
 }).
 
 %%====================================================================
@@ -115,6 +120,7 @@ start(
                 stream_id = StreamId,
                 transport = Transport,
                 handler = Handler,
+                idle_ms = maps:get(idle_timeout_ms, HOpts, ?DEFAULT_IDLE_MS),
                 h_state = HState,
                 req = Req,
                 router_ref = RouterRef
@@ -183,8 +189,21 @@ replay_early([Msg | Rest], S) ->
 
 claim_stream(#state{transport = h3, conn = C, stream_id = S}) ->
     quic_h3:set_stream_handler(C, S, self(), #{drain_buffer => false});
+%% h2 receive credit is returned only once the handler has written the
+%% bytes to the target (`consume/3'), so a stalled target stops the
+%% client instead of filling this process's mailbox.
 claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
-    h2:set_stream_handler(C, S, self()).
+    h2:set_stream_handler(C, S, self(), #{flow_control => manual}).
+
+consume(h2, Bytes, #state{conn = C, stream_id = Sid}) when byte_size(Bytes) > 0 ->
+    %% The stream may already be gone (its FIN was the last event).
+    try
+        h2:consume(C, Sid, byte_size(Bytes))
+    catch
+        exit:_ -> ok
+    end;
+consume(_Tag, _Bytes, _S) ->
+    ok.
 
 handle_call(
     finalize,
@@ -225,17 +244,32 @@ handle_cast(_Msg, S) ->
     {noreply, S}.
 
 %% Incoming stream data - raw TCP bytes
-handle_info(
+%% Every message counts as traffic for the idle timer; the timer's
+%% own message checks whether the tunnel has been idle long enough.
+handle_info({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
+    case masque_idle:check(Ref, Idle) of
+        expired -> {stop, idle_timeout, S};
+        {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
+    end;
+handle_info(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
+    handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
+handle_info(Msg, S) ->
+    handle_traffic(Msg, S).
+
+handle_traffic(
     {Tag, _Conn, {data, StreamId, Bytes, Fin}},
     #state{stream_id = StreamId} = S
 ) when
     Tag =:= quic_h3; Tag =:= h2
 ->
-    case dispatch(handle_data, [Bytes], S) of
-        {noreply, S2} when Fin -> dispatch_eof(S2);
-        Result -> Result
-    end;
-handle_info(
+    Result =
+        case dispatch(handle_data, [Bytes], S) of
+            {noreply, S2} when Fin -> dispatch_eof(S2);
+            Other -> Other
+        end,
+    _ = consume(Tag, Bytes, S),
+    Result;
+handle_traffic(
     {masque_stream_data, StreamId, Bytes, Fin},
     #state{stream_id = StreamId} = S
 ) ->
@@ -243,33 +277,33 @@ handle_info(
         {noreply, S2} when Fin -> dispatch_eof(S2);
         Result -> Result
     end;
-handle_info(
+handle_traffic(
     {Tag, _Conn, {stream_reset, StreamId, _}},
     #state{stream_id = StreamId} = S
 ) when
     Tag =:= quic_h3; Tag =:= h2
 ->
     {stop, peer_reset, S};
-handle_info(
+handle_traffic(
     {masque_stream_reset, StreamId, _},
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
-handle_info({h2, _Conn, {closed, _Reason}}, S) ->
+handle_traffic({h2, _Conn, {closed, _Reason}}, S) ->
     {stop, peer_closed, S};
-handle_info({'EXIT', _Pid, _Reason}, S) ->
+handle_traffic({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
-handle_info({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
+handle_traffic({'DOWN', MRef, process, _Pid, _Reason}, #state{router_ref = MRef} = S) ->
     %% Router died - clean up
     {stop, router_gone, S};
-handle_info(Msg, #state{pending_actions = Actions, early = Early} = S) when
+handle_traffic(Msg, #state{pending_actions = Actions, early = Early} = S) when
     Actions =/= undefined
 ->
     %% Not finalized yet: nothing may be written to the stream before
     %% the 2xx, so keep the message for `finalize'. A TCP target's
     %% `{active, N}' window bounds how many pile up.
     {noreply, S#state{early = [Msg | Early]}};
-handle_info(Msg, S) ->
+handle_traffic(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
 terminate(_Reason, {starting, Args}) ->
@@ -316,7 +350,10 @@ terminate(
 %% until `terminate/2'.
 mark_open(#state{transport = Transport} = S) ->
     masque_metrics:tunnel_opened(#{protocol => tcp, transport => Transport}),
-    S#state{start_time = erlang:monotonic_time(millisecond)}.
+    S#state{
+        start_time = erlang:monotonic_time(millisecond),
+        idle = masque_idle:new(S#state.idle_ms)
+    }.
 
 emit_tunnel_closed(#state{start_time = undefined}) ->
     ok;
