@@ -18,6 +18,7 @@
 
 -export([
     init/1,
+    handle_continue/2,
     handle_call/3,
     handle_cast/2,
     handle_info/2,
@@ -54,7 +55,37 @@ start_link(Args) ->
 
 %% A tunnel counts as open once `init_session/1' succeeded: the 2xx is
 %% sent and the stream (or socket) is ours. `terminate/2' closes it.
+%% With a `starter' (h2 and h1 listeners) the real start runs in
+%% `handle_continue/2' so the session supervisor is not held up (see
+%% `masque_session_start'). `start/1' returns `{stop, R}' when nothing
+%% was sent, `{stop, R, S}' once the handler started, so `terminate/2'
+%% cleans up and the listener stays silent.
 init(Args) ->
+    case masque_session_start:deferred(Args) of
+        true ->
+            {ok, {starting, Args}, {continue, start}};
+        false ->
+            case start(Args) of
+                {ok, S} -> {ok, S};
+                {stop, Reason} -> {stop, Reason};
+                {stop, Reason, _S} -> {stop, Reason}
+            end
+    end.
+
+handle_continue(start, {starting, Args}) ->
+    case start(Args) of
+        {ok, S} ->
+            masque_session_start:report(Args, ok),
+            {noreply, S};
+        {stop, Reason} ->
+            masque_session_start:report(Args, {error, Reason}),
+            {stop, normal, {starting, Args}};
+        {stop, Reason, S} ->
+            masque_session_start:report(Args, {error, {responded, Reason}}),
+            {stop, {shutdown, Reason}, S}
+    end.
+
+start(Args) ->
     case init_session(Args) of
         {ok, S} ->
             masque_metrics:tunnel_opened(#{protocol => udp, transport => h1}),
@@ -104,12 +135,13 @@ init_session(#{
                     }),
                     %% Drain anything already past the 101 CRLF before
                     %% arming the socket.
+                    %% From here the 101 is out: failures return the
+                    %% state so `terminate/2' closes the socket.
                     case drain_and_arm(State0) of
                         {ok, State1} ->
-                            apply_actions(Actions, State1);
-                        {stop, Reason, _State} ->
-                            _ = close_socket(State0),
-                            {stop, Reason}
+                            do_actions(Actions, State1);
+                        {stop, Reason, S2} ->
+                            {stop, Reason, S2}
                     end;
                 {error, Reason} ->
                     try_callback(
@@ -175,6 +207,8 @@ handle_info({'EXIT', _Pid, _Reason}, S) ->
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
+terminate(_Reason, {starting, Args}) ->
+    masque_session_start:abandon(Args);
 terminate(Reason, S) ->
     emit_tunnel_closed(S),
     terminate_session(Reason, S).
@@ -279,12 +313,6 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
 exported(Mod, Fun, Arity) ->
     _ = code:ensure_loaded(Mod),
     erlang:function_exported(Mod, Fun, Arity).
-
-apply_actions(Actions, State) ->
-    case do_actions(Actions, State) of
-        {ok, S2} -> {ok, S2};
-        {stop, Reason, _} -> {stop, Reason}
-    end.
 
 apply_actions_noreply(Actions, State) ->
     case do_actions(Actions, State) of

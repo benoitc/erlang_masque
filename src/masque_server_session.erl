@@ -121,13 +121,20 @@ finalize(#state{pending_actions = Actions, conn = Conn, stream_id = StreamId} = 
                     masque_metrics:tunnel_opened(
                         #{protocol => udp, transport => h3}
                     ),
-                    S1 = run_init_actions(
-                        Actions,
-                        State#state{
-                            start_time = erlang:monotonic_time(millisecond)
-                        }
-                    ),
-                    replay_early(lists:reverse(S1#state.early), S1#state{early = []});
+                    case
+                        run_init_actions(
+                            Actions,
+                            State#state{
+                                start_time = erlang:monotonic_time(millisecond)
+                            }
+                        )
+                    of
+                        {ok, S1} ->
+                            replay_early(lists:reverse(S1#state.early), S1#state{early = []});
+                        {stop, _, _} = Stop ->
+                            %% `terminate/2' sees the state with `start_time' set.
+                            Stop
+                    end;
                 {error, _} ->
                     {error, S}
             end;
@@ -391,13 +398,8 @@ apply_actions_noreply(Actions, State) ->
         {stop, Reason, S2} -> {stop, Reason, S2}
     end.
 
-run_init_actions([], S) ->
-    S;
 run_init_actions(Actions, S) ->
-    case do_actions(Actions, S) of
-        {ok, S2} -> S2;
-        {stop, Reason, _} -> exit(Reason)
-    end.
+    do_actions(Actions, S).
 
 do_actions([], S) ->
     {ok, S};

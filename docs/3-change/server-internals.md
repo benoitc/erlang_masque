@@ -122,7 +122,7 @@ Why each piece exists, as the code comments state it:
 
 The listener's `start_session` call times out after 30 s (the init worker's `gen_server:start` also has a 30 s timeout). On timeout the listener calls `cancel_pending/2`:
 
-- stream still in the worker stage: the entry is removed and the listener rejects with 502; when the worker finishes, the router finds no entry and stops the session with reason `cancelled`;
+- stream still in the worker stage: the entry is removed and the listener rejects with 502; when the worker finishes, the router finds no entry and casts `connection_closed` to the session, which stops without writing to the stream (the 502 is already there) and without the router waiting for it;
 - stream in the finalizing stage, or already live: `{error, already_activated}`; the listener sends nothing, because a 2xx may already be on the wire.
 
 A finalize that fails (the stream is gone) makes the session stop with `stream_dead` and the router reply `{error, stream_dead}`; the listener then stays silent for the same reason.
@@ -133,7 +133,13 @@ A peer reset of a pending stream reaches the router, which drops the pending ent
 
 There is no router. `h2` delivers stream events to whichever process registered with `h2:set_stream_handler/3`, and connection-wide events (`{closed, R}`, `{goaway, LastId, Code}`) to every registered stream handler. So the session can register itself and needs nobody to demultiplex.
 
-`dispatch_request_1/6` in `masque_h2_server` runs the pipeline, reserves a slot with `try_reserve_tunnel/2` when a limit is set, and starts the session under the per-protocol supervisor. The session runs `init/2`, sends the 200, claims the stream and runs the init actions, all inside its own `init/1`. If the session fails to start, the listener rejects and gives the slot back with `release_tunnel/1`; otherwise the session releases it in `terminate/2`. The counter row for a connection is created on first reservation, and a small watcher process deletes it when the h2 connection dies.
+`dispatch_request_1/6` in `masque_h2_server` runs the pipeline, reserves a slot with `try_reserve_tunnel/2` when a limit is set, and starts the session under the per-protocol supervisor through `await/2` in `masque_session_start`. The session's `init/1` returns at once (`{continue, start}`), so the supervisor is never held up by a slow handler; `handle_continue/2` runs `init/2`, sends the 200, claims the stream and runs the init actions, then reports to the waiting dispatch process:
+
+- `ok`: the tunnel is open;
+- `{error, R}`: nothing was sent; the listener rejects;
+- `{error, {responded, R}}`: the 200 is out; the listener stays silent and the session resets the stream itself.
+
+The session always gives the tunnel slot back in `terminate/2` (including the `{starting, Args}` state of a start that failed). The listener releases it only when no session ran: the supervisor refused the child, or the start timed out (30 s) and the session was killed. The counter row for a connection is created on first reservation, and a small watcher process deletes it when the h2 connection dies.
 
 The UDP path has its own module, `masque_h2_server_session`; TCP, IP and udp-bind reuse the h3 modules with `transport = h2`.
 
@@ -141,7 +147,7 @@ The UDP path has its own module, `masque_h2_server_session`; TCP, IP and udp-bin
 
 `validate/6` in `masque_h1_server` splits on the method: `GET` needs `Host`, `Connection: Upgrade`, `Upgrade: connect-udp | connect-ip` and `Capsule-Protocol: ?1`; `CONNECT` needs an authority-form target whose `Host` header names the same host and port. See [transports](transports.md) for the wire difference.
 
-The session runs `init/2` first, so a handler rejection still has a plain HTTP connection to answer on. Then it calls `h1:accept_upgrade/3` (writes 101) or `h1:accept_connect/3` (writes 200). Both hand the raw TLS socket and any bytes already read past the header block to the session. From then on the session owns the socket, reads it with `{active, once}`, and there is no HTTP layer left.
+The session starts the same way as on h2 (`masque_session_start`, reported from `handle_continue/2`). It runs `init/2` first, so a handler rejection still has a plain HTTP connection to answer on. Then it calls `h1:accept_upgrade/3` (writes 101) or `h1:accept_connect/3` (writes 200). Both hand the raw TLS socket and any bytes already read past the header block to the session. From then on the session owns the socket, reads it with `{active, once}`, and there is no HTTP layer left.
 
 h1 sessions also have an idle timer, `idle_timeout_ms` in `handler_opts` (default 300 000 ms; `infinity` disables it, and so does `0` except in the udp-bind h1 session, where `0` fires at once). It is re-armed on inbound socket bytes only, so a tunnel that only sends toward the client still idles out. h2 and h3 sessions have no idle timer (Q6 in [decisions](decisions.md)).
 

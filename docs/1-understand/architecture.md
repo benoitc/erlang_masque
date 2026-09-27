@@ -68,13 +68,13 @@ flowchart TD
 
 - **Per listener**: the `h2` server. Its reference is stored in `persistent_term` so you can stop it by name.
 - **Per connection**: only the `h2` library's processes. There is no router: `h2` delivers stream events to whichever process registered with `h2:set_stream_handler/3`, and h2 has no separate datagram channel. If `max_tunnels_per_connection` is set, the dispatch process counts tunnels in the `masque_h2_tunnel_counts` ETS table and spawns one small unlinked watcher per connection that deletes the row when the connection dies.
-- **Per tunnel**: a child of the protocol's h2 session supervisor (`masque_h2_session_sup` for UDP, `masque_h2_tcp_session_sup`, `masque_h2_ip_session_sup`, `masque_h2_udp_bind_session_sup`). The session's `init/1` runs the handler's `init/2`, sends the 2xx, and registers as the stream handler, all before `supervisor:start_child/2` returns. Sessions release their tunnel count slot on exit.
+- **Per tunnel**: a child of the protocol's h2 session supervisor (`masque_h2_session_sup` for UDP, `masque_h2_tcp_session_sup`, `masque_h2_ip_session_sup`, `masque_h2_udp_bind_session_sup`). `supervisor:start_child/2` returns at once; the session then runs the handler's `init/2`, sends the 2xx and registers as the stream handler in `handle_continue/2`, and reports the outcome to the dispatch process (`masque_session_start`). A slow handler therefore never holds up other starts. Sessions release their tunnel count slot on exit.
 
 ### HTTP/1.1
 
 - **Per listener**: the `h1` server, TLS only, reference in `persistent_term`.
 - **Per connection**: the `h1` library's connection process until the handshake; one tunnel at most per connection.
-- **Per tunnel**: a child of `masque_h1_session_sup` (UDP), `masque_h1_ip_session_sup`, `masque_h1_tcp_session_sup` or `masque_h1_udp_bind_session_sup`. The session runs the handler's `init/2`, then calls `h1:accept_upgrade/3` (writes 101) or, for classic CONNECT, `h1:accept_connect/3` (writes 200). Either call hands the TLS socket to the session, which from then on reads and writes it directly. h1 sessions are the only server sessions with an idle timeout (`idle_timeout_ms` in `handler_opts`, default 300000). A rejected h1 request closes the connection.
+- **Per tunnel**: a child of `masque_h1_session_sup` (UDP), `masque_h1_ip_session_sup`, `masque_h1_tcp_session_sup` or `masque_h1_udp_bind_session_sup`, started like the h2 sessions (`masque_session_start`). The session runs the handler's `init/2`, then calls `h1:accept_upgrade/3` (writes 101) or, for classic CONNECT, `h1:accept_connect/3` (writes 200). Either call hands the TLS socket to the session, which from then on reads and writes it directly. h1 sessions are the only server sessions with an idle timeout (`idle_timeout_ms` in `handler_opts`, default 300000). A rejected h1 request closes the connection.
 
 ### Where handler code runs
 

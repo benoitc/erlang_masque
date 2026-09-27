@@ -38,6 +38,13 @@ This page records design decisions that are visible in the code, with the reason
 - **Why.** Settled by the maintainer (former Q13). Continuing with the handler state from before the crash can leave the handler's sockets and its state out of step, and a reset tells the client the tunnel failed rather than ended.
 - **Where.** `dispatch/3` and `safe_apply/3` in every server session.
 
+### h2 and h1 sessions start outside the supervisor call
+
+- **Decision.** An h2 or h1 session's `init/1` returns at once; the handler's `init/2`, the 2xx and the stream claim run in `handle_continue/2`, and the session reports the outcome to the listener (`masque_session_start`).
+- **Why.** `supervisor:start_child/2` waits for `init/1`, so a slow handler start (TCP connect, DNS, a relay's upstream connect) serialised every session start of that protocol, and a same-node h2 relay waited on its own supervisor until its upstream timed out.
+- **Consequences.** The listener waits for a report instead of the supervisor call. A failure after the 2xx is reported as `{responded, R}`: the listener stays silent and the session resets the stream. The session always releases the h2 tunnel slot.
+- **Where.** `masque_session_start`, `init/1` and `handle_continue/2` of every h2 and h1 server session, `spawn_session/6` in `masque_h2_server` and `masque_h1_server`.
+
 ### h2 and h1 sessions live under per-protocol supervisors
 
 - **Decision.** One `simple_one_for_one` supervisor per protocol and transport under `masque_sup`, children `temporary`.

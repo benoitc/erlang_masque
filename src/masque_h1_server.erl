@@ -221,8 +221,11 @@ spawn_session(Conn, StreamId, Protocol, Handler, HOpts, Req) ->
         handler_opts => HOpts,
         req => Req
     },
-    case masque_h1_session_sup:start_session(Args) of
-        {ok, _Pid} ->
+    case masque_session_start:await(fun masque_h1_session_sup:start_session/1, Args) of
+        ok ->
+            ok;
+        {error, {responded, _}} ->
+            %% The session already answered (101 or 200).
             ok;
         {error, Reason} ->
             reject(Conn, StreamId, map_init_error(Reason))

@@ -24,6 +24,7 @@
 
 -export([
     init/1,
+    handle_continue/2,
     handle_call/3,
     handle_cast/2,
     handle_info/2,
@@ -56,7 +57,37 @@ start_link(Args) ->
 
 %% A tunnel counts as open once `init_session/1' succeeded: the 2xx is
 %% sent and the stream (or socket) is ours. `terminate/2' closes it.
+%% With a `starter' (h2 and h1 listeners) the real start runs in
+%% `handle_continue/2' so the session supervisor is not held up (see
+%% `masque_session_start'). `start/1' returns `{stop, R}' when nothing
+%% was sent, `{stop, R, S}' once the handler started, so `terminate/2'
+%% cleans up and the listener stays silent.
 init(Args) ->
+    case masque_session_start:deferred(Args) of
+        true ->
+            {ok, {starting, Args}, {continue, start}};
+        false ->
+            case start(Args) of
+                {ok, S} -> {ok, S};
+                {stop, Reason} -> {stop, Reason};
+                {stop, Reason, _S} -> {stop, Reason}
+            end
+    end.
+
+handle_continue(start, {starting, Args}) ->
+    case start(Args) of
+        {ok, S} ->
+            masque_session_start:report(Args, ok),
+            {noreply, S};
+        {stop, Reason} ->
+            masque_session_start:report(Args, {error, Reason}),
+            {stop, normal, {starting, Args}};
+        {stop, Reason, S} ->
+            masque_session_start:report(Args, {error, {responded, Reason}}),
+            {stop, {shutdown, Reason}, S}
+    end.
+
+start(Args) ->
     case init_session(Args) of
         {ok, S} ->
             masque_metrics:tunnel_opened(#{protocol => tcp, transport => h1}),
@@ -84,7 +115,6 @@ init_session(#{
                         handler = Handler,
                         h_state = HState,
                         req = Req,
-                        start_time = erlang:monotonic_time(millisecond),
                         idle_ms = IdleMs
                     }),
                     case apply_init_actions(InitActions, State0) of
@@ -96,16 +126,14 @@ init_session(#{
                             %% close the socket before stopping so the
                             %% raw TLS session does not leak.
                             case seed_handler(Buffer, State1) of
-                                {stop, Reason} ->
-                                    _ = safe_close_socket(State1),
-                                    {stop, Reason};
+                                {stop, Reason, S2} ->
+                                    {stop, Reason, S2};
                                 State2 ->
                                     _ = arm_once(State2),
                                     {ok, State2}
                             end;
-                        {stop, Reason, _S} ->
-                            _ = safe_close_socket(State0),
-                            {stop, Reason}
+                        {stop, Reason, S2} ->
+                            {stop, Reason, S2}
                     end;
                 {error, Reason} ->
                     try_callback(
@@ -151,6 +179,8 @@ handle_info({'EXIT', _Pid, _Reason}, S) ->
 handle_info(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
+terminate(_Reason, {starting, Args}) ->
+    masque_session_start:abandon(Args);
 terminate(
     Reason,
     #state{
@@ -206,7 +236,7 @@ seed_handler(<<>>, S) ->
 seed_handler(Bytes, S) ->
     case dispatch(handle_data, [Bytes], S) of
         {noreply, S2} -> S2;
-        {stop, Reason, _S2} -> {stop, Reason}
+        {stop, Reason, S2} -> {stop, Reason, S2}
     end.
 
 %%====================================================================

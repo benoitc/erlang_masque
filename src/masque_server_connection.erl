@@ -179,12 +179,10 @@ handle_info({session_init_done, StreamId, {ok, Pid}}, S) ->
                 )
             }};
         error ->
-            %% Cancelled (caller timed out)
-            try
-                gen_server:stop(Pid, cancelled, 5000)
-            catch
-                _:_ -> ok
-            end,
+            %% Cancelled (caller timed out, or the stream was reset):
+            %% ask the session to stop without writing to the stream
+            %% and without waiting for it, so routing never stalls.
+            gen_server:cast(Pid, connection_closed),
             {noreply, S}
     end;
 handle_info({masque_finalized, StreamId, Pid, Result}, S) ->

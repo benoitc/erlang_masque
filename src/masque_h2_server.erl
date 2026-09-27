@@ -240,9 +240,11 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
                                     of
                                         ok ->
                                             ok;
-                                        {error, _} ->
-                                            %% No session: give the
-                                            %% slot back.
+                                        not_started ->
+                                            %% No session ever ran: give
+                                            %% the slot back. A session
+                                            %% that started releases it
+                                            %% itself.
                                             release_tunnel(Conn)
                                     end;
                                 false ->
@@ -285,13 +287,37 @@ spawn_session(Conn, StreamId, Protocol, Handler, HOpts, Req) ->
         handler_opts => HOpts,
         req => Req
     },
-    case masque_h2_session_sup:start_session(Args) of
-        {ok, _Pid} ->
+    case masque_session_start:await(fun masque_h2_session_sup:start_session/1, Args) of
+        ok ->
             ok;
-        {error, Reason} = Err ->
+        {error, {responded, _}} ->
+            %% The session already answered (2xx): a reject here would
+            %% follow it on the stream.
+            ok;
+        {error, stream_dead} ->
+            ok;
+        {error, {start_timeout, _} = Reason} ->
             reject(Conn, StreamId, map_init_error(Reason)),
-            Err
+            not_started;
+        {error, {session_crash, _} = Reason} ->
+            reject(Conn, StreamId, map_init_error(Reason)),
+            ok;
+        {error, Reason} ->
+            %% Either the session reported a failure before answering
+            %% (it released its slot in `terminate/2`) or the
+            %% supervisor could not start it.
+            reject(Conn, StreamId, map_init_error(Reason)),
+            case is_supervisor_error(Reason) of
+                true -> not_started;
+                false -> ok
+            end
     end.
+
+%% `supervisor:start_child/2' errors: no session process ran.
+is_supervisor_error({already_started, _}) -> true;
+is_supervisor_error(noproc) -> true;
+is_supervisor_error({noproc, _}) -> true;
+is_supervisor_error(_) -> false.
 
 map_init_error({resolution_failed, _}) -> resolution_failed;
 map_init_error({reject, Err}) -> Err;
@@ -451,8 +477,10 @@ reject(Conn, StreamId, Reason, ExtraHeaders) ->
         {<<"proxy-status">>, proxy_status_field(Reason)}
     ],
     Headers = merge_extra_headers(Base, ExtraHeaders),
-    ok = h2:send_response(Conn, StreamId, Status, Headers),
-    ok = h2:send_data(Conn, StreamId, Body, true).
+    %% The stream may already be gone (client reset): nothing to do.
+    _ = h2:send_response(Conn, StreamId, Status, Headers),
+    _ = h2:send_data(Conn, StreamId, Body, true),
+    ok.
 
 merge_extra_headers(Base, []) ->
     Base;

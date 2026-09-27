@@ -326,7 +326,11 @@ spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req) ->
                 {error, already_activated} ->
                     %% Session started after timeout. Tunnel is live.
                     ok
-            end
+            end;
+        exit:_ ->
+            %% The router is gone, so is the connection: nothing to
+            %% answer on.
+            ok
     end.
 
 add_peer_info(Conn, Req) ->
@@ -513,8 +517,10 @@ reject(Conn, StreamId, Reason, ExtraHeaders) ->
         {<<"proxy-status">>, proxy_status_field(Reason)}
     ],
     Headers = merge_extra_headers(Base, ExtraHeaders),
-    ok = quic_h3:send_response(Conn, StreamId, Status, Headers),
-    ok = quic_h3:send_data(Conn, StreamId, Body, true).
+    %% The stream may already be gone (client reset): nothing to do.
+    _ = quic_h3:send_response(Conn, StreamId, Status, Headers),
+    _ = quic_h3:send_data(Conn, StreamId, Body, true),
+    ok.
 
 %% Caller-supplied headers win on collision so apps can override the
 %% proxy-status / content-type defaults. Order: ExtraHeaders first

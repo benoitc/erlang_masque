@@ -174,6 +174,19 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- h2 and h1 session starts no longer run inside the session
+  supervisor's call: a slow handler start (TCP connect, DNS, relay
+  upstream) no longer holds up other tunnels, and a same-node h2 or h1
+  relay no longer deadlocks.
+- h2: a session that fails after its 200 no longer gets a 502 after it,
+  and always gives its tunnel slot back; a failed stream claim stops
+  the UDP and IP sessions instead of leaving them running.
+- h3: init actions that end a tunnel during finalize keep the tunnel
+  metrics balanced; the router no longer blocks up to 5 s stopping a
+  cancelled session, and that session no longer resets a stream that
+  already carries the 502; a dead router no longer crashes the
+  request process.
+
 - udp-bind: an ACK or CLOSE that crosses a local CLOSE no longer ends
   the tunnel; a proxy `compression_close` action removes the context;
   contexts are two-way on both sides (`send_to/3` uses proxy-opened

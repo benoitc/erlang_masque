@@ -23,6 +23,7 @@
 -export([
     chain_h3_listener_echo/1,
     chain_h2_listener_echo/1,
+    chain_h2_to_h2_same_node/1,
     chain_h1_listener_echo/1,
     chain_h3_self_loop_detected/1,
     chain_h1_own_via_rejected/1,
@@ -33,6 +34,7 @@ all() ->
     [
         chain_h3_listener_echo,
         chain_h2_listener_echo,
+        chain_h2_to_h2_same_node,
         chain_h1_listener_echo,
         chain_h3_self_loop_detected,
         chain_h1_own_via_rejected,
@@ -139,6 +141,38 @@ chain_h2_listener_echo(Config) ->
     {_, _, IngressPort} = Ref,
     Config1 = [{ingress_h2_ref, Ref} | Config],
     exchange_echo_through(h2, IngressPort, Config1).
+
+%% An h2 ingress relaying to an h2 egress on the same node: both
+%% sessions start under the same h2 session supervisor, which must not
+%% wait on the ingress handler's upstream connect.
+chain_h2_to_h2_same_node(Config) ->
+    Certs = ?config(certs, Config),
+    EgressName = unique_name("egress_h2"),
+    {ok, {_, _, EgressPort} = EgressRef} = masque:start_listener_h2(EgressName, #{
+        port => 0,
+        cert => maps:get(cert_file, Certs),
+        key => maps:get(key_file, Certs),
+        handler => masque_udp_proxy_handler,
+        handler_opts => #{allow_private => true}
+    }),
+    Name = unique_name("chain_h2_h2"),
+    Opts = #{
+        port => 0,
+        cert => maps:get(cert_file, Certs),
+        key => maps:get(key_file, Certs),
+        handler_opts => #{
+            upstream_proxy => upstream_uri(EgressPort),
+            upstream_opts => #{verify => verify_none, transports => [h2], timeout => 3000}
+        }
+    },
+    {ok, Ref} = masque:start_chain_listener_h2(Name, Opts),
+    {_, _, IngressPort} = Ref,
+    Config1 = [{ingress_h2_ref, Ref} | Config],
+    try
+        exchange_echo_through(h2, IngressPort, Config1)
+    after
+        masque:stop_listener_h2(EgressRef)
+    end.
 
 chain_h1_listener_echo(Config) ->
     %% `ssl:listen' ties the listen socket to the caller, so host

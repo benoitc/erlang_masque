@@ -50,6 +50,7 @@
 
 -export([
     init/1,
+    handle_continue/2,
     handle_call/3,
     handle_cast/2,
     handle_info/2,
@@ -108,7 +109,37 @@ start_link(Args) ->
 %% gen_server
 %%====================================================================
 
-init(
+%% With a `starter' (h2 and h1 listeners) the real start runs in
+%% `handle_continue/2' so the session supervisor is not held up (see
+%% `masque_session_start'). `start/1' returns `{stop, R}' when nothing
+%% was sent, `{stop, R, S}' once the handler started, so `terminate/2'
+%% cleans up and the listener stays silent.
+init(Args) ->
+    case masque_session_start:deferred(Args) of
+        true ->
+            {ok, {starting, Args}, {continue, start}};
+        false ->
+            case start(Args) of
+                {ok, S} -> {ok, S};
+                {stop, Reason} -> {stop, Reason};
+                {stop, Reason, _S} -> {stop, Reason}
+            end
+    end.
+
+handle_continue(start, {starting, Args}) ->
+    case start(Args) of
+        {ok, S} ->
+            masque_session_start:report(Args, ok),
+            {noreply, S};
+        {stop, Reason} ->
+            masque_session_start:report(Args, {error, Reason}),
+            {stop, normal, {starting, Args}};
+        {stop, Reason, S} ->
+            masque_session_start:report(Args, {error, {responded, Reason}}),
+            {stop, {shutdown, Reason}, S}
+    end.
+
+start(
     #{
         conn := Conn,
         stream_id := StreamId,
@@ -181,8 +212,8 @@ init(
                     %% h2: no router, finalize now.
                     case finalize(State) of
                         {ok, S2} -> {ok, S2};
-                        {stop, Reason, _} -> {stop, Reason};
-                        {error, _} -> {stop, stream_dead}
+                        {stop, Reason, S2} -> {stop, Reason, S2};
+                        {error, S2} -> {stop, stream_dead, S2}
                     end;
                 _ ->
                     {ok, State}
@@ -205,13 +236,20 @@ finalize(#state{pending_actions = Actions, resp_headers = Headers} = State) ->
                             transport => State#state.transport
                         }
                     ),
-                    S3 = run_init_actions(
-                        Actions,
-                        S2#state{
-                            start_time = erlang:monotonic_time(millisecond)
-                        }
-                    ),
-                    replay_early(lists:reverse(S3#state.early), S3#state{early = []});
+                    case
+                        run_init_actions(
+                            Actions,
+                            S2#state{
+                                start_time = erlang:monotonic_time(millisecond)
+                            }
+                        )
+                    of
+                        {ok, S3} ->
+                            replay_early(lists:reverse(S3#state.early), S3#state{early = []});
+                        {stop, _, _} = Stop ->
+                            %% `terminate/2' sees the state with `start_time' set.
+                            Stop
+                    end;
                 {error, _} ->
                     {error, State}
             end;
@@ -315,6 +353,8 @@ handle_info(Msg, S) ->
     %% handler's gen_udp socket) through the handler's handle_info/2.
     dispatch(handle_info, [Msg], S).
 
+terminate(_Reason, {starting, Args}) ->
+    masque_session_start:abandon(Args);
 terminate(Reason, #state{} = S) ->
     emit_tunnel_closed(S),
     terminate_transport(Reason, S),
@@ -606,13 +646,8 @@ apply_actions_noreply(Actions, State) ->
         {stop, Reason, S2} -> {stop, Reason, S2}
     end.
 
-run_init_actions([], S) ->
-    S;
 run_init_actions(Actions, S) ->
-    case do_actions(Actions, S) of
-        {ok, S2} -> S2;
-        {stop, Reason, _} -> exit(Reason)
-    end.
+    do_actions(Actions, S).
 
 do_actions([], S) ->
     {ok, S};

@@ -95,6 +95,7 @@ Change a session module when you change the wire behaviour of that cell: framing
 | `masque_app` | Application callback: starts `masque_sup`, sets up metrics, creates the node `via` token. | you add application start-up work. |
 | `masque_sup` | Top supervisor: the eight session supervisors, the pool, the IP registry, and the `masque_h2_tunnel_counts` ETS table. | you add a supervised process or a global table. |
 | `masque_h2_session_sup` | One module, four `simple_one_for_one` instances (UDP, TCP, IP, bind) for h2 server sessions. | you add an h2 protocol. |
+| `masque_session_start` | Deferred start of h2 and h1 sessions: `init/1` returns at once, the real start runs in `handle_continue/2` and is reported to the waiting listener. | you change how an h2 or h1 session start is reported or timed out. |
 | `masque_h1_session_sup` | Same for h1 server sessions. | you add an h1 protocol. |
 | `masque_errors` | Handshake error to HTTP status and reason phrase. | you add a reject reason. |
 | `masque_metrics` | `instrument_meter` instruments for tunnels and bytes, plus `counters` for CONNECT-IP and bind drops. | you add a metric (see [operations](../2-use/operations.md)). |

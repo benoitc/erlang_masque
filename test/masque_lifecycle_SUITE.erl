@@ -42,6 +42,9 @@
     h1_bind_handler_crash_closes_tunnel/1,
     unsupported_call_keeps_session/1,
     udp_bind_skips_pool/1,
+    h2_slow_start_does_not_block_others/1,
+    h2_init_close_session_frees_slot/1,
+    h3_init_close_session_balances_metrics/1,
     h3_send_to_on_proxy_context/1,
     h1_every_tunnel_counts_open_and_close/1,
     h1_udp_bind_assign_by_address/1,
@@ -101,6 +104,9 @@ all() ->
         h1_bind_handler_crash_closes_tunnel,
         unsupported_call_keeps_session,
         udp_bind_skips_pool,
+        h2_slow_start_does_not_block_others,
+        h2_init_close_session_frees_slot,
+        h3_init_close_session_balances_metrics,
         h3_send_to_on_proxy_context,
         h1_every_tunnel_counts_open_and_close,
         h1_udp_bind_assign_by_address,
@@ -224,6 +230,13 @@ extra_opts(h3_send_to_on_proxy_context) ->
         bind_handler => masque_crash_bind_handler,
         handler_opts => HOpts#{early_assign => {{127, 0, 0, 1}, send_to_peer_port()}}
     };
+extra_opts(h2_slow_start_does_not_block_others) ->
+    #{handler_opts => #{delay_ports => #{7001 => 3000}}};
+extra_opts(Case) when
+    Case =:= h2_init_close_session_frees_slot;
+    Case =:= h3_init_close_session_balances_metrics
+->
+    #{handler_opts => #{init_actions => [close_session]}, max_tunnels_per_connection => 1};
 extra_opts(udp_bind_skips_pool) ->
     bind_opts();
 extra_opts(h1_every_tunnel_counts_open_and_close) ->
@@ -572,6 +585,71 @@ h1_udp_bind_pending_limit(Config) ->
     end,
     {open, _} = sys:get_state(Sess),
     ok = masque:close(Sess).
+
+%% A slow handler start on one h2 tunnel does not hold up the start of
+%% another: sessions no longer start inside the supervisor call.
+h2_slow_start_does_not_block_others(Config) ->
+    Self = self(),
+    Port = maps:get(port, ?config(h2, Config)),
+    Proxy = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    Opts = #{verify => verify_none, transports => [h2], timeout => 10000},
+    spawn(fun() -> Self ! {slow, masque:connect(Proxy, {<<"192.0.2.6">>, 7001}, Opts)} end),
+    _ = await_session(),
+    T0 = erlang:monotonic_time(millisecond),
+    {ok, Fast} = masque:connect(Proxy, {<<"192.0.2.6">>, 443}, Opts),
+    ?assert(erlang:monotonic_time(millisecond) - T0 < 1500),
+    ok = masque:close(Fast),
+    receive
+        {slow, {ok, Slow}} -> masque:close(Slow)
+    after 10000 -> ct:fail(slow_never_finished)
+    end.
+
+%% A handler that closes the tunnel from `init/2' gets its 200, then a
+%% clean end; the per-connection tunnel slot is given back.
+h2_init_close_session_frees_slot(Config) ->
+    Sess = connect(Config, h2),
+    receive
+        {masque_closed, Sess, _} -> ok
+    after 5000 -> ct:fail(not_closed)
+    end,
+    ok = wait_until(
+        fun() -> lists:all(fun({_, N}) -> N =:= 0 end, ets:tab2list(masque_h2_tunnel_counts)) end,
+        50
+    ),
+    %% The slot is free: with a limit of 1, a second tunnel is accepted.
+    Sess2 = connect(Config, h2),
+    receive
+        {masque_closed, Sess2, _} -> ok
+    after 5000 -> ct:fail(second_not_closed)
+    end.
+
+%% Init actions that end the tunnel during an h3 finalize still count
+%% the close.
+h3_init_close_session_balances_metrics(Config) ->
+    Opened = {masque_metrics, tunnel_opened, 1},
+    Closed = {masque_metrics, tunnel_closed, 2},
+    _ = erlang:trace_pattern(Opened, true, [call_count]),
+    _ = erlang:trace_pattern(Closed, true, [call_count]),
+    try
+        {call_count, O0} = erlang:trace_info(Opened, call_count),
+        {call_count, C0} = erlang:trace_info(Closed, call_count),
+        Sess = connect(Config, h3),
+        receive
+            {masque_closed, Sess, _} -> ok
+        after 5000 -> ct:fail(not_closed)
+        end,
+        ok = wait_until(
+            fun() ->
+                {call_count, O} = erlang:trace_info(Opened, call_count),
+                {call_count, C} = erlang:trace_info(Closed, call_count),
+                {O - O0, C - C0} =:= {1, 1}
+            end,
+            50
+        )
+    after
+        _ = erlang:trace_pattern(Opened, false, [call_count]),
+        _ = erlang:trace_pattern(Closed, false, [call_count])
+    end.
 
 %% Contexts are two-way: a context the proxy opened for a peer also
 %% carries the client's packets to that peer.
