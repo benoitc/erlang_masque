@@ -213,7 +213,7 @@ emit_tunnel_closed(T) ->
 %%====================================================================
 
 handle_proxy_bytes(Bytes, S) ->
-    case dispatch(handle_data, [Bytes], S) of
+    case dispatch(handle_data, [Bytes], count_in(Bytes, S)) of
         {noreply, S2} ->
             _ = arm_once(S2),
             {noreply, S2};
@@ -235,7 +235,7 @@ handle_proxy_eof(#state{handler = Handler} = S) ->
 seed_handler(<<>>, S) ->
     S;
 seed_handler(Bytes, S) ->
-    case dispatch(handle_data, [Bytes], S) of
+    case dispatch(handle_data, [Bytes], count_in(Bytes, S)) of
         {noreply, S2} -> S2;
         {stop, Reason, S2} -> {stop, Reason, S2}
     end.
@@ -299,6 +299,7 @@ do_actions([], S) ->
 do_actions([{send_data, Bytes} | Rest], S) ->
     do_actions([{send_data, Bytes, false} | Rest], S);
 do_actions([{send_data, Bytes, Fin} | Rest], S) ->
+    ok = count_out(Bytes, S),
     %% A tunnel write either lands or stops the session: handlers
     %% (e.g. the TCP proxy's `{active, N}' re-arm) rely on every
     %% earlier write having succeeded.
@@ -391,3 +392,11 @@ cancel_idle(#state{idle_ref = undefined}) ->
 cancel_idle(#state{idle_ref = Ref}) ->
     _ = erlang:cancel_timer(Ref),
     ok.
+
+%% Tunnel payload bytes for the `masque.bytes.*' counters.
+count_in(Bytes, #state{} = S) ->
+    masque_metrics:bytes_in(iolist_size(Bytes), #{protocol => tcp, transport => h1}),
+    S.
+
+count_out(Bytes, #state{}) ->
+    masque_metrics:bytes_out(iolist_size(Bytes), #{protocol => tcp, transport => h1}).

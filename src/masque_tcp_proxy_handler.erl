@@ -68,7 +68,7 @@ accept(#{target_host := Host, target_port := Port} = Req) ->
 -spec init(masque_handler:req(), term()) -> {ok, #state{}} | {stop, term()}.
 init(#{target_host := Host, target_port := Port}, Opts) ->
     ResolverFun = maps:get(resolver, Opts, fun default_resolver/1),
-    Family = pick_family(maps:get(family, Opts, auto), Host),
+    FamilyOpt = maps:get(family, Opts, auto),
     ConnTimeout = maps:get(connect_timeout, Opts, 5000),
     AllowPrivate = maps:get(allow_private, Opts, false),
     ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
@@ -92,7 +92,7 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
                         %% after 30 s instead of blocking it forever.
                         {send_timeout, ?TARGET_SEND_TIMEOUT},
                         {send_timeout_close, true},
-                        Family
+                        family(FamilyOpt, IP)
                         | maps:get(socket_opts, Opts, [])
                     ],
                     case gen_tcp:connect(IP, Port, TcpOpts, ConnTimeout) of
@@ -147,9 +147,23 @@ handle_info(_Other, State) ->
     {ok, State}.
 
 -spec terminate(term(), #state{}) -> ok.
-terminate(_Reason, #state{socket = S}) ->
+%% A clean end closes the target with FIN. Anything else (the client
+%% reset or went away, a handler crash) aborts it with RST, so the
+%% target can tell an aborted tunnel from a finished one (RFC 9113
+%% sec 8.5, RFC 9114 sec 4.4).
+terminate(Reason, #state{socket = S}) ->
+    _ =
+        case clean_end(Reason) of
+            true -> ok;
+            false -> inet:setopts(S, [{linger, {true, 0}}])
+        end,
     _ = gen_tcp:close(S),
     ok.
+
+clean_end(normal) -> true;
+clean_end(target_closed) -> true;
+clean_end(eof_timeout) -> true;
+clean_end(_) -> false.
 
 %%====================================================================
 %% Helpers
@@ -182,20 +196,11 @@ default_resolver(Host) when is_list(Host) ->
             end
     end.
 
-pick_family(inet, _Host) ->
-    inet;
-pick_family(inet6, _Host) ->
-    inet6;
-pick_family(auto, Host) ->
-    HostStr =
-        if
-            is_binary(Host) -> binary_to_list(Host);
-            true -> Host
-        end,
-    case inet:parse_address(HostStr) of
-        {ok, {_, _, _, _, _, _, _, _}} -> inet6;
-        _ -> inet
-    end.
+%% `auto' follows the resolved address, so a name with only AAAA
+%% records is dialled over IPv6.
+family(auto, IP) when tuple_size(IP) =:= 8 -> inet6;
+family(auto, _IP) -> inet;
+family(Family, _IP) -> Family.
 
 %% Non-public targets need `allow_private'; the proxy's own addresses
 %% need `allow_self'.

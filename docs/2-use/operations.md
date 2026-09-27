@@ -17,14 +17,7 @@ This page is for running `masque` in production: what the metrics mean and which
 
 `protocol` is `udp`, `tcp`, `ip` or `udp_bind`; `transport` is `h3`, `h2` or `h1`. There is no listener-name attribute.
 
-Every server session reports `masque.tunnels.total`, `masque.tunnels.active` and `masque.tunnel.duration_ms`: a tunnel counts as opened once its 2xx (101 or 200 on h1) is sent, and as closed when its session ends. The byte counters are not reported everywhere:
-
-| Session | bytes |
-|---|---|
-| UDP over h3 | in, out |
-| udp-bind over h3, h2 | in, out |
-| udp-bind over h1 | out |
-| every other session | none |
+Every server session reports `masque.tunnels.total`, `masque.tunnels.active` and `masque.tunnel.duration_ms`: a tunnel counts as opened once its 2xx (101 or 200 on h1) is sent, and as closed when its session ends. `masque.bytes.in` and `masque.bytes.out` are reported by every server session too (udp-bind over h1 reports `out` only).
 
 ## Counters
 

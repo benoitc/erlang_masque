@@ -318,7 +318,7 @@ dispatch_capsule(Type, Inner, S) when is_integer(Type) ->
 dispatch_datagram(Payload, S) ->
     case masque_datagram:decode(Payload) of
         {ok, {?MASQUE_CONTEXT_ID_IP, IPPkt}} ->
-            dispatch(handle_ip_packet, [IPPkt], S);
+            dispatch(handle_ip_packet, [IPPkt], count_in(IPPkt, S));
         {ok, {_OtherCtx, _}} ->
             {noreply, S};
         {error, _} ->
@@ -381,6 +381,7 @@ apply_actions_noreply(Actions, State) ->
 do_actions([], S) ->
     {ok, S};
 do_actions([{send_ip_packet, Pkt} | Rest], S) ->
+    ok = count_out(Pkt, S),
     _ = send_datagram(S, ?MASQUE_CONTEXT_ID_IP, Pkt),
     do_actions(Rest, S);
 do_actions([{assign, Entries} | Rest], S) ->
@@ -585,3 +586,11 @@ cancel_idle(#state{idle_ref = undefined}) ->
 cancel_idle(#state{idle_ref = Ref}) ->
     _ = erlang:cancel_timer(Ref),
     ok.
+
+%% Tunnel payload bytes for the `masque.bytes.*' counters.
+count_in(Bytes, #state{} = S) ->
+    masque_metrics:bytes_in(iolist_size(Bytes), #{protocol => ip, transport => h1}),
+    S.
+
+count_out(Bytes, #state{}) ->
+    masque_metrics:bytes_out(iolist_size(Bytes), #{protocol => ip, transport => h1}).

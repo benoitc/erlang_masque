@@ -43,6 +43,6 @@ Pin `transports => [h3]` when your protocol depends on UDP loss behaviour.
 | `active_n` | `32` | Datagrams read from the target before the socket pauses until the session relayed them. |
 | `port` | `0` | Local port of the target socket. A fixed port only works for one tunnel at a time. |
 
-On the server side, `{send, Payload}` above 65527 bytes, or above the h3 datagram limit, is dropped silently: HTTP datagrams are unreliable by design.
+On the server side, `{send, Payload}` above 65527 bytes, or above the h3 datagram limit, is dropped silently: HTTP datagrams are unreliable by design. An ICMP port unreachable from the target does not end the tunnel.
 
 Next: [connect-tcp](connect-tcp.md) or [connect-ip](connect-ip.md).

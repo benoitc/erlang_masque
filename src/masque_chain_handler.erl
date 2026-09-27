@@ -345,6 +345,9 @@ handle_info(
 handle_info({masque_closed, Sess, peer_fin}, #state{upstream = Sess, protocol = tcp} = State) ->
     %% Upstream half-close: pass the FIN on, keep relaying client bytes.
     {ok, State#state{upstream_fin = true}, [{send_data, <<>>, true}]};
+%% A clean end upstream (UDP, IP) ends the client tunnel cleanly too.
+handle_info({masque_closed, Sess, peer_fin}, #state{upstream = Sess} = State) ->
+    {stop, normal, State};
 handle_info({masque_closed, Sess, _Reason}, #state{upstream = Sess} = State) ->
     {stop, upstream_closed, State};
 handle_info(_Other, State) ->

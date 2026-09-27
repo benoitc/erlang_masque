@@ -481,7 +481,7 @@ code_change(_OldVsn, S, _Extra) ->
 dispatch_datagram(Payload, S) ->
     case masque_datagram:decode(Payload) of
         {ok, {?MASQUE_CONTEXT_ID_IP, IPPkt}} ->
-            dispatch(handle_ip_packet, [IPPkt], S);
+            dispatch(handle_ip_packet, [IPPkt], count_in(IPPkt, S));
         {ok, {_OtherCtx, _}} ->
             %% unknown context-id — silently drop
             {noreply, S};
@@ -680,6 +680,7 @@ run_init_actions(Actions, S) ->
 do_actions([], S) ->
     {ok, S};
 do_actions([{send_ip_packet, Pkt} | Rest], S) ->
+    ok = count_out(Pkt, S),
     _ = transport_send_datagram(S, ?MASQUE_CONTEXT_ID_IP, Pkt),
     do_actions(Rest, S);
 do_actions([{assign, Entries} | Rest], S) ->
@@ -856,3 +857,11 @@ try_callback(Mod, Fun, Args) ->
         false ->
             ok
     end.
+
+%% Tunnel payload bytes for the `masque.bytes.*' counters.
+count_in(Bytes, #state{transport = T} = S) ->
+    masque_metrics:bytes_in(iolist_size(Bytes), #{protocol => ip, transport => T}),
+    S.
+
+count_out(Bytes, #state{transport = T}) ->
+    masque_metrics:bytes_out(iolist_size(Bytes), #{protocol => ip, transport => T}).

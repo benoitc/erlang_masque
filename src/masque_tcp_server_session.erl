@@ -263,7 +263,7 @@ handle_traffic(
     Tag =:= quic_h3; Tag =:= h2
 ->
     Result =
-        case dispatch(handle_data, [Bytes], S) of
+        case dispatch(handle_data, [Bytes], count_in(Bytes, S)) of
             {noreply, S2} when Fin -> dispatch_eof(S2);
             Other -> Other
         end,
@@ -273,7 +273,7 @@ handle_traffic(
     {masque_stream_data, StreamId, Bytes, Fin},
     #state{stream_id = StreamId} = S
 ) ->
-    case dispatch(handle_data, [Bytes], S) of
+    case dispatch(handle_data, [Bytes], count_in(Bytes, S)) of
         {noreply, S2} when Fin -> dispatch_eof(S2);
         Result -> Result
     end;
@@ -453,6 +453,7 @@ do_actions([], S) ->
 do_actions([{send_data, Bytes} | Rest], S) ->
     do_actions([{send_data, Bytes, false} | Rest], S);
 do_actions([{send_data, Bytes, Fin} | Rest], S) ->
+    ok = count_out(Bytes, S),
     %% A tunnel write either lands or stops the session: handlers
     %% (e.g. the TCP proxy's `{active, N}' re-arm) rely on every
     %% earlier write having succeeded.
@@ -520,3 +521,11 @@ try_callback(Mod, Fun, Args) ->
         false ->
             ok
     end.
+
+%% Tunnel payload bytes for the `masque.bytes.*' counters.
+count_in(Bytes, #state{transport = T} = S) ->
+    masque_metrics:bytes_in(iolist_size(Bytes), #{protocol => tcp, transport => T}),
+    S.
+
+count_out(Bytes, #state{transport = T}) ->
+    masque_metrics:bytes_out(iolist_size(Bytes), #{protocol => tcp, transport => T}).

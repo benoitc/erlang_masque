@@ -261,7 +261,7 @@ dispatch_capsule(datagram, Inner, S) ->
         {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} when
             byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD
         ->
-            dispatch(handle_packet, [UdpBytes], S);
+            dispatch(handle_packet, [UdpBytes], count_in(UdpBytes, S));
         _ ->
             %% RFC 9298 §5: unknown context-id or oversize -> drop.
             {noreply, S}
@@ -326,6 +326,7 @@ do_actions([], S) ->
 do_actions([{send, Data} | Rest], S) ->
     do_actions([{send, ?MASQUE_CONTEXT_ID_UDP, Data} | Rest], S);
 do_actions([{send, Ctx, Data} | Rest], S) ->
+    ok = count_out(Data, S),
     PayloadSize = iolist_size(Data),
     case
         Ctx =:= ?MASQUE_CONTEXT_ID_UDP andalso
@@ -443,3 +444,11 @@ cancel_idle(#state{idle_ref = undefined}) ->
 cancel_idle(#state{idle_ref = Ref}) ->
     _ = erlang:cancel_timer(Ref),
     ok.
+
+%% Tunnel payload bytes for the `masque.bytes.*' counters.
+count_in(Bytes, #state{} = S) ->
+    masque_metrics:bytes_in(iolist_size(Bytes), #{protocol => udp, transport => h1}),
+    S.
+
+count_out(Bytes, #state{}) ->
+    masque_metrics:bytes_out(iolist_size(Bytes), #{protocol => udp, transport => h1}).

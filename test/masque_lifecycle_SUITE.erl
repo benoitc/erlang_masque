@@ -44,6 +44,7 @@
     udp_bind_skips_pool/1,
     h2_slow_start_does_not_block_others/1,
     default_tunnel_cap_is_100/1,
+    listener_name_unique_across_transports/1,
     h3_idle_tunnel_ends/1,
     h2_tcp_receive_window_is_bounded/1,
     h2_init_close_session_frees_slot/1,
@@ -109,6 +110,7 @@ all() ->
         udp_bind_skips_pool,
         h2_slow_start_does_not_block_others,
         default_tunnel_cap_is_100,
+        listener_name_unique_across_transports,
         h3_idle_tunnel_ends,
         h2_tcp_receive_window_is_bounded,
         h2_init_close_session_frees_slot,
@@ -595,6 +597,15 @@ h1_udp_bind_pending_limit(Config) ->
     end,
     {open, _} = sys:get_state(Sess),
     ok = masque:close(Sess).
+
+%% One name, one listener: the drain flag is keyed by name.
+listener_name_unique_across_transports(Config) ->
+    #{cert_file := CertFile, key_file := KeyFile} = ?config(certs, Config),
+    H2Name = maps:get(name, ?config(h2, Config)),
+    ?assertEqual(
+        {error, {name_in_use, h2}},
+        masque:start_listener_h1(H2Name, #{port => 0, cert => CertFile, key => KeyFile})
+    ).
 
 %% Without `max_tunnels_per_connection', a connection holds at most 100
 %% tunnels (h3 router, h2 dispatch).

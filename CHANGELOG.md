@@ -185,6 +185,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- CONNECT-TCP: `family => auto` follows the resolved address (IPv6-only
+  names work); an aborted tunnel aborts the target with RST (RFC 9113
+  section 8.5) instead of FIN.
+- CONNECT-UDP: an ICMP port unreachable no longer ends the tunnel.
+- The h1 listener validates CONNECT-TCP hosts like h3 and h2.
+- A relay ends a UDP or IP tunnel cleanly when the upstream closes
+  cleanly.
+- A listener name already used by another transport is refused with
+  `{error, {name_in_use, Transport}}`, so drain flags cannot collide.
+- Byte counters are reported by every server session.
+
 - h2 and h1 session starts no longer run inside the session
   supervisor's call: a slow handler start (TCP connect, DNS, relay
   upstream) no longer holds up other tunnels, and a same-node h2 or h1

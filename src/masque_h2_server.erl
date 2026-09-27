@@ -42,6 +42,12 @@
 -spec start_listener(listener_name(), listener_opts()) ->
     {ok, h2:server_ref()} | {error, term()}.
 start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
+    case masque_server:name_in_use(Name, h2) of
+        none -> start_h2_listener(Name, Opts0);
+        Transport -> {error, {name_in_use, Transport}}
+    end.
+
+start_h2_listener(Name, Opts0) ->
     persistent_term:erase({masque_drain, Name}),
     Opts = defaults(Opts0),
     Port = maps:get(port, Opts),

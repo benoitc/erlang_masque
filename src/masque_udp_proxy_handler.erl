@@ -121,6 +121,10 @@ handle_info({udp_passive, Socket}, #state{socket = Socket, active_n = N} = State
     %% Every datagram delivered before this message has been relayed.
     _ = inet:setopts(Socket, [{active, N}]),
     {ok, State};
+%% An ICMP port unreachable on the connected socket: the target is not
+%% listening right now. Datagrams are unreliable; keep the tunnel.
+handle_info({udp_error, Socket, econnrefused}, #state{socket = Socket} = State) ->
+    {ok, State};
 handle_info({udp_error, Socket, Reason}, #state{socket = Socket} = State) ->
     {stop, {target_socket_error, Reason}, State};
 handle_info({udp_closed, Socket}, #state{socket = Socket} = State) ->

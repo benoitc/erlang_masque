@@ -23,7 +23,7 @@
 -module(masque_server).
 -moduledoc false.
 
--export([handler_opt_keys/0]).
+-export([handler_opt_keys/0, name_in_use/2]).
 -export([
     start_listener/2,
     stop_listener/1,
@@ -60,6 +60,12 @@
 -spec start_listener(listener_name(), listener_opts()) ->
     {ok, pid()} | {error, term()}.
 start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
+    case name_in_use(Name, h3) of
+        none -> start_h3_listener(Name, Opts0);
+        Transport -> {error, {name_in_use, Transport}}
+    end.
+
+start_h3_listener(Name, Opts0) ->
     persistent_term:erase({masque_drain, Name}),
     Opts = defaults(Opts0),
     Port = maps:get(port, Opts),
@@ -594,3 +600,23 @@ handler_opt_keys() ->
         max_compression_contexts_out,
         max_pending_compression_responses
     ].
+
+%% Listener names are shared by the drain flags of every transport, so
+%% one name may only be used by one listener. Returns the transport
+%% (other than `Self') already using `Name', or `none'.
+-spec name_in_use(atom(), h3 | h2 | h1) -> none | h3 | h2 | h1.
+name_in_use(Name, Self) ->
+    Used = [
+        T
+     || {T, InUse} <- [
+            {h3, fun() -> element(1, quic:get_server_port(Name)) =:= ok end},
+            {h2, fun() -> persistent_term:get({masque_h2_ref, Name}, undefined) =/= undefined end},
+            {h1, fun() -> persistent_term:get({masque_h1_ref, Name}, undefined) =/= undefined end}
+        ],
+        T =/= Self,
+        InUse()
+    ],
+    case Used of
+        [T | _] -> T;
+        [] -> none
+    end.
