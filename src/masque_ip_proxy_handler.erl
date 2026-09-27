@@ -9,7 +9,13 @@ Responsibilities:
   configured static `routes` with any `resolved_addresses`
   populated by the listener's DNS step.
 - BCP-38 source-address filtering on inbound packets: the
-  source must fall inside a prefix assigned to this client.
+  source must fall inside a prefix assigned to this client, or in
+  `allowed_source_prefixes`.
+- Destination policy: every destination must be public unless
+  `allow_private`; a hostname target only reaches its resolved
+  addresses.
+- At most `max_assignments` addresses per IP family per session
+  (default 1); a further request gets the address already held.
 - Act as a router for accepted packets: decrement the TTL /
   Hop Limit (ICMP Time Exceeded when it runs out) and enforce
   the `mtu` option (default 1500; ICMPv6 Packet Too Big or
@@ -46,6 +52,12 @@ serving session there and push packets back with
 -include("masque_ip.hrl").
 
 -define(DEFAULT_MTU, 1500).
+-define(DEFAULT_MAX_ASSIGNMENTS, 1).
+%% Bound on the candidates one allocation may probe, so a large or
+%% crowded pool cannot turn an ADDRESS_REQUEST into a long scan.
+-define(MAX_PROBES, 4096).
+%% Bound on the addresses a client may assign to the proxy.
+-define(MAX_PEER_ASSIGNED, 64).
 
 -record(state, {
     opts :: map(),
@@ -76,7 +88,12 @@ serving session there and push packets back with
 
 accept(Req) ->
     Opts = maps:get(handler_opts, Req, #{}),
-    case maps:get(allow_private, Opts, false) orelse target_is_public(Req) of
+    AllowIp = maps:get(allow_ip, Opts, fun(_) -> true end),
+    Scope = {maps:get(ip_target, Req, '*'), maps:get(ip_ipproto, Req, '*')},
+    case
+        (maps:get(allow_private, Opts, false) orelse target_is_public(Req)) andalso
+            AllowIp(Scope) =:= true
+    of
         true -> accept;
         false -> {reject, forbidden}
     end.
@@ -115,8 +132,14 @@ init(Req, Opts) ->
     Pools = normalize_pools(maps:get(address_pool, Opts, [])),
     StaticRoutes = maps:get(routes, Opts, []),
     ResolvedRoutes = [route_for(A) || A <- Resolved],
-    Routes = lists:usort(StaticRoutes ++ ResolvedRoutes),
     Target = maps:get(ip_target, Req, '*'),
+    %% A hostname target is scoped to its resolved addresses only;
+    %% static routes would otherwise widen that scope.
+    Routes =
+        case is_binary(Target) of
+            true -> lists:usort(ResolvedRoutes);
+            false -> lists:usort(StaticRoutes ++ ResolvedRoutes)
+        end,
     IPProto = maps:get(ip_ipproto, Req, '*'),
     S = #state{
         opts = Opts,
@@ -176,8 +199,21 @@ allocate_one(
         version = V,
         prefix_len = ReqPfx
     },
-    #state{opts = Opts} = S
+    #state{opts = Opts, assigned = Assigned} = S
 ) ->
+    Max = maps:get(max_assignments, Opts, ?DEFAULT_MAX_ASSIGNMENTS),
+    case [{A, P} || {V0, A, P} <- Assigned, V0 =:= V] of
+        Held when length(Held) >= Max, Held =/= [] ->
+            %% Quota reached: answer with an address already held.
+            {Addr, Pfx} = lists:last(Held),
+            {#ip_assignment{request_id = Id, version = V, address = Addr, prefix_len = Pfx}, S};
+        Held when length(Held) >= Max ->
+            {reject_one(Id, V), S};
+        _ ->
+            allocate_new(Id, V, ReqPfx, S)
+    end.
+
+allocate_new(Id, V, ReqPfx, #state{opts = Opts} = S) ->
     %% RFC 9484 §4.6: the proxy MAY answer with the same prefix
     %% length the client asked for, or with a more specific (longer)
     %% one. The `min_assignable_prefix' opt sets the widest prefix
@@ -195,15 +231,18 @@ allocate_one(
             {Entry, S1};
         none ->
             %% Pool exhausted — single-entry rejection.
-            Req = #ip_prefix_request{
-                request_id = Id,
-                version = V,
-                address = zero_addr(V),
-                prefix_len = max_prefix(V)
-            },
-            [Reject] = masque_ip:reject_requests([Req]),
-            {Reject, S}
+            {reject_one(Id, V), S}
     end.
+
+reject_one(Id, V) ->
+    Req = #ip_prefix_request{
+        request_id = Id,
+        version = V,
+        address = zero_addr(V),
+        prefix_len = max_prefix(V)
+    },
+    [Reject] = masque_ip:reject_requests([Req]),
+    Reject.
 
 effective_prefix(V, ReqPfx, Opts) ->
     Min = min_assignable(V, Opts),
@@ -272,16 +311,20 @@ iter_pool(
     Stride = 1 bsl (Max - Pfx),
     StartInt = align_up(addr_to_int(V, StartAddr), Stride),
     EndInt = addr_to_int(V, EndAddr),
-    iter_range_strided(V, StartInt, EndInt, Stride, Assigned, Claim).
+    iter_range_strided(V, StartInt, EndInt, Stride, Assigned, Claim, ?MAX_PROBES).
 
-iter_range_strided(_V, Cur, End, _Stride, _Assigned, _Claim) when
+iter_range_strided(_V, _Cur, _End, _Stride, _Assigned, _Claim, 0) ->
+    exhausted;
+iter_range_strided(_V, Cur, End, _Stride, _Assigned, _Claim, _Probes) when
     Cur > End
 ->
     exhausted;
-iter_range_strided(V, Cur, End, Stride, Assigned, Claim) ->
+iter_range_strided(V, Cur, End, Stride, Assigned, Claim, Probes) ->
     %% A candidate range covers [Cur, Cur + Stride - 1] in int space.
     Last = Cur + Stride - 1,
-    Next = fun() -> iter_range_strided(V, Cur + Stride, End, Stride, Assigned, Claim) end,
+    Next = fun() ->
+        iter_range_strided(V, Cur + Stride, End, Stride, Assigned, Claim, Probes - 1)
+    end,
     case Last > End of
         true ->
             exhausted;
@@ -479,9 +522,9 @@ accept_inbound(
             end
     end.
 
-%% A prefix target may cover private space the accept/1 bounds check
-%% cannot see; drop non-public destinations unless `allow_private'.
-dst_filter(Packet, #state{target = {V, _, _}, opts = Opts}) when V =:= 4; V =:= 6 ->
+%% Every destination must be public unless `allow_private': a prefix
+%% may cover private space, and a static route may too.
+dst_filter(Packet, #state{opts = Opts}) ->
     case maps:get(allow_private, Opts, false) of
         true ->
             ok;
@@ -491,9 +534,7 @@ dst_filter(Packet, #state{target = {V, _, _}, opts = Opts}) when V =:= 4; V =:= 
                 true -> ok;
                 false -> {drop, scope_target}
             end
-    end;
-dst_filter(_Packet, _S) ->
-    ok.
+    end.
 
 forward(Packet, #state{opts = Opts} = S) ->
     case maps:find(forward_fun, Opts) of
@@ -573,17 +614,16 @@ invoke_lifecycle(_Carrier, Event, Detail, Opts) ->
             ok
     end.
 
-%% BCP-38-style source check: reject packets whose source address
-%% is not inside a prefix the proxy assigned to this client. With
-%% nothing assigned, only `allow_private' lets packets through.
-src_filter_passes(_Packet, #state{opts = Opts, assigned = []}) ->
-    maps:get(allow_private, Opts, false);
-src_filter_passes(<<4:4, _:92, Src:32, _/bitstring>>, #state{assigned = Assigned}) ->
-    in_assigned(4, Src, Assigned);
-src_filter_passes(<<6:4, _:60, Src:128, _/bitstring>>, #state{assigned = Assigned}) ->
-    in_assigned(6, Src, Assigned);
-src_filter_passes(_, _) ->
-    false.
+%% BCP-38-style source check: the source must be inside a prefix the
+%% proxy assigned to this client or in `allowed_source_prefixes'.
+%% `allow_private' only governs destinations.
+src_filter_passes(Packet, #state{assigned = Assigned, opts = Opts}) ->
+    Allowed = Assigned ++ maps:get(allowed_source_prefixes, Opts, []),
+    case Packet of
+        <<4:4, _:92, Src:32, _/bitstring>> -> in_assigned(4, Src, Allowed);
+        <<6:4, _:60, Src:128, _/bitstring>> -> in_assigned(6, Src, Allowed);
+        _ -> false
+    end.
 
 in_assigned(V, Src, Assigned) ->
     Max = max_prefix(V),
@@ -602,13 +642,13 @@ in_assigned(V, Src, Assigned) ->
 %% Peer-initiated control-plane (bidirectional per §8.2)
 %%====================================================================
 
-%% The client assigned addresses to the proxy. Keep the latest entry
-%% per request id and report it.
-handle_address_assign(Entries, #state{peer_assigned = Prev, opts = Opts} = S) ->
-    Ids = [Id || #ip_assignment{request_id = Id} <- Entries],
-    Kept = [E || #ip_assignment{request_id = Id} = E <- Prev, not lists:member(Id, Ids)],
-    invoke_lifecycle(Opts, peer_address_assigned, #{entries => Entries}, Opts),
-    {ok, S#state{peer_assigned = Kept ++ Entries}}.
+%% The client assigned addresses to the proxy. Each ADDRESS_ASSIGN
+%% carries the full list and replaces the previous one (RFC 9484
+%% sec 4.7.1); the list is bounded.
+handle_address_assign(Entries, #state{opts = Opts} = S) ->
+    Kept = lists:sublist(Entries, ?MAX_PEER_ASSIGNED),
+    invoke_lifecycle(Opts, peer_address_assigned, #{entries => Kept}, Opts),
+    {ok, S#state{peer_assigned = Kept}}.
 
 %% Each ROUTE_ADVERTISEMENT carries the peer's full route set
 %% (RFC 9484 sec 4.7.3), so it replaces the previous one.

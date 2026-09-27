@@ -70,9 +70,7 @@ init(
         conn := Conn,
         stream_id := StreamId,
         transport := Transport,
-        handler := Handler,
-        handler_opts := HOpts,
-        req := Req
+        handler_opts := HOpts
     } = Args
 ) ->
     process_flag(trap_exit, true),
@@ -87,6 +85,39 @@ init(
         HOpts,
         ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE
     ),
+    case check_datagram_mtu(Transport, Conn, StreamId) of
+        ok -> init_session(Args, Router, RouterRef, MaxCap);
+        {error, _} = Err -> {stop, Err}
+    end.
+
+%% RFC 9484 sec 9.1: an h3 tunnel whose datagrams cannot carry a
+%% 1280-byte IPv6 packet (plus the context id) is refused before the
+%% handler runs. h2 capsules have no such limit.
+check_datagram_mtu(h3, Conn, StreamId) ->
+    try quic_h3:max_datagram_size(Conn, StreamId) of
+        N when is_integer(N), N > 0, N < ?MASQUE_IPV6_MIN_MTU + 1 ->
+            {error, {mtu_too_low, N, ?MASQUE_IPV6_MIN_MTU}};
+        _ ->
+            ok
+    catch
+        _:_ -> ok
+    end;
+check_datagram_mtu(_, _Conn, _StreamId) ->
+    ok.
+
+init_session(
+    #{
+        conn := Conn,
+        stream_id := StreamId,
+        transport := Transport,
+        handler := Handler,
+        handler_opts := HOpts,
+        req := Req
+    },
+    Router,
+    RouterRef,
+    MaxCap
+) ->
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, Actions} ->
             State = #state{

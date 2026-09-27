@@ -84,7 +84,7 @@ Clients that race transports reconnect to whichever instance your DNS or load ba
 | Client TLS | Verify the proxy certificate against the system store, check the host name, send SNI (not for IP literals on h2 and h1). | `cacerts`, `verify => verify_none`, `ssl_opts` |
 | Chain upstream TLS | Same as the client. | `upstream_opts` |
 | UDP and TCP targets | Only public addresses; others refused with 502. | `allow_private` |
-| CONNECT-IP | `*` and non-public targets refused with 403; packets limited to the target, the requested protocol and the assigned source prefix. | `allow_private` |
+| CONNECT-IP | `*` and non-public targets refused with 403; packets limited to the target, the requested protocol, public destinations and the assigned source prefix; one address per version per tunnel. | `allow_private`, `allowed_source_prefixes`, `max_assignments`, `allow_ip` |
 | udp-bind peers | Only public peers. | `allow_loopback`, `allow_private`, `peer_filter_fun` |
 | Capsule size | 64 KiB per capsule. | `max_capsule_size` |
 | Client queue | 1000 items. | `rx_queue_limit` |

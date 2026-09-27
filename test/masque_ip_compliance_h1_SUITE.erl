@@ -98,6 +98,8 @@ case_opts(initial_route_advertisement, Ctx) ->
 case_opts(address_allocation_round_robin, Ctx) ->
     Base = base_opts(Ctx),
     Base#{
+        %% Several addresses in one tunnel.
+        max_assignments => 2,
         address_pool => #ip_route{
             version = 4,
             start_addr = {10, 200, 0, 1},
@@ -108,6 +110,8 @@ case_opts(address_allocation_round_robin, Ctx) ->
 case_opts(pool_exhaustion_rejects, Ctx) ->
     Base = base_opts(Ctx),
     Base#{
+        %% Several addresses in one tunnel.
+        max_assignments => 2,
         address_pool => #ip_route{
             version = 4,
             start_addr = {10, 200, 0, 1},

@@ -96,9 +96,12 @@ Things the client enforces:
 |---|---|---|
 | `address_pool` | none | A prefix `{Version, Address, PrefixLen}`, an `#ip_route{}` range, or a list of them (one per IP version is used). Without a pool every ADDRESS_REQUEST gets the "no address" answer. |
 | `min_assignable_prefix` | `#{4 => 32, 6 => 128}` | Widest prefix handed out per version (an integer applies to both). |
-| `routes` | `[]` | `#ip_route{}` records advertised at start, together with the resolved addresses of a host name target. |
+| `routes` | `[]` | `#ip_route{}` records advertised at start for `*`, prefix and address targets. A host name target advertises only its resolved addresses. |
+| `max_assignments` | `1` | Addresses (or prefixes) one tunnel may hold per IP version. Past it, a request is answered with an address already held. |
+| `allowed_source_prefixes` | `[]` | Extra `{Version, Address, PrefixLen}` prefixes packets may come from, besides the assigned ones. Use it when the client's addresses are not assigned by the proxy. |
+| `allow_ip` | accept all | `fun({IpTarget, IpProto}) -> boolean()`, called in `accept/1`; `false` answers 403. |
 | `mtu` | `1500` | Largest packet forwarded; larger ones get an ICMP error. |
-| `allow_private` | `false` | See [target scoping](#target-scoping). |
+| `allow_private` | `false` | Lets the tunnel reach non-public destinations. It does not relax the source check. See [target scoping](#target-scoping). |
 | `forward_fun` | none (drop) | What to do with accepted packets. See [forwarding](#forwarding). |
 | `lifecycle_fun` | none | Event callback. See [plumbing](#plumbing-for-external-consumers). |
 
@@ -113,7 +116,7 @@ handler_opts => #{address_pool => [{4, {10,200,0,0}, 16}, {6, {16#2001,16#db8,0,
                   min_assignable_prefix => #{4 => 32, 6 => 64}}
 ```
 
-Assignments are registered in `masque_ip_session_registry`, which also keeps sessions that share a pool from getting the same block. An exhausted pool answers with the RFC 9484 "no address" entry. The server session keeps at most 64 unanswered request ids per tunnel on h3 and h2; extra requests are answered with "no address" at once.
+Assignments are registered in `masque_ip_session_registry`, which also keeps sessions that share a pool from getting the same block. An exhausted pool answers with the RFC 9484 "no address" entry, and so does a pool where no free block turns up within a bounded number of probes. A tunnel holds at most `max_assignments` blocks per version (1 by default), so one client cannot drain a shared pool. The server session keeps at most 64 unanswered request ids per tunnel on every transport; extra requests are answered with "no address" at once.
 
 ### Target scoping
 
@@ -122,11 +125,11 @@ The handler lets a tunnel reach only what its target names:
 | Target | Accepted when | Packets forwarded to |
 |---|---|---|
 | `'*'` | `allow_private => true` | any destination |
-| prefix | both ends of the prefix are public, or `allow_private` | destinations inside the prefix; non-public ones only with `allow_private` |
-| host name | every resolved address is public, or `allow_private` | destinations inside the advertised routes |
+| prefix | both ends of the prefix are public, or `allow_private` | destinations inside the prefix |
+| host name | every resolved address is public, or `allow_private` | its resolved addresses (static `routes` do not widen this) |
 | address | public, or `allow_private` | that address |
 
-A refused target answers 403. Packets must also match the requested `ipproto`, and their source must lie inside a prefix assigned to this tunnel (BCP 38). Before any assignment every packet is dropped, unless `allow_private` is set. Each drop is counted by reason (`bcp38`, `scope_target`, `scope_ipproto`, `malformed`), see [operations](operations.md#drop-counters).
+Whatever the target, a non-public destination is dropped unless `allow_private` is set. A refused target answers 403. Packets must also match the requested `ipproto`, and their source must lie inside a prefix assigned to this tunnel or in `allowed_source_prefixes` (BCP 38); before any assignment every other packet is dropped. On h3, a tunnel whose datagrams cannot carry a 1280-byte packet is refused with 502 (RFC 9484 section 9.1). Each drop is counted by reason (`bcp38`, `scope_target`, `scope_ipproto`, `malformed`), see [operations](operations.md#drop-counters).
 
 ### Forwarding
 

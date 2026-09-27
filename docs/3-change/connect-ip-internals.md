@@ -15,23 +15,24 @@ The listener resolves a hostname target before `accept/1` (`masque_ip:resolve_ta
 
 ## Session: request ids
 
-When the client sends ADDRESS_REQUEST, the session records each non-zero request id in `peer_pending` before calling `handle_address_request/2`. An `{assign, Entries}` action is sent only if every non-zero id in it is pending (id 0, an unprompted assignment, is always allowed); the matching ids are then removed. An assign that fails the check is dropped silently. On h3 and h2 at most 64 ids may be pending; request entries past that are answered at once with the RFC 9484 "no address" entry. The h1 session has no such limit.
+When the client sends ADDRESS_REQUEST, the session records each non-zero request id in `peer_pending` before calling `handle_address_request/2`. An `{assign, Entries}` action is sent only if every non-zero id in it is pending (id 0, an unprompted assignment, is always allowed); the matching ids are then removed. An assign that fails the check is dropped silently. At most 64 ids may be pending, on every transport; request entries past that are answered at once with the RFC 9484 "no address" entry.
 
 ## Accept and init
 
-`accept/1` passes when `allow_private` is set, or when the target is public: `'*'` never is; a prefix must start and end on public addresses; a literal must be public; a hostname needs every resolved address public. Otherwise `{reject, forbidden}` (403).
+`accept/1` passes when `allow_private` is set, or when the target is public: `'*'` never is; a prefix must start and end on public addresses; a literal must be public; a hostname needs every resolved address public. `allow_ip` must also return true. Otherwise `{reject, forbidden}` (403).
 
-`init/2` builds the route list from the static `routes` option plus a host route per resolved address. If it is not empty it returns `{advertise, Routes}`, which becomes the initial ROUTE_ADVERTISEMENT. The default handler sends no unprompted ADDRESS_ASSIGN.
+`init/2` builds the route list from the static `routes` option plus a host route per resolved address; for a hostname target, from the resolved addresses only. If it is not empty it returns `{advertise, Routes}`, which becomes the initial ROUTE_ADVERTISEMENT. The default handler sends no unprompted ADDRESS_ASSIGN.
 
 ## Allocator
 
 `handle_address_request/2` answers every request entry:
 
-1. No `address_pool`: every entry gets the "no address" reply (`masque_ip:reject_requests/1`: all-zero address, prefix 32 or 128).
-2. The first pool range of the requested IP version is used; `address_pool` may be a prefix, an `#ip_route{}` or a list of them.
-3. The prefix length is the requested one clamped to `[min_assignable_prefix, 32 | 128]`; by default only host addresses are handed out.
-4. Candidates are stride-aligned blocks walked from the start of the range. A block is skipped if it overlaps an assignment this session already holds, or if `register/5` in `masque_ip_session_registry` returns `{error, conflict}` because another session holds it. The first free block wins: this is first-fit.
-5. Pool exhausted: that entry gets the "no address" reply.
+1. Quota: once the session holds `max_assignments` blocks of a version (default 1), a further entry is answered with a block it already holds.
+2. No `address_pool`: every entry gets the "no address" reply (`masque_ip:reject_requests/1`: all-zero address, prefix 32 or 128).
+3. The first pool range of the requested IP version is used; `address_pool` may be a prefix, an `#ip_route{}` or a list of them.
+4. The prefix length is the requested one clamped to `[min_assignable_prefix, 32 | 128]`; by default only host addresses are handed out.
+5. Candidates are stride-aligned blocks walked from the start of the range, at most 4096 of them per entry. A block is skipped if it overlaps an assignment this session already holds, or if `register/5` in `masque_ip_session_registry` returns `{error, conflict}` because another session holds it. The first free block wins: this is first-fit.
+6. Pool exhausted, or no free block within the probe limit: that entry gets the "no address" reply.
 
 Each successful assignment bumps `ip_assign_inc/0` and emits `address_assigned` through `lifecycle_fun`.
 
@@ -57,7 +58,7 @@ flowchart LR
   SRC -- no --> D1[drop bcp38]
   SRC -- yes --> SC{destination and protocol<br/>in the URI scope?}
   SC -- no --> D2[drop scope_target / scope_ipproto]
-  SC -- yes --> DST{prefix target:<br/>destination public?}
+  SC -- yes --> DST{destination public<br/>or allow_private?}
   DST -- no --> D3[drop scope_target]
   DST -- yes --> TTL{TTL or hop limit above 1?}
   TTL -- no --> I1[drop ttl_zero, ICMP Time Exceeded]
@@ -66,9 +67,9 @@ flowchart LR
   MTU -- yes --> F[forward_fun]
 ```
 
-- **Source filter (BCP 38).** The source must be inside a prefix assigned to this session. With nothing assigned, only `allow_private` lets packets through.
-- **Scope.** `masque_ip_packet:scope_check/4` matches the destination against the request's `target` and the protocol against `ipproto`. A hostname target matches when the destination is inside the routes advertised at init.
-- **Destination filter.** For a prefix target, non-public destinations are dropped unless `allow_private`.
+- **Source filter (BCP 38).** The source must be inside a prefix assigned to this session or in `allowed_source_prefixes`. `allow_private` does not affect it.
+- **Scope.** `masque_ip_packet:scope_check/4` matches the destination against the request's `target` and the protocol against `ipproto`. A hostname target matches when the destination is one of its resolved addresses.
+- **Destination filter.** Non-public destinations are dropped unless `allow_private`, whatever the target.
 - **TTL.** `masque_ip_packet:decrement_ttl/1` decrements the TTL or hop limit (recomputing the IPv4 checksum). At zero the proxy answers with ICMP Time Exceeded.
 - **MTU.** `mtu` in `handler_opts`, default 1500. Larger packets get ICMPv6 Packet Too Big or ICMPv4 Fragmentation Needed.
 - **No ICMP about ICMP.** No ICMP error is generated when the offending packet is itself an ICMP error (`masque_icmp:is_error/1`).

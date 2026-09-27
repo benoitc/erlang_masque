@@ -22,14 +22,16 @@
 -export([
     connect_and_close/1,
     roundtrip_ipv4_packet/1,
-    request_addresses_reject_all/1
+    request_addresses_reject_all/1,
+    pending_requests_are_bounded/1
 ]).
 
 all() ->
     [
         connect_and_close,
         roundtrip_ipv4_packet,
-        request_addresses_reject_all
+        request_addresses_reject_all,
+        pending_requests_are_bounded
     ].
 
 init_per_suite(Config) ->
@@ -147,6 +149,20 @@ request_addresses_reject_all(Config) ->
             )
     after 2000 ->
         ct:fail("no ADDRESS_ASSIGN reply within 2s")
+    end,
+    ok = masque:close(Sess).
+
+%% At most 64 ADDRESS_REQUEST ids wait for the handler; the rest of
+%% the capsule is rejected right away, as on h3 and h2.
+pending_requests_are_bounded(Config) ->
+    Port = ?config(port, Config),
+    {ok, Sess} = do_connect(Port),
+    Prefixes = [{6, {16#2001, 16#DB8, 0, 0, 0, 0, 0, I}, 128} || I <- lists:seq(1, 100)],
+    {ok, Ids} = masque:request_addresses(Sess, Prefixes),
+    ?assertEqual(100, length(Ids)),
+    receive
+        {echo_handler, {addr_req, N}} -> ?assertEqual(64, N)
+    after 2000 -> ct:fail(no_address_request)
     end,
     ok = masque:close(Sess).
 

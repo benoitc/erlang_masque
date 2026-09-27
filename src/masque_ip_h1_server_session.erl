@@ -29,6 +29,8 @@
 -include("masque.hrl").
 -include("masque_ip.hrl").
 
+-define(MAX_PEER_PENDING, 64).
+
 -record(state, {
     transport :: gen_tcp | ssl,
     socket :: ssl:sslsocket() | gen_tcp:socket(),
@@ -237,7 +239,12 @@ dispatch_capsule(
     #state{peer_pending = Pend} = S
 ) ->
     case masque_ip_capsule:decode_address_request(Body) of
-        {ok, Entries} ->
+        {ok, Entries0} ->
+            %% Bound the unanswered requests a client can pile up:
+            %% entries past the limit are rejected right away.
+            Room = max(0, ?MAX_PEER_PENDING - map_size(Pend)),
+            {Entries, Extra} = lists:split(min(Room, length(Entries0)), Entries0),
+            _ = reject_now(Extra, S),
             Pend1 = lists:foldl(
                 fun(#ip_prefix_request{request_id = Id}, Acc) ->
                     Acc#{Id => true}
@@ -245,11 +252,16 @@ dispatch_capsule(
                 Pend,
                 Entries
             ),
-            dispatch(
-                handle_address_request,
-                [Entries],
-                S#state{peer_pending = Pend1}
-            );
+            case Entries of
+                [] ->
+                    {noreply, S};
+                _ ->
+                    dispatch(
+                        handle_address_request,
+                        [Entries],
+                        S#state{peer_pending = Pend1}
+                    )
+            end;
         {error, _} ->
             {stop, malformed_capsule, S}
     end;
@@ -402,6 +414,14 @@ send_assign(Entries, #state{peer_pending = Pend} = S) ->
         {error, _} = Err ->
             Err
     end.
+
+reject_now([], _S) ->
+    ok;
+reject_now(Requests, S) ->
+    Body = masque_ip_capsule:encode_address_assign(masque_ip:reject_requests(Requests)),
+    h1_upgrade:send_capsule(
+        S#state.transport, S#state.socket, ?MASQUE_CAPSULE_ADDRESS_ASSIGN, Body
+    ).
 
 consume_pending([], Pend) ->
     {ok, Pend};

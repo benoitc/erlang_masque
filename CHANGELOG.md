@@ -8,6 +8,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- CONNECT-IP: a host name target only reaches its resolved addresses
+  (static `routes` no longer widen it), and every destination must be
+  public unless `allow_private`.
+- CONNECT-IP: sources must be in an assigned prefix or in the new
+  `allowed_source_prefixes`; `allow_private` no longer lets unassigned
+  sources through. **Breaking**.
+- CONNECT-IP: at most `max_assignments` addresses per version per
+  tunnel (default 1); further requests get the address already held,
+  and allocation probes a bounded number of candidates. **Breaking**.
+- CONNECT-IP: a client ADDRESS_ASSIGN replaces the previous list
+  (RFC 9484 section 4.7.1), bounded at 64 entries.
+- CONNECT-IP: the h1 session bounds unanswered ADDRESS_REQUEST ids at
+  64 like h3 and h2; new `allow_ip` target policy; h3 tunnels that
+  cannot carry 1280-byte datagrams are refused.
+
 - TLS: every client transport (h2, udp-bind on h1/h2/h3, pooled h2 in
   the racer, chain upstreams) now uses `verify_peer` with the system CA
   store, hostname check and SNI by default. **Breaking**: self-signed
