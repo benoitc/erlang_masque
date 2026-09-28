@@ -28,7 +28,6 @@
 %% How long a tunnel write may wait for the transport to drain before
 %% the tunnel is reset.
 -define(SEND_TIMEOUT, 30000).
--define(SEND_RETRY_MS, 5).
 
 -define(DEFAULT_IDLE_MS, 300000).
 
@@ -187,23 +186,29 @@ replay_early([Msg | Rest], S) ->
         {stop, Reason, S2} -> {stop, Reason, S2}
     end.
 
-claim_stream(#state{transport = h3, conn = C, stream_id = S}) ->
-    quic_h3:set_stream_handler(C, S, self(), #{drain_buffer => false});
-%% h2 receive credit is returned only once the handler has written the
+%% Receive credit is returned only once the handler has written the
 %% bytes to the target (`consume/3'), so a stalled target stops the
 %% client instead of filling this process's mailbox.
+claim_stream(#state{transport = h3, conn = C, stream_id = S}) ->
+    quic_h3:set_stream_handler(C, S, self(), #{drain_buffer => false, flow_control => manual});
 claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
     h2:set_stream_handler(C, S, self(), #{flow_control => manual}).
 
-consume(h2, Bytes, #state{conn = C, stream_id = Sid}) when byte_size(Bytes) > 0 ->
-    %% The stream may already be gone (its FIN was the last event).
+%% The stream may already be gone (its FIN was the last event).
+consume(_Tag, <<>>, _S) ->
+    ok;
+consume(h2, Bytes, #state{conn = C, stream_id = Sid}) ->
     try
         h2:consume(C, Sid, byte_size(Bytes))
     catch
         exit:_ -> ok
     end;
-consume(_Tag, _Bytes, _S) ->
-    ok.
+consume(quic_h3, Bytes, #state{conn = C, stream_id = Sid}) ->
+    try
+        quic_h3:consume(C, Sid, byte_size(Bytes))
+    catch
+        exit:_ -> ok
+    end.
 
 handle_call(
     finalize,
@@ -289,6 +294,10 @@ handle_traffic(
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
+%% A `send_ready' that arrives after `tunnel_send_h3/4' stopped
+%% waiting is not the handler's business.
+handle_traffic({quic_h3, _Conn, {send_ready, _}}, S) ->
+    {noreply, S};
 handle_traffic({h2, _Conn, {closed, _Reason}}, S) ->
     {stop, peer_closed, S};
 handle_traffic({'EXIT', _Pid, _Reason}, S) ->
@@ -478,15 +487,18 @@ tunnel_send(S, Bytes, Fin) ->
     Deadline = erlang:monotonic_time(millisecond) + ?SEND_TIMEOUT,
     tunnel_send_h3(S, Bytes, Fin, Deadline).
 
-tunnel_send_h3(S, Bytes, Fin, Deadline) ->
+%% A refused write (`send_queue_full', nothing written) is retried
+%% when quic_h3 says the queue drained (`send_ready'), until the
+%% deadline.
+tunnel_send_h3(#state{conn = C, stream_id = Sid} = S, Bytes, Fin, Deadline) ->
     case transport_send_data(S, Bytes, Fin) of
         {error, send_queue_full} ->
-            case erlang:monotonic_time(millisecond) < Deadline of
-                true ->
-                    timer:sleep(?SEND_RETRY_MS),
-                    tunnel_send_h3(S, Bytes, Fin, Deadline);
-                false ->
-                    {error, send_timeout}
+            Left = Deadline - erlang:monotonic_time(millisecond),
+            receive
+                {quic_h3, C, {send_ready, Sid}} ->
+                    tunnel_send_h3(S, Bytes, Fin, Deadline)
+            after max(0, Left) ->
+                {error, send_timeout}
             end;
         Other ->
             Other

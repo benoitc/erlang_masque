@@ -49,6 +49,7 @@
     listener_name_unique_across_transports/1,
     h3_idle_tunnel_ends/1,
     h2_tcp_receive_window_is_bounded/1,
+    h3_tcp_receive_window_is_bounded/1,
     h2_init_close_session_frees_slot/1,
     h3_init_close_session_balances_metrics/1,
     h3_send_to_on_proxy_context/1,
@@ -117,6 +118,7 @@ all() ->
         listener_name_unique_across_transports,
         h3_idle_tunnel_ends,
         h2_tcp_receive_window_is_bounded,
+        h3_tcp_receive_window_is_bounded,
         h2_init_close_session_frees_slot,
         h3_init_close_session_balances_metrics,
         h3_send_to_on_proxy_context,
@@ -246,7 +248,10 @@ extra_opts(h3_many_small_capsules_in_one_write) ->
     #{handler_opts => #{max_capsule_size => 600}};
 extra_opts(h3_idle_tunnel_ends) ->
     #{handler_opts => #{idle_timeout_ms => 300}};
-extra_opts(h2_tcp_receive_window_is_bounded) ->
+extra_opts(Case) when
+    Case =:= h2_tcp_receive_window_is_bounded;
+    Case =:= h3_tcp_receive_window_is_bounded
+->
     #{tcp_handler => masque_report_tcp_handler, handler_opts => #{data_delay => 2000}};
 extra_opts(h2_slow_start_does_not_block_others) ->
     #{handler_opts => #{delay_ports => #{7001 => 3000}}};
@@ -660,16 +665,23 @@ h3_idle_tunnel_ends(Config) ->
 %% h2 receive credit is returned only as the handler consumes data, so
 %% a target that stops reading bounds what piles up in the session.
 h2_tcp_receive_window_is_bounded(Config) ->
+    %% h2 stream window: 64 KiB by default; 1 MiB is sent.
+    tcp_receive_window_is_bounded(Config, h2, 64, 131072).
+
+h3_tcp_receive_window_is_bounded(Config) ->
+    %% quic_h3 stream window: 512 KiB by default; 4 MiB is sent.
+    tcp_receive_window_is_bounded(Config, h3, 256, 1048576).
+
+tcp_receive_window_is_bounded(Config, Transport, Chunks, Max) ->
     {EchoPid, EchoPort} = start_tcp_echo(),
-    Sess = tcp_connect(Config, h2, EchoPort),
+    Sess = tcp_connect(Config, Transport, EchoPort),
     Pid = await_session(),
     Chunk = binary:copy(<<0>>, 16384),
-    Sender = spawn(fun() -> [masque:send(Sess, Chunk) || _ <- lists:seq(1, 64)] end),
+    Sender = spawn(fun() -> [masque:send(Sess, Chunk) || _ <- lists:seq(1, Chunks)] end),
     timer:sleep(1500),
     {messages, Msgs} = erlang:process_info(Pid, messages),
-    Queued = lists:sum([byte_size(B) || {h2, _, {data, _, B, _}} <- Msgs]),
-    %% One stream window (64 KiB by default) at most, not the 1 MiB sent.
-    ?assert(Queued =< 131072),
+    Queued = lists:sum([byte_size(B) || {_, _, {data, _, B, _}} <- Msgs]),
+    ?assert(Queued =< Max),
     exit(Sender, kill),
     exit(EchoPid, kill),
     _ = masque:close(Sess).

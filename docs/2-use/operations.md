@@ -84,7 +84,7 @@ Clients that race transports reconnect to whichever instance your DNS or load ba
 | Client queue | 1000 items. | `rx_queue_limit` |
 | Tunnels per connection | 100 on h3 and h2 (h1 carries one). | `max_tunnels_per_connection` |
 | Idle tunnel | Ends after 5 minutes without traffic in either direction, on every transport. | `idle_timeout_ms` |
-| CONNECT-TCP target writes | A target that stops reading ends the tunnel after 30 s; on h2 the client is flow-controlled meanwhile. | - |
+| CONNECT-TCP target writes | A target that stops reading ends the tunnel after 30 s; the client is flow-controlled meanwhile (h3 and h2). | - |
 | Request headers | Library headers cannot be overridden; CR/LF refused on h1 (except udp-bind). | - |
 | h1 rejection | Connection closed after every refused request. | - |
 
