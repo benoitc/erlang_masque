@@ -128,6 +128,7 @@ Assumptions:
 
 ## When you bump a dependency
 
+1. Check that `quic_h3` and `h2` still offer `flow_control => manual` and `consume/3` (CONNECT-TCP relies on them), and that `quic_h3` still sends `{send_ready, StreamId}` after a `send_queue_full` refusal.
 1. Re-read the moduledocs of `quic_h3`, `h2` or `h1` for the calls and messages above. Pay special attention to `set_stream_handler` defaults, which process runs the `handler` and `connection_handler` funs, where connection-level events are delivered, and the GOAWAY behaviour.
 2. Check whether the published types now cover the options masque passes; drop `-dialyzer` exemptions that are no longer needed.
 3. Run `rebar3 dialyzer`, then the suites that exercise the transport edges: `masque_lifecycle_SUITE` (close, reset, FIN, GOAWAY, early data), `masque_compliance_SUITE`, `masque_h1_SUITE`, `masque_tcp_h1_SUITE`, `masque_backpressure_SUITE`, `masque_upstream_pool_SUITE`, the `masque_ip_*_SUITE` and `masque_udp_bind_compliance_SUITE`. See [testing](testing.md).

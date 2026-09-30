@@ -79,6 +79,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Bumped `quic` 2.0.1 -> 2.1.0. CONNECT-TCP over h3 now has receive
+  backpressure (`flow_control => manual` and `quic_h3:consume/3`), like
+  h2, and a refused tunnel write waits for `send_ready` instead of
+  polling.
+
 - Documentation reorganised into Understand / Use / Change / Reference
   levels under `docs/`, with new concept, architecture, internals,
   testing, debugging and how-to pages, `CONTRIBUTING.md` and
