@@ -167,6 +167,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- h2 and h1 listeners put the client address in the request map
+  (`peer`), and the h1 listener takes a `fallback` fun for requests that
+  are not MASQUE, like h3 and h2.
+
 - `rx_queue_limit` connect option (default 1000 items); `masque:info/1`
   reports `rx_dropped` on datagram sessions.
 - `checkout_timeout_ms` in `upstream_pool_opts` (default 60 s).

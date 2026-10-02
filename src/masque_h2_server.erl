@@ -226,7 +226,7 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
                     ip -> IpHandler;
                     udp_bind -> BindHandler
                 end,
-            Req1 = Req0#{handler_opts => HandlerOpts},
+            Req1 = add_peer(Conn, Req0#{handler_opts => HandlerOpts}),
             case masque_ip:resolve_target(Protocol, Req1, Resolver) of
                 {ok, Req} ->
                     MaxT = maps:get(max_tunnels, Dispatch, 0),
@@ -460,6 +460,15 @@ match_ip_path(Path, Headers, Template) ->
             end;
         {error, _} ->
             {error, bad_path}
+    end.
+
+%% The client address, as the h3 listener gives it in the request map.
+add_peer(Conn, Req) ->
+    try h2:peername(Conn) of
+        {ok, Peer} -> Req#{peer => Peer};
+        _ -> Req
+    catch
+        _:_ -> Req
     end.
 
 accept_request(HandlerMod, Req) ->

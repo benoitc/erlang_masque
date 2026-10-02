@@ -20,8 +20,11 @@ accept(_Req) ->
 
 init(Req, Opts) ->
     case maps:find(report_to, Opts) of
-        {ok, Pid} -> Pid ! {masque_session, self()};
-        error -> ok
+        {ok, Pid} ->
+            Pid ! {masque_session, self()},
+            Pid ! {masque_req, maps:without([handler_opts], Req)};
+        error ->
+            ok
     end,
     case maps:find(early_data, Opts) of
         {ok, Bin} -> self() ! {masque_test_early_data, Bin};

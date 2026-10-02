@@ -31,8 +31,8 @@ So a handler that wants a specific status from `init/2` returns `{stop, {reject,
 | Step | h3 `masque_server` | h2 `masque_h2_server` | h1 `masque_h1_server` |
 |---|---|---|---|
 | Request shape | Extended CONNECT | Extended CONNECT | `GET` + Upgrade (udp, ip, udp-bind), classic `CONNECT host:port` (tcp) |
-| Non-MASQUE requests | `fallback` fun if set, else reject | `fallback` fun if set, else reject | always rejected |
-| `peer` / `peer_cert` in `Req` | yes (`add_peer_info/2`) | no | no |
+| Non-MASQUE requests | `fallback` fun if set, else reject | same | same |
+| `peer` / `peer_cert` in `Req` | both (`add_peer_info/2`) | `peer` (`h2:peername/1`) | `peer` (`h1:peername/1`) |
 | Top-level opts lifted into `handler_opts` | `handler_opt_keys/0` in `masque_server` | same | same |
 | Tunnel limit | router counts live + pending sessions | ETS counter `masque_h2_tunnel_counts`, reserved after `accept/1` | none: one tunnel per connection |
 | Session start | router spawns it, unsupervised | `masque_h2_session_sup` (per protocol, `temporary`) | `masque_h1_session_sup` (per protocol, `temporary`) |
@@ -213,7 +213,7 @@ Datagram writes (udp, ip, udp-bind) never block: oversize UDP payloads are dropp
 The pipeline and the session layers are the same pattern implemented per module: three listeners, nine server sessions, each with its own copy of the handler runtime and the reject formatting. The copies have drifted. When you change behaviour in one copy, check the others. Known drift today:
 
 - **Option lifting.** Shared: all three listeners copy `handler_opt_keys/0` in `masque_server` into `handler_opts`. Add a new listener-level handler option there.
-- **Request map.** Only h3 adds `peer` and `peer_cert`.
+- **Request map.** Every listener adds `peer`; only h3 adds `peer_cert` (the h2 and h1 libraries do not expose the client certificate).
 - **Handler crash handling.** Every session stops with `{handler_crash, R}` (see the teardown matrix); each has its own copy of `safe_apply/3`.
 - **Error stops.** udp resets with `H3_MESSAGE_ERROR`, tcp with `H3_CONNECT_ERROR`, udp-bind with `H3_INTERNAL_ERROR`, and ip ends with a FIN.
 - **Metrics.** Every session emits `tunnel_opened` once its 2xx is sent (in `finalize`, the h2 init path, or the `init/1` wrapper on h1 and h2 UDP) and `tunnel_closed` from `terminate/2`, keyed on `start_time`. A new session must do the same; `h1_every_tunnel_counts_open_and_close` in `masque_lifecycle_SUITE` checks it.

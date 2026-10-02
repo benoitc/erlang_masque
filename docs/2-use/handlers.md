@@ -98,7 +98,7 @@ Actions run in list order. Unknown actions are ignored. A closing action ends th
 | `bind` | udp-bind | `scoped` or `unscoped`. |
 | `ip_target`, `ip_ipproto` | IP | `'*'`, an address, `{Version, Address, PrefixLen}` or a host name binary; `'*'` or `0..255`. |
 | `resolved_addresses` | IP | The listener resolver's answer for a host name target, the address itself for an address target, `[]` otherwise. |
-| `peer` | h3 | `{Address, Port}` of the client. |
+| `peer` | all | `{Address, Port}` of the client. |
 | `peer_cert` | h3, with a client certificate | DER. |
 
 ## init runs before the 2xx
