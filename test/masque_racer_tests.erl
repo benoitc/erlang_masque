@@ -73,13 +73,15 @@ fastest_wins_in_three_way_test() ->
 %%====================================================================
 
 h1_not_spawned_when_h2_wins_inside_window_test() ->
-    %% h3 fails immediately. h2 succeeds after 20 ms. h1 is 500 ms out
-    %% so the race resolves long before the h1 timer fires.
-    Start = erlang:monotonic_time(millisecond),
+    %% h3 fails at once, h2 succeeds after 20 ms, h1 would start 500 ms
+    %% after h2: the race is over before that, so h1 never starts. The
+    %% fake sessions report each start, so this is checked directly
+    %% rather than through the race's duration.
     Opts = base_opts(#{
         prefer_timeout_ms => 30,
         h1_prefer_timeout_ms => 500,
         timeout => 3000,
+        fake_notify => self(),
         fake_by_transport => #{
             h3 => #{fake_result => {error, no_quic}},
             h2 => #{fake_result => ok, fake_delay_ms => 20},
@@ -87,9 +89,25 @@ h1_not_spawned_when_h2_wins_inside_window_test() ->
         }
     }),
     {ok, Sess} = run([h3, h2, h1], Opts),
-    Elapsed = erlang:monotonic_time(millisecond) - Start,
-    ?assert(Elapsed < 400),
-    ok = ?FAKE:stop(Sess).
+    receive
+        {fake_started, h2, Sess} -> ok
+    after 1000 -> ?assert(false)
+    end,
+    %% Past the moment h1 would have started.
+    timer:sleep(700),
+    receive
+        {fake_started, h1, _} -> ?assert(false)
+    after 0 -> ok
+    end,
+    ok = ?FAKE:stop(Sess),
+    flush_started().
+
+%% Leave no start reports behind for the next test.
+flush_started() ->
+    receive
+        {fake_started, _, _} -> flush_started()
+    after 0 -> ok
+    end.
 
 %%====================================================================
 %% Failure surfacing
