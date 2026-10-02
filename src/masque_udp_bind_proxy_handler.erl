@@ -52,7 +52,7 @@ Configurable via `handler_opts`:
   per-packet filtering. Default identity.
 """.
 
--export([init/2, handle_bind_packet/3, handle_info/2, terminate/2]).
+-export([init/2, handle_bind_packet/3, handle_packet/2, handle_info/2, terminate/2]).
 
 -include("masque_udp_bind.hrl").
 
@@ -205,6 +205,22 @@ handle_bind_packet({IP, Port}, Payload, #state{} = S0) when
             {drop, Reason, S0}
     end.
 
+-doc """
+A scoped bind's context-0 datagram: a plain UDP payload for the scoped
+target, under the same policy as `handle_bind_packet/3`.
+""".
+-spec handle_packet(binary(), #state{}) -> {ok, #state{}}.
+handle_packet(_Payload, #state{scope = any} = S) ->
+    {ok, S};
+handle_packet(Payload, #state{scope = Scope} = S) ->
+    case handle_bind_packet(Scope, Payload, S) of
+        {ok, S2} ->
+            {ok, S2};
+        {drop, Reason, S2} ->
+            masque_metrics:bind_drop_inc(Reason),
+            {ok, S2}
+    end.
+
 in_scope(_Peer, #state{scope = any}) -> true;
 in_scope(Peer, #state{scope = Scope}) -> Peer =:= Scope.
 
@@ -261,6 +277,9 @@ handle_info(
     of
         false ->
             {ok, S};
+        true when S#state.scope =/= any ->
+            %% Scoped: the target's replies go back on context 0.
+            {ok, S, [{send, Bytes}]};
         true ->
             {ok, S, [{send_bind_packet, {FromIP, FromPort}, Bytes}]}
     end;

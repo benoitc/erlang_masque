@@ -63,9 +63,9 @@ receive {masque_bind_packet, Sess, {IP, Port}, Bytes} -> {IP, Port, Bytes} end.
 - `bind_connect/3` takes the same options as `connect/3` (transports, TLS, `owner`, `mode`, `request_headers`, `timeout`); `upstream_pool` has no effect, each bind has its own connection.
 - The 2xx (101 on h1) must carry both `connect-udp-bind` and `proxy-public-address`, otherwise the call returns `{error, missing_bind_response_header}` or `{error, missing_proxy_public_address}`.
 - In queue mode `masque:recv/2` returns `{ok, {IP, Port}, Bytes}`.
-- On a scoped bind, datagrams the proxy sends on context 0 reach you as `masque_bind_packet` from the scoped target.
+- On a scoped bind, `masque:send/2` (and `send_to/3` to a peer with no context) sends a plain UDP payload on context 0, as CONNECT-UDP does; what the target sends back on context 0 reaches you as `masque_bind_packet` from the scoped target.
 
-On a scoped bind the default `masque_udp_bind_proxy_handler` resolves the scoped `{Host, Port}` once and only exchanges packets with it, in both directions. It does not export `handle_packet/2`, so context-0 datagrams from the client are ignored (Q16 in [decisions](../3-change/decisions.md)).
+On a scoped bind the default `masque_udp_bind_proxy_handler` resolves the scoped `{Host, Port}` once and only exchanges packets with it, in both directions. Context 0 carries plain UDP payloads to and from that target (`handle_packet/2`, and the `{send, Bytes}` action back), under the same peer policy as compressed contexts.
 
 `send_to/3` uses a context the proxy opened for the peer when there is one; contexts carry datagrams both ways.
 

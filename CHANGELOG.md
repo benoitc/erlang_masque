@@ -199,6 +199,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- udp-bind: a scoped bind carries plain UDP to and from its target on
+  context 0 (`masque:send/2` on the client, `handle_packet/2` and the
+  `{send, Bytes}` action on the proxy); those datagrams were dropped.
+
 - `1.2.3.4/0` is no longer accepted as a canonical prefix (capsules and
   CONNECT-IP targets).
 - `masque_ip:is_public/1` also rejects 2001:2::/48, 2001:10::/28 and

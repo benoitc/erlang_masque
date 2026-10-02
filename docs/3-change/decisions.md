@@ -193,7 +193,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q13.** Settled: [a handler crash ends the tunnel](#a-handler-crash-ends-the-tunnel).
 - **Q14.** Should draining send GOAWAY, and should the server react to a client GOAWAY? Today it does neither.
 - **Q15.** Settled as a defect: a peer reset of a pending h3 stream now answers the listener with `stream_dead` (see [server internals](server-internals.md)).
-- **Q16.** In a scoped udp-bind, context 0 goes to `handle_packet/2`, which the default bind handler does not export, so that traffic is dropped. Intended?
+- **Q16.** Settled: in a scoped udp-bind, context 0 carries plain UDP to and from the scoped target in both directions, as in CONNECT-UDP.
 - **Q17.** Settled: the h1 udp-bind server session enforces the same rules as the h3/h2 one (see [udp-bind internals](udp-bind-internals.md#the-h1-session)).
 - **Q18.** Settled: pooled h3 owners default to 100 streams and report full on a transport `stream_limit` error, so the pool opens another connection (see [pool](pool.md)).
 - **Q19.** The `masque_ip_proxy_handler` allocator is first-fit (its moduledoc used to say round-robin). Is round-robin wanted, so a released address is not handed out again at once?
