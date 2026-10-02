@@ -48,7 +48,7 @@ The library never opens a context on its own. The client opens contexts with `ma
 
 Client to peer:
 
-- Context 0: in a scoped bind it goes to the handler's `handle_packet/2`, which the default bind handler does not export, so it is dropped; in an unscoped bind it is dropped (`context_zero`).
+- Context 0: in a scoped bind it goes to the handler's `handle_packet/2`; the default bind handler sends it to the scoped target and returns the target's replies with the `{send, Bytes}` action, also on context 0. In an unscoped bind it is dropped (`context_zero`).
 - Another context: looked up in the peer table, then among the installed contexts of the own table (contexts are two-way). The client's uncompressed context carries the peer address in the payload; a compressed one takes the peer from the entry. Unknown ids are dropped (`unknown_context`). The packet then goes to the handler's `handle_bind_packet/3`.
 
 Peer to client (`{send_bind_packet, Peer, Bytes}` from the handler):
