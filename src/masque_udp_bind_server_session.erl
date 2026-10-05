@@ -671,6 +671,9 @@ run_init_actions(Actions, S) ->
 
 do_actions([], S) ->
     {ok, S};
+%% Context 0 of a scoped bind: a plain UDP payload, as in CONNECT-UDP.
+do_actions([{send, Bytes} | Rest], #state{bind_scope = scoped} = S) ->
+    do_actions(Rest, send_datagram(0, Bytes, S));
 do_actions([{send_bind_packet, Peer, Bytes} | Rest], S) ->
     do_actions(Rest, send_bind_payload(Peer, Bytes, S));
 do_actions([{compression_assign, {IP, Port}} | Rest], S) ->

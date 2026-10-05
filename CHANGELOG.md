@@ -167,6 +167,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- h2 and h1 listeners put the client address in the request map
+  (`peer`), and the h1 listener takes a `fallback` fun for requests that
+  are not MASQUE, like h3 and h2.
+
 - `rx_queue_limit` connect option (default 1000 items); `masque:info/1`
   reports `rx_dropped` on datagram sessions.
 - `checkout_timeout_ms` in `upstream_pool_opts` (default 60 s).
@@ -198,6 +202,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `bad_ip_version` and `unknown_capsule_type`.
 
 ### Fixed
+
+- udp-bind: a scoped bind carries plain UDP to and from its target on
+  context 0 (`masque:send/2` on the client, `handle_packet/2` and the
+  `{send, Bytes}` action on the proxy); those datagrams were dropped.
 
 - `1.2.3.4/0` is no longer accepted as a canonical prefix (capsules and
   CONNECT-IP targets).

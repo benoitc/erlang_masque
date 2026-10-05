@@ -193,14 +193,14 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q13.** Settled: [a handler crash ends the tunnel](#a-handler-crash-ends-the-tunnel).
 - **Q14.** Should draining send GOAWAY, and should the server react to a client GOAWAY? Today it does neither.
 - **Q15.** Settled as a defect: a peer reset of a pending h3 stream now answers the listener with `stream_dead` (see [server internals](server-internals.md)).
-- **Q16.** In a scoped udp-bind, context 0 goes to `handle_packet/2`, which the default bind handler does not export, so that traffic is dropped. Intended?
+- **Q16.** Settled: in a scoped udp-bind, context 0 carries plain UDP to and from the scoped target in both directions, as in CONNECT-UDP.
 - **Q17.** Settled: the h1 udp-bind server session enforces the same rules as the h3/h2 one (see [udp-bind internals](udp-bind-internals.md#the-h1-session)).
 - **Q18.** Settled: pooled h3 owners default to 100 streams and report full on a transport `stream_limit` error, so the pool opens another connection (see [pool](pool.md)).
 - **Q19.** The `masque_ip_proxy_handler` allocator is first-fit (its moduledoc used to say round-robin). Is round-robin wanted, so a released address is not handed out again at once?
 - **Q20.** Settled: traffic in either direction re-arms the idle timer.
 - **Q21.** `dial_single_or_pool/5` waits for the pool checkout up to `checkout_timeout_ms` (60 s), regardless of the connect `timeout`. Intended?
 - **Q22.** The chain listeners set `handler`, `tcp_handler` and `ip_handler` to `masque_chain_handler` but not `bind_handler`, so udp-bind is not chained. Intended?
-- **Q23.** Are the listener gaps intended: h1 has no `fallback`, no `peer` / `peer_cert` and no tunnel limit; h2 has no `peer` / `peer_cert`? (Option lifting into `handler_opts` is now the same on all three.)
+- **Q23.** Settled: every listener has `fallback` and puts `peer` in the request map. `peer_cert` stays h3 only until the h2 and h1 libraries expose the client certificate. h1 needs no tunnel limit: it carries one tunnel per connection.
 - **Q24.** Settled: compression contexts are two-way on both sides (see [udp-bind internals](udp-bind-internals.md)).
 - **Q25.** Error stops end the stream differently per protocol: UDP resets with `H3_MESSAGE_ERROR`, TCP with `H3_CONNECT_ERROR`, udp-bind with `H3_INTERNAL_ERROR`, IP with a FIN. Intended?
 - **Q26.** The h1 IP session has no limit on pending ADDRESS_REQUEST ids (h3/h2 cap it at 64). Intended?

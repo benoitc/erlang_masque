@@ -126,6 +126,7 @@ build_dispatch(Opts) ->
         bind_handler => maps:get(bind_handler, Opts),
         accept_bind => maps:get(accept_bind, Opts),
         resolver => maps:get(resolver, Opts, fun default_resolver/1),
+        fallback => maps:get(fallback, Opts, undefined),
         handler_opts => maps:merge(
             maps:with(masque_server:handler_opt_keys(), Opts),
             maps:get(handler_opts, Opts, #{})
@@ -196,7 +197,7 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
                     tcp -> TcpHandler;
                     udp_bind -> BindHandler
                 end,
-            Req1 = Req0#{handler_opts => HandlerOpts},
+            Req1 = add_peer(Conn, Req0#{handler_opts => HandlerOpts}),
             Resolver = maps:get(resolver, Dispatch, fun default_resolver/1),
             case masque_ip:resolve_target(Protocol, Req1, Resolver) of
                 {ok, Req} ->
@@ -219,7 +220,21 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
                     reject(Conn, StreamId, Reason)
             end;
         {error, Reason} ->
-            reject(Conn, StreamId, Reason)
+            %% Not a MASQUE request: hand it to the caller's `fallback'
+            %% when set, as the h3 and h2 listeners do.
+            case maps:get(fallback, Dispatch, undefined) of
+                Fun when is_function(Fun, 5) -> Fun(Conn, StreamId, Method, Path, Headers);
+                _ -> reject(Conn, StreamId, Reason)
+            end
+    end.
+
+%% The client address, as h3 and h2 give it in the request map.
+add_peer(Conn, Req) ->
+    try h1:peername(Conn) of
+        {ok, Peer} -> Req#{peer => Peer};
+        _ -> Req
+    catch
+        _:_ -> Req
     end.
 
 spawn_session(Conn, StreamId, Protocol, Handler, HOpts, Req) ->

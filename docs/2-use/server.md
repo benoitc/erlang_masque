@@ -53,7 +53,7 @@ Opts = #{
 | `accept_bind` | all | `false` | Accept Connect-UDP-Bind on the UDP template. See [connect-udp-bind](connect-udp-bind.md). |
 | `resolver` | all | A + AAAA lookup | Resolves CONNECT-IP host name targets before `accept/1`. Returns `{ok, [Address]}`. |
 | `max_tunnels_per_connection` | h3, h2 | `100` | Tunnels one client connection may hold; `0` means no limit. Extra requests get 503. |
-| `fallback` | h3, h2 | none | `fun(Conn, StreamId, Method, Path, Headers)` for requests that are not MASQUE. Without it they are rejected. |
+| `fallback` | all | none | `fun(Conn, StreamId, Method, Path, Headers)` for requests that are not MASQUE. Without it they are rejected. |
 | `settings` | h3, h2 | `#{}` | Extra transport settings; the MASQUE ones are always forced on. |
 | `acceptors` | h2, h1 | library default | Acceptor processes. |
 | `reuseport`, `alpn`, `max_datagram_frame_size` | h3 | `false`, `[<<"h3">>]`, `65535` | QUIC listener tuning. |
@@ -118,7 +118,7 @@ masque:connect(Proxy, Target, #{request_headers =>
     [{<<"authorization">>, <<"PrivateToken token=", Token/binary>>}]}).
 ```
 
-On h3 the request map also carries `peer` (address and port), and `peer_cert` (DER) when the QUIC connection has a client certificate. `start_listener/2` does not ask clients for a certificate, so `peer_cert` only shows up when you embed `masque` in your own `quic_h3` server configured for mutual TLS. h2 and h1 provide neither field.
+The request map carries `peer` (the client's address and port) on every transport. On h3 it also carries `peer_cert` (DER) when the QUIC connection has a client certificate. `start_listener/2` does not ask clients for a certificate, so `peer_cert` only shows up when you embed `masque` in your own `quic_h3` server configured for mutual TLS. The h2 and h1 libraries do not expose the client certificate, so `peer_cert` is h3 only.
 
 ## Drain
 

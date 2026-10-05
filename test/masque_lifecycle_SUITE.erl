@@ -42,6 +42,12 @@
     h1_bind_handler_crash_closes_tunnel/1,
     unsupported_call_keeps_session/1,
     udp_bind_skips_pool/1,
+    h2_request_carries_peer/1,
+    h1_request_carries_peer/1,
+    h1_fallback_gets_other_requests/1,
+    h3_scoped_bind_context_zero/1,
+    h2_scoped_bind_context_zero/1,
+    h1_scoped_bind_context_zero/1,
     h2_slow_start_does_not_block_others/1,
     default_tunnel_cap_is_100/1,
     h3_datagram_capsule_is_a_datagram/1,
@@ -111,6 +117,12 @@ all() ->
         h1_bind_handler_crash_closes_tunnel,
         unsupported_call_keeps_session,
         udp_bind_skips_pool,
+        h2_request_carries_peer,
+        h1_request_carries_peer,
+        h1_fallback_gets_other_requests,
+        h3_scoped_bind_context_zero,
+        h2_scoped_bind_context_zero,
+        h1_scoped_bind_context_zero,
         h2_slow_start_does_not_block_others,
         default_tunnel_cap_is_100,
         h3_datagram_capsule_is_a_datagram,
@@ -260,6 +272,20 @@ extra_opts(Case) when
     Case =:= h3_init_close_session_balances_metrics
 ->
     #{handler_opts => #{init_actions => [close_session]}, max_tunnels_per_connection => 1};
+extra_opts(Case) when
+    Case =:= h3_scoped_bind_context_zero;
+    Case =:= h2_scoped_bind_context_zero;
+    Case =:= h1_scoped_bind_context_zero
+->
+    bind_opts();
+extra_opts(h1_fallback_gets_other_requests) ->
+    Self = self(),
+    #{
+        fallback => fun(Conn, StreamId, Method, Path, _Headers) ->
+            Self ! {fallback, Method, Path},
+            h1:send_response(Conn, StreamId, 204, [])
+        end
+    };
 extra_opts(udp_bind_skips_pool) ->
     bind_opts();
 extra_opts(h1_every_tunnel_counts_open_and_close) ->
@@ -776,6 +802,67 @@ send_until_received(Sess, PeerAddr, Peer, N) ->
     end.
 
 send_to_peer_port() -> 47811.
+
+%% A scoped bind carries plain UDP to and from its target on context 0,
+%% as CONNECT-UDP does.
+h3_scoped_bind_context_zero(Config) -> scoped_bind_context_zero(Config, h3).
+h2_scoped_bind_context_zero(Config) -> scoped_bind_context_zero(Config, h2).
+h1_scoped_bind_context_zero(Config) -> scoped_bind_context_zero(Config, h1).
+
+scoped_bind_context_zero(Config, Transport) ->
+    {ok, Peer} = gen_udp:open(0, [binary, {ip, {127, 0, 0, 1}}, {active, true}]),
+    {ok, PeerPort} = inet:port(Peer),
+    Port = maps:get(port, ?config(Transport, Config)),
+    {ok, Sess} = masque:bind_connect(
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+        {<<"127.0.0.1">>, PeerPort},
+        #{transports => [Transport], verify => verify_none, timeout => 5000}
+    ),
+    ok = masque:send(Sess, <<"ping">>),
+    {FromIP, FromPort} =
+        receive
+            {udp, Peer, IP, P, <<"ping">>} -> {IP, P}
+        after 5000 -> ct:fail(no_packet_at_target)
+        end,
+    ok = gen_udp:send(Peer, FromIP, FromPort, <<"pong">>),
+    receive
+        {masque_bind_packet, Sess, {<<"127.0.0.1">>, PeerPort}, <<"pong">>} -> ok
+    after 5000 -> ct:fail(no_reply)
+    end,
+    ok = masque:close(Sess),
+    gen_udp:close(Peer).
+
+%% The client address reaches `accept/1' and `init/2' on every transport.
+h2_request_carries_peer(Config) -> request_carries_peer(Config, h2).
+h1_request_carries_peer(Config) -> request_carries_peer(Config, h1).
+
+request_carries_peer(Config, Transport) ->
+    Port = maps:get(port, ?config(Transport, Config)),
+    {ok, Sess} = masque:connect(
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+        {<<"192.0.2.6">>, 443},
+        #{verify => verify_none, transports => [Transport]}
+    ),
+    receive
+        {masque_req, #{peer := {{127, 0, 0, 1}, P}}} when is_integer(P) -> ok;
+        {masque_req, Req} -> ct:fail({no_peer, Req})
+    after 5000 -> ct:fail(no_req)
+    end,
+    ok = masque:close(Sess).
+
+%% Requests that are not MASQUE go to the h1 listener's `fallback'.
+h1_fallback_gets_other_requests(Config) ->
+    #{port := Port} = ?config(h1, Config),
+    {ok, Sock} = ssl:connect(
+        "127.0.0.1", Port, [binary, {active, false}, {verify, verify_none}], 5000
+    ),
+    ok = ssl:send(Sock, <<"GET /status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n">>),
+    receive
+        {fallback, <<"GET">>, <<"/status">>} -> ok
+    after 5000 -> ct:fail(fallback_not_called)
+    end,
+    {ok, <<"HTTP/1.1 204", _/binary>>} = ssl:recv(Sock, 0, 5000),
+    ssl:close(Sock).
 
 %% `upstream_pool => true' has no effect on a bind: no pooled
 %% connection is checked out, on the single-transport path or in a race.

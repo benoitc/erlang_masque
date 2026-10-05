@@ -64,7 +64,7 @@ Actions run in list order. Unknown actions are ignored. A closing action ends th
 
 | Action | UDP | TCP | IP | udp-bind | Effect |
 |---|:-:|:-:|:-:|:-:|---|
-| `{send, Payload}` | yes | | | | Datagram to the client on context 0. Dropped silently above 65527 bytes or above the h3 datagram limit. |
+| `{send, Payload}` | yes | | | scoped | Datagram to the client on context 0. Dropped silently above 65527 bytes or above the h3 datagram limit. On udp-bind only in a scoped bind. |
 | `{send, ContextId, Payload}` | yes | | | | Datagram on an explicit context id. |
 | `{send_data, Bytes}` | | yes | | | Bytes to the client. Blocks until written; a write that fails, or waits more than 30 s on h3 and h2, ends the tunnel with `{tunnel_send_failed, _}`. |
 | `{send_data, Bytes, Fin}` | | yes | | | Same, then FIN when `Fin` is `true`. On h3 and h2 this half-closes; on h1 it ends the tunnel. |
@@ -98,7 +98,7 @@ Actions run in list order. Unknown actions are ignored. A closing action ends th
 | `bind` | udp-bind | `scoped` or `unscoped`. |
 | `ip_target`, `ip_ipproto` | IP | `'*'`, an address, `{Version, Address, PrefixLen}` or a host name binary; `'*'` or `0..255`. |
 | `resolved_addresses` | IP | The listener resolver's answer for a host name target, the address itself for an address target, `[]` otherwise. |
-| `peer` | h3 | `{Address, Port}` of the client. |
+| `peer` | all | `{Address, Port}` of the client. |
 | `peer_cert` | h3, with a client certificate | DER. |
 
 ## init runs before the 2xx

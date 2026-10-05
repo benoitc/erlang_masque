@@ -221,6 +221,10 @@ open({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 open({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, open)}]};
+%% `masque:send/2' on a scoped bind: context 0 to the scoped target.
+open({call, From}, {send, Bytes}, #data{bind_scope = scoped} = Data) ->
+    Data1 = send_datagram(0, Bytes, Data),
+    {keep_state, Data1, [{reply, From, ok}]};
 open({call, From}, {send_to, Peer, Bytes}, Data) ->
     {Reply, Data1} = handle_send_to(Peer, Bytes, Data),
     {keep_state, Data1, [{reply, From, Reply}]};
@@ -370,6 +374,10 @@ handle_send_to({IP, Port}, Bytes, Data) ->
                     V =:= 4; V =:= 6
                 ->
                     send_compressed_inline(Id, Bytes, Data);
+                _ when Data#data.bind_scope =:= scoped ->
+                    %% Scoped bind: context 0 carries plain UDP to the
+                    %% scoped target, as in CONNECT-UDP.
+                    {ok, send_datagram(0, Bytes, Data)};
                 _ ->
                     try_uncompressed_fallback(Tuple, Bytes, Data)
             end
