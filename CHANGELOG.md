@@ -6,6 +6,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-02
+
 ### Security
 
 - Updated the QUIC library to 2.1.3 and the HTTP/2 library to 0.12.5.

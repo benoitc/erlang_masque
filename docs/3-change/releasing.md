@@ -38,7 +38,7 @@ This page lists the steps to ship a version: bump, changelog, tag, publish, docs
 
 ## Notes
 
-- The package metadata (`licenses`, `links`, `description`) lives in `src/masque.app.src`. The description still reads "MASQUE: Proxying UDP in HTTP (RFC 9298) for Erlang", which undersells what the library covers; update it before the next publish.
+- The package metadata (`licenses`, `links`, `description`) lives in `src/masque.app.src`.
 - Only `masque` and the handler behaviour are described as stable API in `masque.erl`. When a release changes an internal module only, the CHANGELOG entry can say so briefly.
 
 ## Open questions
