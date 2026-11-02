@@ -8,6 +8,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- Updated the QUIC library to 2.1.3 and the HTTP/2 library to 0.12.5.
+  This brings four QUIC security fixes: a session ticket could be used
+  to log in on another listener in the same VM, a burst of closing
+  connections could stall a listener, and a peer could fill a slow
+  process's mailbox with stream data or datagrams. Open streams also
+  keep working after a GOAWAY on both HTTP/3 and HTTP/2.
+
 - Client: target hosts must be an IP address or a valid host name and
   ports 1..65535, so a user-supplied host can no longer inject into the
   h1 CONNECT request line; the h1 CONNECT-TCP session also refuses
