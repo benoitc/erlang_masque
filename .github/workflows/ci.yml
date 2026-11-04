@@ -53,7 +53,19 @@ jobs:
       - name: PropEr
         run: rebar3 as test proper
 
+      # masque_interop_SUITE runs quic-go's MASQUE libraries against ours.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: test/interop/go.mod
+          cache-dependency-path: test/interop/go.sum
+
+      - name: Build interop helper
+        working-directory: test/interop
+        run: go build -o "$GITHUB_WORKSPACE/_build/masque_interop" .
+
       - name: Common Test
+        env:
+          MASQUE_GO_BIN: ${{ github.workspace }}/_build/masque_interop
         run: rebar3 ct
 
       - name: Upload CT logs on failure
