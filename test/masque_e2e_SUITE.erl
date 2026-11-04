@@ -15,7 +15,9 @@
     tcp_upload/1,
     tcp_full_duplex/1,
     tcp_full_duplex_large/1,
-    tcp_stalled_target/1
+    tcp_stalled_target/1,
+    tcp_quiet_tunnel/1,
+    h3_client_vanishes/1
 ]).
 
 -define(TRANSFER_BYTES, 16 * 1024 * 1024).
@@ -26,6 +28,12 @@
 %% Longer than the 30 s tunnel write timeouts, so a stall is reported
 %% by the test and not by the transport.
 -define(STALL_MS, 45000).
+%% Past QUIC's 30 s default idle timeout.
+-define(QUIET_MS, 40000).
+%% QUIC's 30 s idle timeout plus retransmission and teardown.
+-define(VANISH_MS, 45000).
+%% Field `conn' of the h3 client session records.
+-define(H3_CONN_ELEMENT, 10).
 
 suite() -> [{timetrap, {minutes, 5}}].
 
@@ -33,8 +41,15 @@ all() ->
     [{group, h3}, {group, h2}, {group, h1}].
 
 groups() ->
-    Tcp = [tcp_download, tcp_upload, tcp_full_duplex, tcp_full_duplex_large, tcp_stalled_target],
-    [{h3, [], Tcp}, {h2, [], Tcp}, {h1, [], Tcp}].
+    Tcp = [
+        tcp_download,
+        tcp_upload,
+        tcp_full_duplex,
+        tcp_full_duplex_large,
+        tcp_stalled_target,
+        tcp_quiet_tunnel
+    ],
+    [{h3, [], Tcp ++ [h3_client_vanishes]}, {h2, [], Tcp}, {h1, [], Tcp}].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(masque),
@@ -133,6 +148,49 @@ tcp_stalled_target(Config) ->
         {'DOWN', MRef, process, Sender, _} -> ok
     end,
     close(Sess).
+
+%% A tunnel with no traffic stays open until the 300 s session idle
+%% timeout, so a quiet SSH or database connection is not cut.
+tcp_quiet_tunnel(Config) ->
+    Sess = connect_tcp(Config),
+    ok = masque:send(Sess, <<"echo">>),
+    ok = masque:send(Sess, <<"before">>),
+    <<"before">> = recv_bytes(Sess, 6),
+    receive
+        {masque_closed, Sess, Reason} -> ct:fail({closed_while_quiet, Reason})
+    after ?QUIET_MS -> ok
+    end,
+    ok = masque:send(Sess, <<"after">>),
+    <<"after">> = recv_bytes(Sess, 5),
+    close(Sess).
+
+%% Keepalive must not hide a client that disappears without a word:
+%% no CONNECTION_CLOSE reaches the proxy, and its pings go unanswered.
+h3_client_vanishes(Config) ->
+    Sess = connect_tcp(Config),
+    ok = masque:send(Sess, <<"echo">>),
+    ok = masque:send(Sess, <<"x">>),
+    <<"x">> = recv_bytes(Sess, 1),
+    {_, Data} = sys:get_state(Sess),
+    QConn = quic_h3:get_quic_conn(element(?H3_CONN_ELEMENT, Data)),
+    ?assertMatch([_ | _], server_sessions()),
+    exit(Sess, kill),
+    exit(QConn, kill),
+    await_no_server_sessions(?VANISH_MS).
+
+await_no_server_sessions(Left) when Left =< 0 ->
+    ct:fail({server_session_left_behind, server_sessions()});
+await_no_server_sessions(Left) ->
+    case server_sessions() of
+        [] ->
+            ok;
+        _ ->
+            timer:sleep(500),
+            await_no_server_sessions(Left - 500)
+    end.
+
+server_sessions() ->
+    [P || P <- processes(), session_module(P) =:= [masque_tcp_server_session]].
 
 %%====================================================================
 %% Client helpers

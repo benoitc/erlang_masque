@@ -81,6 +81,7 @@ Assumptions:
 - `settings` must carry `enable_connect_protocol => 1` and `h3_datagram => 1` (`merged_settings/1` in `masque_server`).
 - In server role, body bytes of a stream nobody claimed are buffered by `quic_h3` (bounded by `max_buffered_body`; overflow resets that stream with `H3_EXCESSIVE_LOAD`). `set_stream_handler/4` with `drain_buffer => false` replays them to the new handler as messages. The default, `drain_buffer => true`, returns them in the reply instead.
 - `send_data/4` returns `{error, send_queue_full}` when the stream's queue is full.
+- QUIC closes a connection after 30 s without received packets (`idle_timeout`). Every masque client and listener sets `keep_alive_interval => auto`, so a tunnel lasts until the session idle timer ends it. Only received packets restart the QUIC timer, so a vanished peer still times out.
 
 Messages to the connection owner (router, pooled upstream owner, or client session):
 
