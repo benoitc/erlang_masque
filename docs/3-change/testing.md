@@ -67,6 +67,7 @@ End-to-end behaviour pinned to a spec. Add a case here when you implement or fix
 | Suite | Covers |
 | --- | --- |
 | `masque_lifecycle_SUITE` | sessions end on connection close, GOAWAY, stream reset and FIN; output held until finalize; TCP half-close; udp-bind teardown |
+| `masque_e2e_SUITE` | Real sockets through real listeners on h3, h2 and h1: large transfers, full duplex, stalled peers |
 | `masque_backpressure_SUITE` | `active_n` on proxy sockets: bytes arrive in order, server session mailbox stays small |
 | `masque_client_errors_SUITE` | TLS verification defaults, failed dials return `{error, _}`, no session left behind |
 | `masque_client_rx_SUITE` | queue-mode `rx_queue_limit`, `recv/2` after the peer closes |

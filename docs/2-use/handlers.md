@@ -68,6 +68,8 @@ Actions run in list order. Unknown actions are ignored. A closing action ends th
 | `{send, ContextId, Payload}` | yes | | | | Datagram on an explicit context id. |
 | `{send_data, Bytes}` | | yes | | | Bytes to the client. Blocks until written; a write that fails, or waits more than 30 s on h3 and h2, ends the tunnel with `{tunnel_send_failed, _}`. |
 | `{send_data, Bytes, Fin}` | | yes | | | Same, then FIN when `Fin` is `true`. On h3 and h2 this half-closes; on h1 it ends the tunnel. |
+| `hold_credit` | | yes | | | From `handle_data/2`: keep the flow-control credit for this chunk. On h3 and h2 the client's window does not reopen; on h1 the socket stays passive. Use it when you hand the bytes to another process, so a slow destination still slows the client. |
+| `{release_credit, N}` | | yes | | | Return credit for `N` held bytes, from any callback. On h1 the socket is re-armed once nothing is held. |
 | `{send_capsule, Type, Value}` | yes | | yes | yes | Capsule on the request stream. |
 | `{send_ip_packet, Packet}` | | | yes | | IP packet to the client on context 0. No MTU check here; the built-in handler checks before it returns this. |
 | `{assign, [#ip_assignment{}]}` | | | yes | | ADDRESS_ASSIGN. Every nonzero request id must answer an open client ADDRESS_REQUEST, otherwise the whole action is skipped. Request id 0 is an unprompted assignment. |
