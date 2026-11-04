@@ -21,6 +21,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - A client that stops reading can no longer hold an HTTP/1.1 tunnel open
   forever. The proxy now ends such a tunnel after 30 s, as it already
   did on HTTP/2 and HTTP/3.
+- Connect-UDP-Bind over HTTP/1.1 no longer loses replies from peers. The
+  client dropped datagrams that arrived on a context it had opened
+  itself, so nothing came back unless the proxy had opened one.
 
 ### Added
 

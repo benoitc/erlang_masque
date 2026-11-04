@@ -676,7 +676,7 @@ handle_context_zero(_Inner, Data) ->
     Data.
 
 handle_known_context(Ctx, Inner, Data) ->
-    case masque_compression_table:lookup_by_id(Data#data.peer_table, Ctx) of
+    case lookup_context(Ctx, Data) of
         {ok, #compression_entry{ip_version = 0}} ->
             case masque_udp_bind_payload:decode_uncompressed(Inner) of
                 {ok, {_V, IP, Port}, Pkt} ->
@@ -690,6 +690,19 @@ handle_known_context(Ctx, Inner, Data) ->
             deliver_bind_packet({A, P}, Inner, Data);
         not_found ->
             Data
+    end.
+
+%% A context carries datagrams both ways: the proxy replies on the
+%% contexts we opened (own table) as well as on its own (peer table).
+lookup_context(Ctx, #data{peer_table = PT, own_table = OT}) ->
+    case masque_compression_table:lookup_by_id(PT, Ctx) of
+        not_found ->
+            case masque_compression_table:lookup_by_id(OT, Ctx) of
+                {ok, #compression_entry{state = installed}} = Found -> Found;
+                _ -> not_found
+            end;
+        Found ->
+            Found
     end.
 
 %% The peer ended the tunnel. Queue-mode data the owner has not read
