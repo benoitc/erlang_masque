@@ -18,6 +18,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
   30 s, long before the documented 300 s idle timeout, because nothing
   kept the QUIC connection alive. Both sides now send keepalives, and a
   client that disappears is still detected.
+- A client that stops reading can no longer hold an HTTP/1.1 tunnel open
+  forever. The proxy now ends such a tunnel after 30 s, as it already
+  did on HTTP/2 and HTTP/3.
 
 ### Added
 

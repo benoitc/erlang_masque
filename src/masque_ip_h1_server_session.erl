@@ -127,6 +127,7 @@ init_session(#{
             of
                 {ok, Socket, Buffer} ->
                     Transport = socket_transport(Socket),
+                    _ = masque_tls:bound_sends(Transport, Socket),
                     State0 = arm_idle(#state{
                         transport = Transport,
                         socket = Socket,

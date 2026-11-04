@@ -16,7 +16,8 @@
 -module(masque_tls).
 -moduledoc false.
 
--export([client_opts/2, client_opts/3]).
+-define(H1_SEND_TIMEOUT, 30000).
+-export([bound_sends/2, client_opts/2, client_opts/3]).
 
 -export_type([proxy_host/0]).
 
@@ -115,3 +116,13 @@ key_of(A) when is_atom(A) -> A.
 to_bin(X) when is_binary(X) -> X;
 to_bin(X) when is_list(X) -> list_to_binary(X);
 to_bin(X) when is_atom(X) -> atom_to_binary(X, utf8).
+
+%% Make a blocked write on an h1 tunnel socket fail after 30 s and close
+%% the socket. Without it a client that stops reading holds its session
+%% forever: `ssl:send/2` blocks with no limit, and a blocked session
+%% cannot even run its idle timer.
+-spec bound_sends(ssl | gen_tcp, term()) -> ok | {error, term()}.
+bound_sends(ssl, Socket) ->
+    ssl:setopts(Socket, [{send_timeout, ?H1_SEND_TIMEOUT}, {send_timeout_close, true}]);
+bound_sends(gen_tcp, Socket) ->
+    inet:setopts(Socket, [{send_timeout, ?H1_SEND_TIMEOUT}, {send_timeout_close, true}]).

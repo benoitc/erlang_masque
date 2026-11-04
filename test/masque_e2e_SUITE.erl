@@ -17,7 +17,13 @@
     tcp_full_duplex_large/1,
     tcp_stalled_target/1,
     tcp_quiet_tunnel/1,
-    h3_client_vanishes/1
+    h3_client_vanishes/1,
+    tcp_half_close_client/1,
+    tcp_half_close_target/1,
+    tcp_target_reset/1,
+    tcp_client_close_reaches_target/1,
+    tcp_concurrent_tunnels/1,
+    tcp_stalled_client/1
 ]).
 
 -define(TRANSFER_BYTES, 16 * 1024 * 1024).
@@ -34,6 +40,10 @@
 -define(VANISH_MS, 45000).
 %% Field `conn' of the h3 client session records.
 -define(H3_CONN_ELEMENT, 10).
+%% The target reports to the running test case under this name.
+-define(PROBE, masque_e2e_probe).
+-define(CONCURRENT_TUNNELS, 50).
+-define(CONCURRENT_BYTES, 256 * 1024).
 
 suite() -> [{timetrap, {minutes, 5}}].
 
@@ -47,15 +57,29 @@ groups() ->
         tcp_full_duplex,
         tcp_full_duplex_large,
         tcp_stalled_target,
-        tcp_quiet_tunnel
+        tcp_quiet_tunnel,
+        tcp_target_reset,
+        tcp_client_close_reaches_target,
+        tcp_concurrent_tunnels,
+        tcp_stalled_client
     ],
-    [{h3, [], Tcp ++ [h3_client_vanishes]}, {h2, [], Tcp}, {h1, [], Tcp}].
+    HalfClose = [tcp_half_close_client, tcp_half_close_target],
+    [
+        {h3, [], Tcp ++ HalfClose ++ [h3_client_vanishes]},
+        {h2, [], Tcp ++ HalfClose},
+        {h1, [], Tcp}
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(masque),
     {ok, Certs} = masque_test_helpers:generate_certs(),
     {ok, Listen} = gen_tcp:listen(0, [
-        binary, {active, false}, {ip, {127, 0, 0, 1}}, {reuseaddr, true}, {backlog, 128}
+        binary,
+        {active, false},
+        {ip, {127, 0, 0, 1}},
+        {reuseaddr, true},
+        {backlog, 128},
+        {exit_on_close, false}
     ]),
     {ok, TargetPort} = inet:port(Listen),
     Target = spawn(fun() -> target_accept(Listen) end),
@@ -76,10 +100,16 @@ end_per_group(_Transport, _Config) ->
 %% Listeners link to the process that starts them, and a group's init
 %% process exits at once, so each case starts its own.
 init_per_testcase(_Case, Config) ->
+    true = register(?PROBE, self()),
     Server = start_server(?config(transport, Config), ?config(certs, Config)),
     [{server, Server} | Config].
 
 end_per_testcase(_Case, Config) ->
+    try
+        unregister(?PROBE)
+    catch
+        error:badarg -> ok
+    end,
     stop_server(?config(transport, Config), ?config(server, Config)),
     ok.
 
@@ -190,7 +220,186 @@ await_no_server_sessions(Left) ->
     end.
 
 server_sessions() ->
-    [P || P <- processes(), session_module(P) =:= [masque_tcp_server_session]].
+    [
+        P
+     || P <- processes(),
+        Mod <- session_module(P),
+        Mod =:= masque_tcp_server_session orelse Mod =:= masque_tcp_h1_server_session
+    ].
+
+%% FIN from the client leaves the path back open.
+tcp_half_close_client(Config) ->
+    Sess = connect_tcp(Config),
+    ok = masque:send(Sess, <<"gath">>),
+    ok = send_all(Sess, payload()),
+    ok = masque:shutdown_write(Sess),
+    Sum = sha(payload()),
+    ?assertEqual(Sum, recv_bytes(Sess, byte_size(Sum))),
+    close(Sess).
+
+%% FIN from the target leaves the client's path open.
+tcp_half_close_target(Config) ->
+    Sess = connect_tcp(Config),
+    ok = masque:send(Sess, <<"fin1">>),
+    <<"bye">> = recv_bytes(Sess, 3),
+    receive
+        {masque_closed, Sess, peer_fin} -> ok
+    after 5000 -> ct:fail(no_peer_fin)
+    end,
+    ok = masque:send(Sess, <<"late">>),
+    receive
+        {target, got, <<"late">>} -> ok
+    after 5000 -> ct:fail(late_bytes_lost)
+    end,
+    close(Sess).
+
+%% A target reset is not reported as a clean end.
+tcp_target_reset(Config) ->
+    Sess = connect_tcp(Config),
+    ok = masque:send(Sess, <<"rset">>),
+    <<"x">> = recv_bytes(Sess, 1),
+    Expected =
+        case ?config(transport, Config) of
+            h1 -> peer_closed;
+            _ -> peer_reset
+        end,
+    receive
+        {masque_closed, Sess, Reason} -> ?assertEqual(Expected, Reason)
+    after 5000 -> ct:fail(no_close_after_reset)
+    end.
+
+tcp_client_close_reaches_target(Config) ->
+    Sess = connect_tcp(Config),
+    ok = masque:send(Sess, <<"wclo">>),
+    <<"x">> = recv_bytes(Sess, 1),
+    close(Sess),
+    receive
+        {target, closed, Reason} -> ct:log("target saw ~p", [Reason])
+    after 5000 -> ct:fail(target_not_told)
+    end,
+    await_no_server_sessions(5000).
+
+%% Many tunnels at once, sharing a connection where the transport can.
+tcp_concurrent_tunnels(Config) ->
+    Parent = self(),
+    Pids = [
+        spawn_link(fun() -> Parent ! {done, self(), concurrent_tunnel(Config, N)} end)
+     || N <- lists:seq(1, ?CONCURRENT_TUNNELS)
+    ],
+    lists:foreach(
+        fun(Pid) ->
+            receive
+                {done, Pid, ok} -> ok;
+                {done, Pid, Other} -> ct:fail({tunnel_failed, Other})
+            after ?STALL_MS -> ct:fail(concurrent_tunnel_stuck)
+            end
+        end,
+        Pids
+    ).
+
+concurrent_tunnel(Config, N) ->
+    Target = {<<"127.0.0.1">>, ?config(target_port, Config)},
+    Sess = connect(Config, Target, #{protocol => tcp, upstream_pool => true}),
+    ok = masque:send(Sess, <<"echo">>),
+    Payload = binary:copy(<<N:32>>, ?CONCURRENT_BYTES div 4),
+    {Sender, MRef} = spawn_monitor(fun() -> exit(send_all(Sess, Payload)) end),
+    Got = recv_bytes(Sess, byte_size(Payload)),
+    receive
+        {'DOWN', MRef, process, Sender, ok} -> ok
+    after ?STALL_MS -> ct:fail(sender_stuck)
+    end,
+    close(Sess),
+    case Got =:= Payload of
+        true -> ok;
+        false -> {corrupt, N}
+    end.
+
+%% A client that takes bytes and then stops reading must not hold a
+%% proxy session forever, and the session must not buffer without limit.
+tcp_stalled_client(Config) ->
+    Handle = raw_stalled_client(?config(transport, Config), Config),
+    timer:sleep(5000),
+    ?assertMatch([_ | _], server_sessions()),
+    Peak = max_session_mailbox(),
+    ct:log("peak session mailbox ~p", [Peak]),
+    ?assert(Peak < ?MAX_MAILBOX),
+    await_no_server_sessions(?STALL_MS),
+    raw_close(?config(transport, Config), Handle).
+
+raw_stalled_client(h1, Config) ->
+    #{port := Port} = ?config(server, Config),
+    Host = iolist_to_binary(["127.0.0.1:", integer_to_list(?config(target_port, Config))]),
+    {ok, Sock} = ssl:connect(
+        "127.0.0.1",
+        Port,
+        [
+            binary,
+            {active, false},
+            {verify, verify_none},
+            {alpn_advertised_protocols, [<<"http/1.1">>]}
+        ],
+        5000
+    ),
+    ok = ssl:send(Sock, [
+        <<"CONNECT ">>, Host, <<" HTTP/1.1\r\nHost: ">>, Host, <<"\r\n\r\n">>
+    ]),
+    {ok, Reply} = ssl:recv(Sock, 0, 5000),
+    ?assertMatch(<<"HTTP/1.1 200", _/binary>>, Reply),
+    ok = ssl:send(Sock, <<"floo">>),
+    Sock;
+raw_stalled_client(h3, Config) ->
+    #{port := Port} = ?config(server, Config),
+    {ok, Conn} = quic_h3:connect("127.0.0.1", Port, #{
+        verify => verify_none,
+        sync => true,
+        settings => #{enable_connect_protocol => 1, h3_datagram => 1},
+        h3_datagram_enabled => true,
+        quic_opts => #{alpn => [<<"h3">>], max_datagram_frame_size => 65535}
+    }),
+    {ok, Sid} = quic_h3:request(Conn, tcp_request(Config), #{
+        end_stream => false, flow_control => manual
+    }),
+    receive
+        {quic_h3, Conn, {response, Sid, 200, _}} -> ok
+    after 5000 -> ct:fail(no_response)
+    end,
+    ok = quic_h3:send_data(Conn, Sid, <<"floo">>, false),
+    Conn;
+raw_stalled_client(h2, Config) ->
+    #{port := Port} = ?config(server, Config),
+    {ok, Conn} = h2:connect("127.0.0.1", Port, #{
+        transport => ssl,
+        ssl_opts => [{verify, verify_none}, {alpn_advertised_protocols, [<<"h2">>]}],
+        sync => true,
+        settings => #{enable_connect_protocol => 1}
+    }),
+    {ok, Sid} = h2:request(Conn, tcp_request(Config), #{
+        protocol => <<"connect-tcp">>, flow_control => manual
+    }),
+    receive
+        {h2, Conn, {response, Sid, 200, _}} -> ok
+    after 5000 -> ct:fail(no_response)
+    end,
+    ok = h2:send_data(Conn, Sid, <<"floo">>, false),
+    Conn.
+
+tcp_request(Config) ->
+    #{port := Port} = ?config(server, Config),
+    TargetPort = integer_to_binary(?config(target_port, Config)),
+    Base = [
+        {<<":method">>, <<"CONNECT">>},
+        {<<":scheme">>, <<"https">>},
+        {<<":authority">>, iolist_to_binary(["127.0.0.1:", integer_to_list(Port)])},
+        {<<":path">>, <<"/.well-known/masque/tcp/127.0.0.1/", TargetPort/binary, "/">>}
+    ],
+    case ?config(transport, Config) of
+        h3 -> Base ++ [{<<":protocol">>, <<"connect-tcp">>}];
+        h2 -> Base
+    end.
+
+raw_close(h1, Sock) -> ssl:close(Sock);
+raw_close(h3, Conn) -> quic_h3:close(Conn);
+raw_close(h2, Conn) -> h2:close(Conn).
 
 %%====================================================================
 %% Client helpers
@@ -342,6 +551,28 @@ target_mode(<<"echo">>, Sock) ->
 target_mode(<<"down">>, Sock) ->
     ok = gen_tcp:send(Sock, payload()),
     target_hold(Sock);
+target_mode(<<"gath">>, Sock) ->
+    Bin = target_read_all(Sock, []),
+    ok = gen_tcp:send(Sock, sha(Bin)),
+    gen_tcp:close(Sock);
+target_mode(<<"fin1">>, Sock) ->
+    ok = gen_tcp:send(Sock, <<"bye">>),
+    ok = gen_tcp:shutdown(Sock, write),
+    {ok, Late} = gen_tcp:recv(Sock, 4, 5000),
+    probe({target, got, Late}),
+    gen_tcp:close(Sock);
+target_mode(<<"rset">>, Sock) ->
+    ok = gen_tcp:send(Sock, <<"x">>),
+    timer:sleep(200),
+    ok = inet:setopts(Sock, [{linger, {true, 0}}]),
+    gen_tcp:close(Sock);
+target_mode(<<"wclo">>, Sock) ->
+    ok = gen_tcp:send(Sock, <<"x">>),
+    {error, Reason} = gen_tcp:recv(Sock, 0),
+    probe({target, closed, Reason}),
+    gen_tcp:close(Sock);
+target_mode(<<"floo">>, Sock) ->
+    target_flood(Sock, binary:copy(<<"f">>, 64 * 1024));
 target_mode(<<"stal">>, Sock) ->
     receive
     after infinity -> gen_tcp:close(Sock)
@@ -350,6 +581,26 @@ target_mode(<<"sink">>, Sock) ->
     {ok, Bin} = gen_tcp:recv(Sock, ?TRANSFER_BYTES),
     ok = gen_tcp:send(Sock, sha(Bin)),
     target_hold(Sock).
+
+target_read_all(Sock, Acc) ->
+    case gen_tcp:recv(Sock, 0) of
+        {ok, Bin} -> target_read_all(Sock, [Bin | Acc]);
+        {error, closed} -> iolist_to_binary(lists:reverse(Acc))
+    end.
+
+target_flood(Sock, Chunk) ->
+    case gen_tcp:send(Sock, Chunk) of
+        ok -> target_flood(Sock, Chunk);
+        {error, _} -> gen_tcp:close(Sock)
+    end.
+
+probe(Msg) ->
+    try
+        ?PROBE ! Msg,
+        ok
+    catch
+        error:badarg -> ok
+    end.
 
 target_echo(Sock) ->
     case gen_tcp:recv(Sock, 0) of

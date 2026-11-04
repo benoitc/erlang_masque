@@ -120,6 +120,7 @@ init_session(#{
             case h1:accept_upgrade(Conn, StreamId, UpgradeHeaders) of
                 {ok, Socket, Buffer} ->
                     Transport = socket_transport(Socket),
+                    _ = masque_tls:bound_sends(Transport, Socket),
                     PublicAddrs = read_public_addresses(Headers),
                     Families = lists:usort([
                         family_of(IP)
