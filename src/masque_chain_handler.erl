@@ -20,7 +20,9 @@ Covers all three tunnel protocols:
 - CONNECT-UDP (`protocol = udp`): packets forwarded via
   `masque:send/2` both ways.
 - CONNECT-TCP (`protocol = tcp`): bytes forwarded via
-  `masque:send/2` both ways.
+  `masque:send/2` both ways. Bytes the upstream refuses wait here with
+  their flow-control credit held, so nothing is lost and a slow
+  upstream slows the client.
 - CONNECT-IP (`protocol = ip`): IP packets forwarded via
   `masque:send_ip_packet/2`; ROUTE_ADVERTISEMENT and
   unprompted ADDRESS_ASSIGN (request_id 0) from the upstream
@@ -83,8 +85,17 @@ on the same node can still be chained together.
     id_map = #{} :: #{pos_integer() => pos_integer()},
     %% CONNECT-TCP half-close: which legs already sent FIN.
     upstream_fin = false :: boolean(),
-    downstream_fin = false :: boolean()
+    downstream_fin = false :: boolean(),
+    %% CONNECT-TCP bytes the upstream refused (full send queue), oldest
+    %% first. Their credit is held, so the client's window bounds this.
+    pending = queue:new() :: queue:queue(binary()),
+    retry_timer :: reference() | undefined,
+    %% The client's FIN arrived while bytes were still pending.
+    eof_pending = false :: boolean()
 }).
+
+%% Time before trying a refused upstream write again.
+-define(RETRY_MS, 5).
 
 -ifdef(TEST).
 test_state(Upstream, Protocol) when
@@ -241,10 +252,64 @@ handle_packet(Data, #state{upstream = Sess} = State) ->
     _ = masque:send(Sess, Data),
     {ok, State}.
 
--spec handle_data(binary(), #state{}) -> {ok, #state{}}.
-handle_data(Data, #state{upstream = Sess} = State) ->
-    _ = masque:send(Sess, Data),
-    {ok, State}.
+%% A refused write wrote nothing and a byte stream cannot lose any, so
+%% it waits here with its credit held until the upstream has room.
+-spec handle_data(binary(), #state{}) ->
+    {ok, #state{}} | {ok, #state{}, [hold_credit]} | {stop, term(), #state{}}.
+handle_data(Data, #state{pending = Pending} = State) ->
+    case queue:is_empty(Pending) of
+        false ->
+            {ok, State#state{pending = queue:in(Data, Pending)}, [hold_credit]};
+        true ->
+            case upstream_send(Data, State) of
+                ok ->
+                    {ok, State};
+                full ->
+                    {ok, arm_retry(State#state{pending = queue:in(Data, Pending)}), [hold_credit]};
+                {error, Reason} ->
+                    {stop, {upstream_send_failed, Reason}, State}
+            end
+    end.
+
+upstream_send(Data, #state{upstream = Sess}) ->
+    try masque:send(Sess, Data) of
+        ok -> ok;
+        {error, send_queue_full} -> full;
+        {error, send_buffer_full} -> full;
+        {error, _} = Err -> Err
+    catch
+        exit:Reason -> {error, Reason}
+    end.
+
+arm_retry(State) ->
+    State#state{retry_timer = erlang:send_after(?RETRY_MS, self(), masque_chain_retry)}.
+
+%% Send what the upstream takes now and give that credit back.
+drain_pending(#state{pending = Pending} = State, Released) ->
+    case queue:out(Pending) of
+        {empty, _} ->
+            drained(State#state{retry_timer = undefined}, Released);
+        {{value, Data}, Rest} ->
+            case upstream_send(Data, State) of
+                ok ->
+                    drain_pending(State#state{pending = Rest}, Released + byte_size(Data));
+                full ->
+                    {ok, arm_retry(State), release_actions(Released)};
+                {error, Reason} ->
+                    {stop, {upstream_send_failed, Reason}, State}
+            end
+    end.
+
+drained(#state{eof_pending = true} = State, Released) ->
+    case finish_eof(State#state{eof_pending = false}) of
+        {ok, State1} -> {ok, State1, release_actions(Released)};
+        {stop, _, _} = Stop -> Stop
+    end;
+drained(State, Released) ->
+    {ok, State, release_actions(Released)}.
+
+release_actions(0) -> [];
+release_actions(N) -> [{release_credit, N}].
 
 -spec handle_ip_packet(binary(), #state{}) -> {ok, #state{}}.
 handle_ip_packet(Packet, #state{upstream = Sess} = State) ->
@@ -281,7 +346,13 @@ handle_capsule(Type, Value, #state{upstream = Sess} = State) ->
     {ok, State}.
 
 -spec handle_eof(#state{}) -> {ok, #state{}} | {stop, term(), #state{}}.
-handle_eof(#state{upstream = Sess} = State) ->
+handle_eof(#state{pending = Pending} = State) ->
+    case queue:is_empty(Pending) of
+        true -> finish_eof(State);
+        false -> {ok, State#state{eof_pending = true}}
+    end.
+
+finish_eof(#state{upstream = Sess} = State) ->
     _ =
         (try
             masque:shutdown_write(Sess)
@@ -295,6 +366,8 @@ handle_eof(#state{upstream = Sess} = State) ->
 
 -spec handle_info(term(), #state{}) ->
     {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
+handle_info(masque_chain_retry, State) ->
+    drain_pending(State, 0);
 handle_info(
     {masque_data, Sess, Data},
     #state{

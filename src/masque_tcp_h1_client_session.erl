@@ -325,6 +325,7 @@ do_connect(Data, Opts) ->
         )
     of
         {ok, Socket} ->
+            _ = masque_tls:bound_sends(ssl, Socket),
             Req = connect_request(Data),
             case ssl:send(Socket, Req) of
                 ok ->

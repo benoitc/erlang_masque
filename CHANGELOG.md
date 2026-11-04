@@ -24,6 +24,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Connect-UDP-Bind over HTTP/1.1 no longer loses replies from peers. The
   client dropped datagrams that arrived on a context it had opened
   itself, so nothing came back unless the proxy had opened one.
+- A chained CONNECT-TCP tunnel no longer loses bytes when the upstream
+  is slow. Bytes the upstream refused were silently dropped; they now
+  wait, and the client is slowed down to match.
 
 ### Added
 

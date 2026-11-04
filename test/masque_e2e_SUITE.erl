@@ -36,6 +36,7 @@
     ip_two_clients/1,
     chain_tcp_full_duplex/1,
     chain_tcp_upload/1,
+    chain_tcp_upload_large/1,
     chain_udp_echo/1,
     chain_ip_echo/1,
     stop_listener_with_open_tunnels/1,
@@ -96,6 +97,7 @@ groups() ->
         ip_two_clients,
         chain_tcp_full_duplex,
         chain_tcp_upload,
+        chain_tcp_upload_large,
         chain_udp_echo,
         chain_ip_echo,
         stop_listener_with_open_tunnels,
@@ -737,6 +739,18 @@ chain_tcp_upload(Config) ->
         close(Sess)
     end).
 
+%% A target slower than the client fills the upstream leg's send queue.
+chain_tcp_upload_large(Config) ->
+    with_chain(Config, fun(Cfg) ->
+        Sess = connect_tcp(Cfg),
+        ok = masque:send(Sess, <<"slow">>),
+        Payload = binary:copy(<<"0123456789abcdef">>, ?LARGE_BYTES div 16),
+        ok = send_all(Sess, Payload),
+        Sum = sha(Payload),
+        ?assertEqual(Sum, recv_bytes(Sess, byte_size(Sum))),
+        close(Sess)
+    end).
+
 chain_udp_echo(Config) ->
     with_chain(Config, fun(Cfg) ->
         Sess = connect_udp(Cfg),
@@ -1057,6 +1071,10 @@ target_mode(<<"echo">>, Sock) ->
 target_mode(<<"down">>, Sock) ->
     ok = gen_tcp:send(Sock, payload()),
     target_hold(Sock);
+target_mode(<<"slow">>, Sock) ->
+    Sum = target_slow_sink(Sock, ?LARGE_BYTES, crypto:hash_init(sha256)),
+    ok = gen_tcp:send(Sock, Sum),
+    target_hold(Sock);
 target_mode(<<"gath">>, Sock) ->
     Bin = target_read_all(Sock, []),
     ok = gen_tcp:send(Sock, sha(Bin)),
@@ -1087,6 +1105,19 @@ target_mode(<<"sink">>, Sock) ->
     {ok, Bin} = gen_tcp:recv(Sock, ?TRANSFER_BYTES),
     ok = gen_tcp:send(Sock, sha(Bin)),
     target_hold(Sock).
+
+target_slow_sink(_Sock, 0, Ctx) ->
+    crypto:hash_final(Ctx);
+target_slow_sink(Sock, Left, Ctx) ->
+    Size = min(Left, 256 * 1024),
+    case gen_tcp:recv(Sock, Size, 20000) of
+        {ok, Bin} ->
+            timer:sleep(1),
+            target_slow_sink(Sock, Left - byte_size(Bin), crypto:hash_update(Ctx, Bin));
+        {error, Reason} ->
+            probe({target, slow_sink_failed, Reason, Left}),
+            exit(normal)
+    end.
 
 target_read_all(Sock, Acc) ->
     case gen_tcp:recv(Sock, 0) of

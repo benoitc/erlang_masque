@@ -77,7 +77,7 @@ ok = masque:send(Sess, Payload),          %% UDP datagram or TCP bytes
 ok = masque:send(Sess, ContextId, Payload), %% UDP, explicit context id
 ```
 
-`send/2,3` blocks until the session accepted the data. On UDP, a payload above 65527 bytes, or above what the h3 connection can carry in a datagram, returns an error instead of being sent. `send/2,3` exits if the session process is gone.
+`send/2,3` blocks until the session accepted the data. On CONNECT-TCP over h3 and h2 a full send queue returns `{error, send_queue_full}` (h3) or `{error, send_buffer_full}` (h2): nothing was written, so send the same bytes again shortly. Over h1, `send/2` waits instead, and fails after 30 s if the proxy stops reading. On UDP, a payload above 65527 bytes, or above what the h3 connection can carry in a datagram, returns an error instead of being sent. `send/2,3` exits if the session process is gone.
 
 In `message` mode the owner gets `{masque_data, Sess, Data}` for every payload:
 
