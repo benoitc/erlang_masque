@@ -19,6 +19,8 @@
     tcp_stalled_target/1,
     tcp_quiet_tunnel/1,
     h3_client_vanishes/1,
+    h1_udp_stalled_client/1,
+    tcp_first_bytes_survive_handover/1,
     tcp_half_close_client/1,
     tcp_half_close_target/1,
     tcp_target_reset/1,
@@ -56,8 +58,9 @@
 -define(STALL_MS, 45000).
 %% Past QUIC's 30 s default idle timeout.
 -define(QUIET_MS, 40000).
-%% QUIC's 30 s idle timeout plus retransmission and teardown.
--define(VANISH_MS, 45000).
+%% A keepalive ping after 15 s restarts QUIC's 30 s idle timer once, so
+%% the proxy gives up after 45 s, plus teardown.
+-define(VANISH_MS, 70000).
 %% Field `conn' of the h3 client session records.
 -define(H3_CONN_ELEMENT, 10).
 -define(LEAK_MS, 10000).
@@ -65,6 +68,8 @@
 %% The target reports to the running test case under this name.
 -define(PROBE, masque_e2e_probe).
 -define(CONCURRENT_TUNNELS, 50).
+-define(HANDOVER_ROUNDS, 20).
+-define(H1_HANDOVER_WAIT_MS, 50).
 -define(CONCURRENT_BYTES, 256 * 1024).
 
 suite() -> [{timetrap, {minutes, 5}}].
@@ -83,7 +88,8 @@ groups() ->
         tcp_target_reset,
         tcp_client_close_reaches_target,
         tcp_concurrent_tunnels,
-        tcp_stalled_client
+        tcp_stalled_client,
+        tcp_first_bytes_survive_handover
     ],
     HalfClose = [tcp_half_close_client, tcp_half_close_target],
     Other = [
@@ -108,7 +114,7 @@ groups() ->
             Tcp ++ HalfClose ++ Other ++
                 [h3_client_vanishes, h3_udp_quiet_tunnel, goaway_keeps_open_tunnel]},
         {h2, [], Tcp ++ HalfClose ++ Other ++ [goaway_keeps_open_tunnel]},
-        {h1, [], Tcp ++ Other}
+        {h1, [], Tcp ++ Other ++ [h1_udp_stalled_client]}
     ].
 
 init_per_suite(Config) ->
@@ -353,6 +359,40 @@ tcp_client_close_reaches_target(Config) ->
     end,
     await_no_server_sessions(5000).
 
+%% Bytes sent the moment the tunnel opens must reach the target, under
+%% enough load to expose a race in handing the socket to the session.
+tcp_first_bytes_survive_handover(Config) ->
+    case ?config(transport, Config) of
+        h1 -> {skip, "erlang_h1 loses bytes that race the socket handover; needs its fix"};
+        _ -> first_bytes_rounds(Config)
+    end.
+
+first_bytes_rounds(Config) ->
+    Parent = self(),
+    Pids = [
+        spawn_link(fun() ->
+            [first_bytes_round(Config) || _ <- lists:seq(1, ?HANDOVER_ROUNDS)],
+            Parent ! {done, self()}
+        end)
+     || _ <- lists:seq(1, ?CONCURRENT_TUNNELS)
+    ],
+    lists:foreach(
+        fun(Pid) ->
+            receive
+                {done, Pid} -> ok
+            after ?STALL_MS -> ct:fail(handover_stuck)
+            end
+        end,
+        Pids
+    ).
+
+first_bytes_round(Config) ->
+    Sess = connect_tcp(Config),
+    ok = masque:send(Sess, <<"echo">>),
+    ok = masque:send(Sess, <<"z">>),
+    <<"z">> = recv_bytes(Sess, 1),
+    close(Sess).
+
 %% Many tunnels at once, sharing a connection where the transport can.
 tcp_concurrent_tunnels(Config) ->
     Parent = self(),
@@ -478,6 +518,58 @@ raw_close(h2, Conn) -> h2:close(Conn).
 %%====================================================================
 %% CONNECT-UDP
 %%====================================================================
+
+%% Capsule writes on h1 ignore errors, so a client that stops reading
+%% must still end the session once the write timeout closes the socket.
+h1_udp_stalled_client(Config) ->
+    {Flood, FloodPort} = start_udp_flood(),
+    #{port := Port} = ?config(server, Config),
+    {ok, Sock} = ssl:connect(
+        "127.0.0.1",
+        Port,
+        [
+            binary,
+            {active, false},
+            {verify, verify_none},
+            {alpn_advertised_protocols, [<<"http/1.1">>]}
+        ],
+        5000
+    ),
+    Host = iolist_to_binary(["127.0.0.1:", integer_to_list(Port)]),
+    Path = iolist_to_binary(["/.well-known/masque/udp/127.0.0.1/", integer_to_list(FloodPort), "/"]),
+    ok = ssl:send(Sock, [
+        <<"GET ">>,
+        Path,
+        <<" HTTP/1.1\r\nHost: ">>,
+        Host,
+        <<"\r\nConnection: Upgrade\r\nUpgrade: connect-udp\r\nCapsule-Protocol: ?1\r\n\r\n">>
+    ]),
+    {ok, Reply} = ssl:recv(Sock, 0, 5000),
+    ?assertMatch(<<"HTTP/1.1 101", _/binary>>, Reply),
+    Inner = iolist_to_binary(masque_datagram:encode(0, <<"floo">>)),
+    ok = ssl:send(Sock, h1_capsule:encode(datagram, Inner)),
+    timer:sleep(5000),
+    ?assertMatch([_ | _], server_sessions()),
+    Peak = max_session_mailbox(),
+    ct:log("peak session mailbox ~p", [Peak]),
+    ?assert(Peak < ?MAX_MAILBOX),
+    await_no_server_sessions(?STALL_MS),
+    exit(Flood, kill),
+    ssl:close(Sock).
+
+start_udp_flood() ->
+    {ok, Sock} = gen_udp:open(0, [binary, {active, false}, {ip, {127, 0, 0, 1}}]),
+    {ok, Port} = inet:port(Sock),
+    Pid = spawn(fun() ->
+        {ok, {IP, From, _}} = gen_udp:recv(Sock, 0),
+        udp_flood(Sock, IP, From, binary:copy(<<"f">>, 1024))
+    end),
+    ok = gen_udp:controlling_process(Sock, Pid),
+    {Pid, Port}.
+
+udp_flood(Sock, IP, Port, Chunk) ->
+    _ = gen_udp:send(Sock, IP, Port, Chunk),
+    udp_flood(Sock, IP, Port, Chunk).
 
 udp_echo_sizes(Config) ->
     Sess = connect_udp(Config),
@@ -897,6 +989,12 @@ connect(Config, Target, Opts) ->
         Target,
         Opts#{transports => [?config(transport, Config)], verify => verify_none, timeout => 5000}
     ),
+    %% Until erlang_h1 fixes its handover race, bytes sent right after
+    %% the 200 can be lost (see `tcp_first_bytes_survive_handover').
+    case ?config(transport, Config) of
+        h1 -> timer:sleep(?H1_HANDOVER_WAIT_MS);
+        _ -> ok
+    end,
     Sess.
 
 close(Sess) ->

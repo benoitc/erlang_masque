@@ -405,7 +405,7 @@ do_actions([{icmp_error, {Kind, Spec, Invoking}} | Rest], S) when
 do_actions([{icmp_error, _Bad} | Rest], S) ->
     do_actions(Rest, S);
 do_actions([{send_capsule, Type, Value} | Rest], S) ->
-    _ = h1_upgrade:send_capsule(
+    _ = h1_send_capsule(
         S#state.transport,
         S#state.socket,
         Type,
@@ -421,7 +421,7 @@ do_actions([_Unknown | Rest], S) ->
 
 send_datagram(#state{transport = T, socket = Sock}, Ctx, Payload) ->
     Inner = iolist_to_binary(masque_datagram:encode(Ctx, Payload)),
-    h1_upgrade:send_capsule(T, Sock, datagram, Inner).
+    h1_send_capsule(T, Sock, datagram, Inner).
 
 send_assign(Entries, #state{peer_pending = Pend} = S) ->
     case consume_pending(Entries, Pend) of
@@ -429,7 +429,7 @@ send_assign(Entries, #state{peer_pending = Pend} = S) ->
             try masque_ip_capsule:encode_address_assign(Entries) of
                 Body ->
                     case
-                        h1_upgrade:send_capsule(
+                        h1_send_capsule(
                             S#state.transport,
                             S#state.socket,
                             ?MASQUE_CAPSULE_ADDRESS_ASSIGN,
@@ -450,7 +450,7 @@ reject_now([], _S) ->
     ok;
 reject_now(Requests, S) ->
     Body = masque_ip_capsule:encode_address_assign(masque_ip:reject_requests(Requests)),
-    h1_upgrade:send_capsule(
+    h1_send_capsule(
         S#state.transport, S#state.socket, ?MASQUE_CAPSULE_ADDRESS_ASSIGN, Body
     ).
 
@@ -467,7 +467,7 @@ consume_pending([#ip_assignment{request_id = Id} | Rest], Pend) ->
 send_advertise(Routes, S) ->
     try masque_ip_capsule:encode_route_advertisement(Routes) of
         Body ->
-            h1_upgrade:send_capsule(
+            h1_send_capsule(
                 S#state.transport,
                 S#state.socket,
                 ?MASQUE_CAPSULE_ROUTE_ADVERTISEMENT,
@@ -493,7 +493,7 @@ send_request(Prefixes, S) ->
     ),
     try masque_ip_capsule:encode_address_request(Entries) of
         Body ->
-            h1_upgrade:send_capsule(
+            h1_send_capsule(
                 S#state.transport,
                 S#state.socket,
                 ?MASQUE_CAPSULE_ADDRESS_REQUEST,
@@ -595,3 +595,8 @@ count_in(Bytes, #state{} = S) ->
 
 count_out(Bytes, #state{}) ->
     masque_metrics:bytes_out(iolist_size(Bytes), #{protocol => ip, transport => h1}).
+
+h1_send_capsule(Transport, Socket, Type, Payload) ->
+    masque_tls:send_failed(
+        h1_upgrade:send_capsule(Transport, Socket, Type, Payload), Transport, Socket
+    ).
