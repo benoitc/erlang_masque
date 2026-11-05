@@ -74,7 +74,7 @@ This page records design decisions that are visible in the code, with the reason
 
 - **Decision.** A CONNECT-TCP tunnel write waits for the transport (up to 30 s) and a failure stops the session.
 - **Why.** Handlers "rely on every earlier write having succeeded", for example the TCP proxy's `{active, N}` re-arm (comment in `do_actions/2` in `masque_tcp_server_session`).
-- **Consequences.** A slow client stalls the session process, and through it the target reads.
+- **Consequences.** A slow client stalls the session process, and through it the target reads. Target writes do not share this: they run in the handler's writer process, because a target blocked writing to us would otherwise never read what we write to it.
 - **Where.** `tunnel_send/3` in `masque_tcp_server_session`, `proxy_send/2` in `masque_tcp_h1_server_session`.
 
 ### Proxy sockets read in `{active, N}`

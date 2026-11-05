@@ -23,6 +23,12 @@ only once the session has written every earlier chunk to the
 tunnel, so a slow client stalls reads from the target instead of
 growing the session mailbox.
 
+Target writes run in a separate writer process, so a target that
+writes back while it is being written to cannot block the session
+from reading it. The handler holds the client's credit until each
+chunk is written (`hold_credit`, `{release_credit, N}`), so a stalled
+target still stops the client instead of growing a queue.
+
 Accepts the same policy hooks as the UDP proxy (`allow`, `resolver`,
 `family`), plus `connect_timeout` (default 5000 ms).
 """.
@@ -44,6 +50,8 @@ Accepts the same policy hooks as the UDP proxy (`allow`, `resolver`,
 
 -record(state, {
     socket :: gen_tcp:socket(),
+    writer :: pid(),
+    writer_ref :: reference(),
     active_n = ?DEFAULT_ACTIVE_N :: pos_integer(),
     eof_timer :: reference() | undefined,
     %% The client sent FIN (we shut down our write side).
@@ -97,7 +105,13 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
                     ],
                     case gen_tcp:connect(IP, Port, TcpOpts, ConnTimeout) of
                         {ok, Socket} ->
-                            {ok, #state{socket = Socket, active_n = ActiveN}};
+                            {Writer, WriterRef} = start_writer(Socket),
+                            {ok, #state{
+                                socket = Socket,
+                                writer = Writer,
+                                writer_ref = WriterRef,
+                                active_n = ActiveN
+                            }};
                         {error, Reason} ->
                             {stop, {resolution_failed, {tcp_connect, Reason}}}
                     end
@@ -106,27 +120,29 @@ init(#{target_host := Host, target_port := Port}, Opts) ->
             {stop, {resolution_failed, {resolve, Reason}}}
     end.
 
--spec handle_data(binary(), #state{}) -> {ok, #state{}} | {stop, term(), #state{}}.
-handle_data(Data, #state{socket = S} = State) ->
-    case gen_tcp:send(S, Data) of
-        ok ->
-            {ok, rearm_eof_timer(State)};
-        {error, closed} ->
-            {stop, target_closed, State};
-        {error, Reason} ->
-            {stop, {target_error, Reason}, State}
-    end.
+-spec handle_data(binary(), #state{}) -> {ok, #state{}, [hold_credit]}.
+handle_data(Data, #state{writer = Writer} = State) ->
+    Writer ! {write, Data},
+    {ok, rearm_eof_timer(State), [hold_credit]}.
 
 -spec handle_eof(#state{}) -> {ok, #state{}} | {stop, term(), #state{}}.
-handle_eof(#state{socket = S, read_closed = true} = State) ->
-    _ = gen_tcp:shutdown(S, write),
+handle_eof(#state{writer = Writer, read_closed = true} = State) ->
+    Writer ! shutdown_write,
     {stop, normal, cancel_eof_timer(State#state{write_closed = true})};
-handle_eof(#state{socket = S} = State) ->
-    _ = gen_tcp:shutdown(S, write),
+handle_eof(#state{writer = Writer} = State) ->
+    Writer ! shutdown_write,
     {ok, arm_eof_timer(State#state{write_closed = true})}.
 
 -spec handle_info(term(), #state{}) ->
     {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
+handle_info({masque_tcp_written, Writer, N}, #state{writer = Writer} = State) ->
+    {ok, rearm_eof_timer(State), [{release_credit, N}]};
+handle_info({masque_tcp_write_failed, Writer, closed}, #state{writer = Writer} = State) ->
+    {stop, target_closed, State};
+handle_info({masque_tcp_write_failed, Writer, Reason}, #state{writer = Writer} = State) ->
+    {stop, {target_error, Reason}, State};
+handle_info({'DOWN', Ref, process, _, Reason}, #state{writer_ref = Ref} = State) ->
+    {stop, {target_error, {writer_down, Reason}}, State};
 handle_info({tcp, Socket, Bytes}, #state{socket = Socket} = State) ->
     {ok, rearm_eof_timer(State), [{send_data, Bytes}]};
 handle_info({tcp_passive, Socket}, #state{socket = Socket, active_n = N} = State) ->
@@ -151,12 +167,14 @@ handle_info(_Other, State) ->
 %% reset or went away, a handler crash) aborts it with RST, so the
 %% target can tell an aborted tunnel from a finished one (RFC 9113
 %% sec 8.5, RFC 9114 sec 4.4).
-terminate(Reason, #state{socket = S}) ->
+terminate(Reason, #state{socket = S, writer = Writer, writer_ref = Ref}) ->
     _ =
         case clean_end(Reason) of
-            true -> ok;
+            true -> flush_writer(Writer, Ref);
             false -> inet:setopts(S, [{linger, {true, 0}}])
         end,
+    erlang:demonitor(Ref, [flush]),
+    exit(Writer, kill),
     _ = gen_tcp:close(S),
     ok.
 
@@ -168,6 +186,50 @@ clean_end(_) -> false.
 %%====================================================================
 %% Helpers
 %%====================================================================
+
+%%====================================================================
+%% Target writer
+%%====================================================================
+
+start_writer(Socket) ->
+    Parent = self(),
+    spawn_monitor(fun() ->
+        ParentRef = erlang:monitor(process, Parent),
+        writer_loop(Socket, Parent, ParentRef)
+    end).
+
+writer_loop(Socket, Parent, ParentRef) ->
+    receive
+        {write, Data} ->
+            case gen_tcp:send(Socket, Data) of
+                ok ->
+                    Parent ! {masque_tcp_written, self(), byte_size(Data)},
+                    writer_loop(Socket, Parent, ParentRef);
+                {error, Reason} ->
+                    Parent ! {masque_tcp_write_failed, self(), Reason}
+            end;
+        shutdown_write ->
+            _ = gen_tcp:shutdown(Socket, write),
+            writer_loop(Socket, Parent, ParentRef);
+        {flush, From, Ref} ->
+            From ! {masque_tcp_flushed, Ref},
+            writer_loop(Socket, Parent, ParentRef);
+        {'DOWN', ParentRef, process, _, _} ->
+            ok
+    after infinity ->
+        ok
+    end.
+
+%% A clean end must not lose bytes the client already sent. Each write
+%% is bounded by the socket's send timeout, and so is this wait.
+flush_writer(Writer, WriterRef) ->
+    Ref = make_ref(),
+    Writer ! {flush, self(), Ref},
+    receive
+        {masque_tcp_flushed, Ref} -> ok;
+        {'DOWN', WriterRef, process, _, _} -> ok
+    after ?TARGET_SEND_TIMEOUT -> ok
+    end.
 
 arm_eof_timer(State) ->
     State1 = cancel_eof_timer(State),

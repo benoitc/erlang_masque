@@ -50,7 +50,11 @@
     start_time :: integer() | undefined,
     %% Idle timeout (`idle_timeout_ms'), armed once the tunnel is open.
     idle_ms = ?DEFAULT_IDLE_MS :: non_neg_integer() | infinity,
-    idle :: masque_idle:idle() | undefined
+    idle :: masque_idle:idle() | undefined,
+    %% The handler kept the last chunk's credit (`hold_credit').
+    hold = false :: boolean(),
+    %% Bytes whose credit the handler has yet to release.
+    held = 0 :: non_neg_integer()
 }).
 
 %%====================================================================
@@ -195,20 +199,41 @@ claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
     h2:set_stream_handler(C, S, self(), #{flow_control => manual}).
 
 %% The stream may already be gone (its FIN was the last event).
-consume(_Tag, <<>>, _S) ->
+consume(Tag, Bytes, S) ->
+    consume_bytes(Tag, byte_size(Bytes), S).
+
+consume_bytes(_Tag, 0, _S) ->
     ok;
-consume(h2, Bytes, #state{conn = C, stream_id = Sid}) ->
+consume_bytes(h2, N, #state{conn = C, stream_id = Sid}) ->
     try
-        h2:consume(C, Sid, byte_size(Bytes))
+        h2:consume(C, Sid, N)
     catch
         exit:_ -> ok
     end;
-consume(quic_h3, Bytes, #state{conn = C, stream_id = Sid}) ->
+consume_bytes(quic_h3, N, #state{conn = C, stream_id = Sid}) ->
     try
-        quic_h3:consume(C, Sid, byte_size(Bytes))
+        quic_h3:consume(C, Sid, N)
     catch
         exit:_ -> ok
     end.
+
+%% Credit goes back now, unless the handler keeps it until it has
+%% finished with the bytes.
+settle_credit(_Tag, Bytes, {noreply, #state{hold = true, held = Held} = S2}, _S) ->
+    {noreply, S2#state{hold = false, held = Held + byte_size(Bytes)}};
+settle_credit(Tag, Bytes, Result, S) ->
+    _ = consume(Tag, Bytes, S),
+    Result.
+
+release_credit(N, #state{held = Held, transport = T} = S) ->
+    Release = min(N, Held),
+    Tag =
+        case T of
+            h3 -> quic_h3;
+            h2 -> h2
+        end,
+    _ = consume_bytes(Tag, Release, S),
+    S#state{held = Held - Release}.
 
 handle_call(
     finalize,
@@ -272,14 +297,14 @@ handle_traffic(
             {noreply, S2} when Fin -> dispatch_eof(S2);
             Other -> Other
         end,
-    _ = consume(Tag, Bytes, S),
-    Result;
+    settle_credit(Tag, Bytes, Result, S);
 handle_traffic(
     {masque_stream_data, StreamId, Bytes, Fin},
     #state{stream_id = StreamId} = S
 ) ->
     case dispatch(handle_data, [Bytes], count_in(Bytes, S)) of
-        {noreply, S2} when Fin -> dispatch_eof(S2);
+        {noreply, S2} when Fin -> dispatch_eof(S2#state{hold = false});
+        {noreply, S2} -> {noreply, S2#state{hold = false}};
         Result -> Result
     end;
 handle_traffic(
@@ -470,6 +495,10 @@ do_actions([{send_data, Bytes, Fin} | Rest], S) ->
         ok -> do_actions(Rest, S#state{fin_sent = Fin orelse S#state.fin_sent});
         {error, Reason} -> {stop, {tunnel_send_failed, Reason}, S}
     end;
+do_actions([hold_credit | Rest], S) ->
+    do_actions(Rest, S#state{hold = true});
+do_actions([{release_credit, N} | Rest], S) ->
+    do_actions(Rest, release_credit(N, S));
 do_actions([close_session | _Rest], #state{fin_sent = true} = S) ->
     {stop, normal, S};
 do_actions([close_session | _Rest], S) ->

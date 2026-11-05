@@ -47,7 +47,10 @@
     rx_limit = ?MASQUE_DEFAULT_RX_QUEUE_LIMIT :: pos_integer(),
     write_closed = false :: boolean(),
     %% Extra request headers prepended to the CONNECT line.
-    extra_headers = [] :: [{binary(), binary()}]
+    extra_headers = [] :: [{binary(), binary()}],
+    %% Writes run here so a full TLS send buffer never stops this
+    %% process reading: the peer may be blocked writing to us.
+    writer :: pid() | undefined
 }).
 
 %%====================================================================
@@ -176,18 +179,20 @@ open({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, open)}]};
 open({call, From}, {send, _Data}, #data{write_closed = true} = Data) ->
     {keep_state, Data, [{reply, From, {error, write_closed}}]};
-open({call, From}, {send, Payload}, #data{socket = Sock} = Data) ->
-    Reply = ssl:send(Sock, Payload),
-    {keep_state, Data, [{reply, From, Reply}]};
+open({call, From}, {send, Payload}, Data) ->
+    Data2 = ensure_writer(Data),
+    Data2#data.writer ! {send, From, Payload},
+    {keep_state, Data2};
 open({call, From}, {recv, Timeout}, Data) ->
     handle_recv_call(From, Timeout, Data);
 open({call, From}, {send_capsule, _, _}, Data) ->
     {keep_state, Data, [{reply, From, {error, not_supported}}]};
 open({call, From}, {set_mode, Mode}, Data) ->
     {keep_state, Data#data{mode = Mode}, [{reply, From, ok}]};
-open({call, From}, shutdown_write, #data{socket = Sock} = Data) ->
-    Reply = ssl:shutdown(Sock, write),
-    {keep_state, Data#data{write_closed = true}, [{reply, From, Reply}]};
+open({call, From}, shutdown_write, Data) ->
+    Data2 = ensure_writer(Data),
+    Data2#data.writer ! {shutdown_write, From},
+    {keep_state, Data2#data{write_closed = true}};
 open({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 open({call, From}, stop, Data) ->
@@ -234,6 +239,35 @@ closing({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, closing}}]};
 closing(_Event, _Msg, Data) ->
     {keep_state, Data}.
+
+%%====================================================================
+%% Writer
+%%====================================================================
+
+ensure_writer(#data{writer = undefined, socket = Sock} = Data) ->
+    Session = self(),
+    Writer = spawn(fun() ->
+        Ref = erlang:monitor(process, Session),
+        writer_loop(Sock, Ref)
+    end),
+    Data#data{writer = Writer};
+ensure_writer(Data) ->
+    Data.
+
+%% The caller's `send/2' returns once its write has landed, in order.
+writer_loop(Sock, Ref) ->
+    receive
+        {send, From, Payload} ->
+            gen_statem:reply(From, ssl:send(Sock, Payload)),
+            writer_loop(Sock, Ref);
+        {shutdown_write, From} ->
+            gen_statem:reply(From, ssl:shutdown(Sock, write)),
+            writer_loop(Sock, Ref);
+        {'DOWN', Ref, process, _, _} ->
+            ok
+    after infinity ->
+        ok
+    end.
 
 %%====================================================================
 %% State: closed (peer ended the tunnel, queue-mode data unread)

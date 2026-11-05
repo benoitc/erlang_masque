@@ -40,7 +40,12 @@
     req :: map(),
     start_time :: integer() | undefined,
     idle_ms :: non_neg_integer() | infinity,
-    idle_ref :: reference() | undefined
+    idle_ref :: reference() | undefined,
+    %% The handler kept the last chunk's credit (`hold_credit').
+    hold = false :: boolean(),
+    %% Bytes the handler has yet to release. The socket stays passive
+    %% until this is zero, which is what holding credit means here.
+    held = 0 :: non_neg_integer()
 }).
 
 %%====================================================================
@@ -129,7 +134,7 @@ init_session(#{
                                 {stop, Reason, S2} ->
                                     {stop, Reason, S2};
                                 State2 ->
-                                    _ = arm_once(State2),
+                                    _ = maybe_arm(State2),
                                     {ok, State2}
                             end;
                         {stop, Reason, S2} ->
@@ -215,11 +220,29 @@ emit_tunnel_closed(T) ->
 handle_proxy_bytes(Bytes, S) ->
     case dispatch(handle_data, [Bytes], count_in(Bytes, S)) of
         {noreply, S2} ->
-            _ = arm_once(S2),
-            {noreply, S2};
+            S3 = settle_hold(Bytes, S2),
+            _ = maybe_arm(S3),
+            {noreply, S3};
         Other ->
             Other
     end.
+
+settle_hold(Bytes, #state{hold = true, held = Held} = S) ->
+    S#state{hold = false, held = Held + byte_size(Bytes)};
+settle_hold(_Bytes, S) ->
+    S.
+
+maybe_arm(#state{held = 0} = S) -> arm_once(S);
+maybe_arm(_S) -> ok.
+
+release_credit(N, #state{held = Held} = S) when Held > 0, N >= Held ->
+    S2 = S#state{held = 0},
+    _ = arm_once(S2),
+    S2;
+release_credit(N, #state{held = Held} = S) when Held > 0 ->
+    S#state{held = Held - N};
+release_credit(_N, S) ->
+    S.
 
 handle_proxy_eof(#state{handler = Handler} = S) ->
     case exported(Handler, handle_eof, 1) of
@@ -236,7 +259,7 @@ seed_handler(<<>>, S) ->
     S;
 seed_handler(Bytes, S) ->
     case dispatch(handle_data, [Bytes], count_in(Bytes, S)) of
-        {noreply, S2} -> S2;
+        {noreply, S2} -> settle_hold(Bytes, S2);
         {stop, Reason, S2} -> {stop, Reason, S2}
     end.
 
@@ -310,6 +333,10 @@ do_actions([{send_data, Bytes, Fin} | Rest], S) ->
         ok -> do_actions(Rest, S);
         {error, Reason} -> {stop, {tunnel_send_failed, Reason}, S}
     end;
+do_actions([hold_credit | Rest], S) ->
+    do_actions(Rest, S#state{hold = true});
+do_actions([{release_credit, N} | Rest], S) ->
+    do_actions(Rest, release_credit(N, S));
 do_actions([close_session | _Rest], S) ->
     {stop, normal, S};
 do_actions([_Unknown | Rest], S) ->

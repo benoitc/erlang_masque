@@ -6,6 +6,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- CONNECT-TCP tunnels no longer die under heavy traffic in both
+  directions. Against a target that writes back while it is being
+  written to, such as an echo service, the proxy stopped reading the
+  target and the tunnel ended after 30 s, on every transport. The h1
+  client could also block both ends of the connection against each
+  other.
+
+### Added
+
+- A CONNECT-TCP handler can now keep the client's flow-control credit
+  for received bytes and return it later, so it can finish writing them
+  elsewhere without blocking the tunnel. See the handlers guide.
+
 ## [0.8.0] - 2026-11-02
 
 ### Security
