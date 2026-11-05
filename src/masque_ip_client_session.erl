@@ -413,6 +413,10 @@ open(info, _Msg, Data) ->
 %% A late `handshake_await' (the handshake already succeeded).
 open({call, From}, handshake_await, Data) ->
     {keep_state, Data, [{reply, From, ok}]};
+open({call, From}, migrate, #data{transport = h3, pool_owner = undefined, conn = Conn} = Data) ->
+    {keep_state, Data, [{reply, From, quic:migrate(quic_h3:get_quic_conn(Conn))}]};
+open({call, From}, migrate, #data{transport = h3} = Data) ->
+    {keep_state, Data, [{reply, From, {error, pooled}}]};
 open({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_supported}}]}.
 

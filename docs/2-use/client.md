@@ -102,6 +102,25 @@ The queue holds at most `rx_queue_limit` items. Past it, datagram tunnels (UDP, 
 #{state := open, rx_dropped := N} = masque:info(Sess).
 ```
 
+## Change networks
+
+An h3 tunnel can carry on when the client's network changes. Nothing watches the network for you: call `masque:migrate/1` when your interfaces change or the proxy stops answering.
+
+```erlang
+case masque:migrate(Sess) of
+    ok -> ok;
+    {error, no_available_connection_id} -> retry_shortly;
+    {error, Other} -> reconnect  %% not_supported, pooled
+end.
+```
+
+- `ok` means the move started, not that the new path is validated. Datagrams sent during the move may be lost; stream data is retransmitted.
+- `{error, no_available_connection_id}`: the proxy has not issued a spare connection id yet, which happens just after the handshake.
+- `{error, not_supported}` on h2 and h1. There, a network change ends the tunnel, so reconnect.
+- `{error, pooled}` on a tunnel with `upstream_pool => true`, because the connection is shared.
+
+A NAT that changes the client's address needs no call: the proxy follows it.
+
 ## Capsules
 
 UDP and IP tunnels can carry extension capsules (RFC 9297) on the request stream:

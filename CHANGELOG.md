@@ -30,6 +30,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- HTTP/3 tunnels can now survive a network change. Call the new migrate
+  function when the client's network changes, and open streams and
+  datagrams carry on from the new address, on CONNECT-TCP, CONNECT-UDP,
+  CONNECT-IP and Connect-UDP-Bind. HTTP/2 and HTTP/1.1 cannot do this.
 - A CONNECT-TCP handler can now keep the client's flow-control credit
   for received bytes and return it later, so it can finish writing them
   elsewhere without blocking the tunnel. See the handlers guide.
