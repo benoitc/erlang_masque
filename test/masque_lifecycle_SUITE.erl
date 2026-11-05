@@ -710,7 +710,10 @@ tcp_receive_window_is_bounded(Config, Transport, Chunks, Max) ->
     ?assert(Queued =< Max),
     exit(Sender, kill),
     exit(EchoPid, kill),
-    _ = masque:close(Sess).
+    _ = masque:close(Sess),
+    %% The fixture sleeps 2 s per queued chunk; don't leave that running
+    %% into the following cases and suites.
+    exit(Pid, kill).
 
 %% A slow handler start on one h2 tunnel does not hold up the start of
 %% another: sessions no longer start inside the supervisor call.

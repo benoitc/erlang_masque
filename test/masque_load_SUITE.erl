@@ -197,7 +197,15 @@ connect(Config, Target, Opts) ->
     Sess.
 
 await_no_sessions(Left) when Left =< 0 ->
-    ct:fail({sessions_left_behind, sessions()});
+    ct:fail(
+        {sessions_left_behind, [
+            {P,
+                process_info(P, [
+                    initial_call, current_stacktrace, message_queue_len, status, links, monitors
+                ])}
+         || P <- sessions()
+        ]}
+    );
 await_no_sessions(Left) ->
     case sessions() of
         [] ->
