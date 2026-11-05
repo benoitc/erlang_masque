@@ -14,6 +14,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   target and the tunnel ended after 30 s, on every transport. The h1
   client could also block both ends of the connection against each
   other.
+- HTTP/3 tunnels with no traffic stay open. A quiet tunnel was cut after
+  30 s, long before the documented 300 s idle timeout, because nothing
+  kept the QUIC connection alive. Both sides now send keepalives, and a
+  client that disappears is still detected.
 
 ### Added
 

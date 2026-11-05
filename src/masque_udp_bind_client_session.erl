@@ -1004,7 +1004,9 @@ do_connect(#data{transport = h3} = Data, Opts) ->
         h3_datagram_enabled => true,
         quic_opts => #{
             alpn => maps:get(alpn, Opts, [<<"h3">>]),
-            max_datagram_frame_size => 65535
+            max_datagram_frame_size => 65535,
+            %% QUIC closes a silent connection after 30 s; tunnels outlive that.
+            keep_alive_interval => auto
         }
     },
     case

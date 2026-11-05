@@ -90,7 +90,11 @@ build_quic_opts(Opts) ->
     Base = #{
         alpn => maps:get(alpn, Opts, [<<"h3">>]),
         max_datagram_frame_size =>
-            maps:get(max_datagram_frame_size, Opts, 65535)
+            maps:get(max_datagram_frame_size, Opts, 65535),
+        %% QUIC closes a silent connection after 30 s, well before the
+        %% session idle timeout. A vanished peer still times out, since
+        %% only received packets restart that timer.
+        keep_alive_interval => auto
     },
     %% SO_REUSEPORT lets the OS spread incoming packets across N
     %% listener processes for kernel-level scaling.
