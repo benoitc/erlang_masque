@@ -43,7 +43,11 @@
     chain_ip_echo/1,
     stop_listener_with_open_tunnels/1,
     owner_crash_cleans_up/1,
-    goaway_keeps_open_tunnel/1
+    goaway_keeps_open_tunnel/1,
+    h3_goaway_transfer_continues/1,
+    h2_goaway_tells_client/1,
+    goaway_refuses_new_requests/1,
+    goaway_pool_moves_on/1
 ]).
 %% Called through a fun in `handler_opts'.
 -export([ip_router/2]).
@@ -92,6 +96,7 @@ groups() ->
         tcp_first_bytes_survive_handover
     ],
     HalfClose = [tcp_half_close_client, tcp_half_close_target],
+    GoAway = [goaway_keeps_open_tunnel, goaway_refuses_new_requests, goaway_pool_moves_on],
     Other = [
         udp_echo_sizes,
         udp_oversize_refused,
@@ -112,8 +117,13 @@ groups() ->
     [
         {h3, [],
             Tcp ++ HalfClose ++ Other ++
-                [h3_client_vanishes, h3_udp_quiet_tunnel, goaway_keeps_open_tunnel]},
-        {h2, [], Tcp ++ HalfClose ++ Other ++ [goaway_keeps_open_tunnel]},
+                [
+                    h3_client_vanishes,
+                    h3_udp_quiet_tunnel,
+                    h3_goaway_transfer_continues
+                    | GoAway
+                ]},
+        {h2, [], Tcp ++ HalfClose ++ Other ++ [h2_goaway_tells_client | GoAway]},
         {h1, [], Tcp ++ Other ++ [h1_udp_stalled_client]}
     ].
 
@@ -462,14 +472,7 @@ raw_stalled_client(h1, Config) ->
     ok = ssl:send(Sock, <<"floo">>),
     Sock;
 raw_stalled_client(h3, Config) ->
-    #{port := Port} = ?config(server, Config),
-    {ok, Conn} = quic_h3:connect("127.0.0.1", Port, #{
-        verify => verify_none,
-        sync => true,
-        settings => #{enable_connect_protocol => 1, h3_datagram => 1},
-        h3_datagram_enabled => true,
-        quic_opts => #{alpn => [<<"h3">>], max_datagram_frame_size => 65535}
-    }),
+    Conn = raw_h3_connect(Config),
     {ok, Sid} = quic_h3:request(Conn, tcp_request(Config), #{
         end_stream => false, flow_control => manual
     }),
@@ -480,13 +483,7 @@ raw_stalled_client(h3, Config) ->
     ok = quic_h3:send_data(Conn, Sid, <<"floo">>, false),
     Conn;
 raw_stalled_client(h2, Config) ->
-    #{port := Port} = ?config(server, Config),
-    {ok, Conn} = h2:connect("127.0.0.1", Port, #{
-        transport => ssl,
-        ssl_opts => [{verify, verify_none}, {alpn_advertised_protocols, [<<"h2">>]}],
-        sync => true,
-        settings => #{enable_connect_protocol => 1}
-    }),
+    Conn = raw_h2_connect(Config),
     {ok, Sid} = h2:request(Conn, tcp_request(Config), #{
         protocol => <<"connect-tcp">>, flow_control => manual
     }),
@@ -495,6 +492,27 @@ raw_stalled_client(h2, Config) ->
     after 5000 -> ct:fail(no_response)
     end,
     ok = h2:send_data(Conn, Sid, <<"floo">>, false),
+    Conn.
+
+raw_h3_connect(Config) ->
+    #{port := Port} = ?config(server, Config),
+    {ok, Conn} = quic_h3:connect("127.0.0.1", Port, #{
+        verify => verify_none,
+        sync => true,
+        settings => #{enable_connect_protocol => 1, h3_datagram => 1},
+        h3_datagram_enabled => true,
+        quic_opts => #{alpn => [<<"h3">>], max_datagram_frame_size => 65535}
+    }),
+    Conn.
+
+raw_h2_connect(Config) ->
+    #{port := Port} = ?config(server, Config),
+    {ok, Conn} = h2:connect("127.0.0.1", Port, #{
+        transport => ssl,
+        ssl_opts => [{verify, verify_none}, {alpn_advertised_protocols, [<<"h2">>]}],
+        sync => true,
+        settings => #{enable_connect_protocol => 1}
+    }),
     Conn.
 
 tcp_request(Config) ->
@@ -972,6 +990,122 @@ goaway_keeps_open_tunnel(Config) ->
     ok = masque:send(Sess, <<"after">>),
     <<"after">> = recv_bytes(Sess, 5),
     close(Sess).
+
+%% RFC 9114 section 5.2: streams under the GOAWAY id run to completion.
+%% A whole transfer in both directions starts after it.
+h3_goaway_transfer_continues(Config) ->
+    Sess = connect_tcp(Config),
+    ok = masque:send(Sess, <<"echo">>),
+    ok = masque:send(Sess, <<"before">>),
+    <<"before">> = recv_bytes(Sess, 6),
+    ok = quic_h3:goaway(server_conn()),
+    timer:sleep(500),
+    {Sender, MRef} = spawn_monitor(fun() -> exit({sent, send_all(Sess, payload())}) end),
+    Got = recv_bytes(Sess, ?TRANSFER_BYTES),
+    receive
+        {'DOWN', MRef, process, Sender, {sent, ok}} -> ok;
+        {'DOWN', MRef, process, Sender, Other} -> ct:fail({sender, Other})
+    after ?STALL_MS -> ct:fail(sender_stuck)
+    end,
+    ?assertEqual(sha(payload()), sha(Got)),
+    close(Sess).
+
+%% `h2:goaway/1' closes the connection after its drain. The client has
+%% to hear about it and not hang.
+h2_goaway_tells_client(Config) ->
+    Sess = connect_tcp(Config),
+    ok = masque:send(Sess, <<"echo">>),
+    ok = masque:send(Sess, <<"x">>),
+    <<"x">> = recv_bytes(Sess, 1),
+    ok = h2:goaway(server_conn()),
+    receive
+        {masque_closed, Sess, Reason} -> ct:log("client told ~p", [Reason])
+    after 5000 -> ct:fail(client_not_told)
+    end.
+
+%% After a GOAWAY the client may not open new streams on the connection.
+goaway_refuses_new_requests(Config) ->
+    Sess = connect_tcp(Config),
+    ok = masque:send(Sess, <<"echo">>),
+    ok = masque:send(Sess, <<"x">>),
+    <<"x">> = recv_bytes(Sess, 1),
+    close(Sess),
+    await_no_server_sessions(5000),
+    case ?config(transport, Config) of
+        h3 -> h3_refused_after_goaway(Config);
+        h2 -> h2_refused_after_goaway(Config)
+    end.
+
+h3_refused_after_goaway(Config) ->
+    Conn = raw_h3_connect(Config),
+    {ok, Sid} = quic_h3:request(Conn, tcp_request(Config), #{end_stream => false}),
+    receive
+        {quic_h3, Conn, {response, Sid, 200, _}} -> ok
+    after 5000 -> ct:fail(no_response)
+    end,
+    ok = quic_h3:goaway(server_conn()),
+    receive
+        {quic_h3, Conn, {goaway, _}} -> ok
+    after 5000 -> ct:fail(no_goaway)
+    end,
+    ?assertMatch({error, _}, quic_h3:request(Conn, tcp_request(Config), #{end_stream => false})),
+    quic_h3:close(Conn).
+
+h2_refused_after_goaway(Config) ->
+    Conn = raw_h2_connect(Config),
+    {ok, Sid} = h2:request(Conn, tcp_request(Config), #{protocol => <<"connect-tcp">>}),
+    receive
+        {h2, Conn, {response, Sid, 200, _}} -> ok
+    after 5000 -> ct:fail(no_response)
+    end,
+    ok = h2:goaway(server_conn()),
+    receive
+        {h2, Conn, {goaway, _, _}} -> ok
+    after 5000 -> ct:fail(no_goaway)
+    end,
+    ?assertMatch(
+        {error, _}, h2:request(Conn, tcp_request(Config), #{protocol => <<"connect-tcp">>})
+    ),
+    h2:close(Conn).
+
+%% The pool stops using a connection that got a GOAWAY: new tunnels get
+%% a new connection, and they work.
+goaway_pool_moves_on(Config) ->
+    Target = {<<"127.0.0.1">>, ?config(target_port, Config)},
+    Opts = #{protocol => tcp, upstream_pool => true},
+    First = connect(Config, Target, Opts),
+    ok = masque:send(First, <<"echo">>),
+    ok = masque:send(First, <<"1">>),
+    <<"1">> = recv_bytes(First, 1),
+    [Before] = server_connections(),
+    Goaway =
+        case ?config(transport, Config) of
+            h3 -> fun quic_h3:goaway/1;
+            h2 -> fun h2:goaway/1
+        end,
+    ok = Goaway(Before),
+    timer:sleep(300),
+    Second = connect(Config, Target, Opts),
+    ok = masque:send(Second, <<"echo">>),
+    ok = masque:send(Second, <<"2">>),
+    <<"2">> = recv_bytes(Second, 1),
+    ?assert(lists:any(fun(C) -> C =/= Before end, server_connections())),
+    case ?config(transport, Config) of
+        h3 ->
+            ok = masque:send(First, <<"3">>),
+            <<"3">> = recv_bytes(First, 1);
+        h2 ->
+            ok
+    end,
+    close(First),
+    close(Second).
+
+server_conn() ->
+    [Conn | _] = server_connections(),
+    Conn.
+
+server_connections() ->
+    lists:usort([element(2, sys:get_state(P)) || P <- server_sessions()]).
 
 %%====================================================================
 %% Client helpers

@@ -414,6 +414,8 @@ open(
     {next_state, closing, Data, [{next_event, internal, do_close}]};
 open(info, _Msg, Data) ->
     {keep_state, Data};
+open({call, From}, migrate, #data{transport = h3, conn = Conn} = Data) ->
+    {keep_state, Data, [{reply, From, quic:migrate(quic_h3:get_quic_conn(Conn))}]};
 open({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_supported}}]}.
 

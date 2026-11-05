@@ -348,14 +348,14 @@ h2_server_close_notifies_client(Config) ->
     _ = h2:close(ServerConn),
     await_closed(Sess).
 
-%% A GOAWAY whose id is above the tunnel's stream leaves it running;
-%% one that covers the stream ends it with `goaway'. The events are
-%% injected: quic_h3 2.0.0 leaves calls such as `send_datagram'
-%% unanswered once it has received a real GOAWAY.
+%% A real GOAWAY leaves a running tunnel alone. No server can send one
+%% that covers an already processed stream, so that half is injected: it
+%% ends the tunnel with `goaway`.
 h3_goaway_keeps_processed_tunnel(Config) ->
     Sess = connect(Config, h3),
-    _ = await_session(),
-    Sess ! {quic_h3, self(), {goaway, 1 bsl 40}},
+    Pid = await_session(),
+    ok = quic_h3:goaway(element(2, sys:get_state(Pid))),
+    timer:sleep(200),
     ok = masque:send(Sess, <<"still here">>),
     receive
         {masque_data, Sess, <<"still here">>} -> ok
@@ -710,7 +710,10 @@ tcp_receive_window_is_bounded(Config, Transport, Chunks, Max) ->
     ?assert(Queued =< Max),
     exit(Sender, kill),
     exit(EchoPid, kill),
-    _ = masque:close(Sess).
+    _ = masque:close(Sess),
+    %% The fixture sleeps 2 s per queued chunk; don't leave that running
+    %% into the following cases and suites.
+    exit(Pid, kill).
 
 %% A slow handler start on one h2 tunnel does not hold up the start of
 %% another: sessions no longer start inside the supervisor call.

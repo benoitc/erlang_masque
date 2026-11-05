@@ -18,6 +18,7 @@ versions.
 -export([connect/3, connect/2, close/1, info/1]).
 -export([send/2, send/3, recv/2, set_mode/2]).
 -export([send_capsule/3, shutdown_write/1]).
+-export([migrate/1]).
 -export([start_listener/2, stop_listener/1]).
 -export([start_listener_h2/2, stop_listener_h2/1]).
 -export([start_listener_h1/2, stop_listener_h1/1]).
@@ -586,6 +587,22 @@ sessions. Returns `{error, not_ready}` if still connecting.
 -spec shutdown_write(session()) -> ok | {error, term()}.
 shutdown_write(Sess) when is_pid(Sess) ->
     gen_statem:call(Sess, shutdown_write).
+
+-doc """
+Move the tunnel's QUIC connection to a new local UDP port under a new
+connection id. Call it when the network changes, so the proxy sees the
+client on its new address and open tunnels carry on.
+
+HTTP/3 only: other transports return `{error, not_supported}`, and a
+tunnel on a shared pool connection returns `{error, pooled}`.
+`{error, no_available_connection_id}` means the proxy has not issued a
+spare connection id yet; the first arrives just after the handshake, so
+try again shortly. `ok` means the move has started, not that the new
+path is validated.
+""".
+-spec migrate(session()) -> ok | {error, term()}.
+migrate(Sess) when is_pid(Sess) ->
+    gen_statem:call(Sess, migrate).
 
 %%====================================================================
 %% CONNECT-IP client API (RFC 9484)

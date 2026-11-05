@@ -97,7 +97,7 @@ Messages to the connection owner (router, pooled upstream owner, or client sessi
 
 Messages to a stream handler (server session after the claim): `{quic_h3, C, {data, Sid, Data, Fin}}`, `{quic_h3, C, {stream_reset, Sid, Code}}`.
 
-Known quirks: `quic_h3:connect_opts()` does not declare `sync` and `h3_datagram_enabled`, so the client sessions carry `-dialyzer({nowarn_function, ...})`. `masque_lifecycle_SUITE` injects GOAWAY events by hand because `quic_h3` 2.0.0 leaves calls such as `send_datagram` unanswered after a real GOAWAY.
+Known quirks: `quic_h3:connect_opts()` does not declare `sync` and `h3_datagram_enabled`, so the client sessions carry `-dialyzer({nowarn_function, ...})`.
 
 ### h2
 
