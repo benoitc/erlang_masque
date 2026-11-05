@@ -123,6 +123,7 @@ init_session(#{
             of
                 {ok, Socket, Buffer} ->
                     Transport = socket_transport(Socket),
+                    _ = masque_tls:bound_sends(Transport, Socket),
                     State0 = arm_idle(#state{
                         transport = Transport,
                         socket = Socket,
@@ -336,7 +337,7 @@ do_actions([{send, Ctx, Data} | Rest], S) ->
             do_actions(Rest, S);
         false ->
             Inner = iolist_to_binary(masque_datagram:encode(Ctx, Data)),
-            _ = h1_upgrade:send_capsule(
+            _ = h1_send_capsule(
                 S#state.transport,
                 S#state.socket,
                 datagram,
@@ -345,7 +346,7 @@ do_actions([{send, Ctx, Data} | Rest], S) ->
             do_actions(Rest, S)
     end;
 do_actions([{send_capsule, Type, Value} | Rest], S) ->
-    _ = h1_upgrade:send_capsule(
+    _ = h1_send_capsule(
         S#state.transport,
         S#state.socket,
         Type,
@@ -452,3 +453,8 @@ count_in(Bytes, #state{} = S) ->
 
 count_out(Bytes, #state{}) ->
     masque_metrics:bytes_out(iolist_size(Bytes), #{protocol => udp, transport => h1}).
+
+h1_send_capsule(Transport, Socket, Type, Payload) ->
+    masque_tls:send_failed(
+        h1_upgrade:send_capsule(Transport, Socket, Type, Payload), Transport, Socket
+    ).

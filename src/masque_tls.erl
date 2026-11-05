@@ -16,7 +16,8 @@
 -module(masque_tls).
 -moduledoc false.
 
--export([client_opts/2, client_opts/3]).
+-define(H1_SEND_TIMEOUT, 30000).
+-export([bound_sends/2, send_failed/3, client_opts/2, client_opts/3]).
 
 -export_type([proxy_host/0]).
 
@@ -115,3 +116,26 @@ key_of(A) when is_atom(A) -> A.
 to_bin(X) when is_binary(X) -> X;
 to_bin(X) when is_list(X) -> list_to_binary(X);
 to_bin(X) when is_atom(X) -> atom_to_binary(X, utf8).
+
+%% Make a blocked write on an h1 tunnel socket fail after 30 s and close
+%% the socket. Without it a client that stops reading holds its session
+%% forever: `ssl:send/2` blocks with no limit, and a blocked session
+%% cannot even run its idle timer.
+-spec bound_sends(ssl | gen_tcp, term()) -> ok | {error, term()}.
+bound_sends(ssl, Socket) ->
+    ssl:setopts(Socket, [{send_timeout, ?H1_SEND_TIMEOUT}, {send_timeout_close, true}]);
+bound_sends(gen_tcp, Socket) ->
+    inet:setopts(Socket, [{send_timeout, ?H1_SEND_TIMEOUT}, {send_timeout_close, true}]).
+
+%% A failed write has closed the socket (see `bound_sends/2'), but the
+%% process reading it may never hear. Report it the way a close arrives,
+%% so a session that does not check its writes still ends.
+-spec send_failed(ok | {error, term()}, ssl | gen_tcp, term()) -> ok | {error, term()}.
+send_failed(ok, _Transport, _Socket) ->
+    ok;
+send_failed({error, _} = Err, ssl, Socket) ->
+    self() ! {ssl_closed, Socket},
+    Err;
+send_failed({error, _} = Err, gen_tcp, Socket) ->
+    self() ! {tcp_closed, Socket},
+    Err.

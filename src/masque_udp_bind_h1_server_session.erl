@@ -120,6 +120,7 @@ init_session(#{
             case h1:accept_upgrade(Conn, StreamId, UpgradeHeaders) of
                 {ok, Socket, Buffer} ->
                     Transport = socket_transport(Socket),
+                    _ = masque_tls:bound_sends(Transport, Socket),
                     PublicAddrs = read_public_addresses(Headers),
                     Families = lists:usort([
                         family_of(IP)
@@ -625,14 +626,14 @@ send_dgram(Ctx, Inner, S) ->
     S.
 
 send_bytes(Bytes, #state{transport = ssl, socket = Sock}) ->
-    _ = ssl:send(Sock, Bytes),
+    _ = masque_tls:send_failed(ssl:send(Sock, Bytes), ssl, Sock),
     masque_metrics:bytes_out(
         byte_size(Bytes),
         #{protocol => udp_bind, transport => h1}
     ),
     ok;
 send_bytes(Bytes, #state{transport = gen_tcp, socket = Sock}) ->
-    _ = gen_tcp:send(Sock, Bytes),
+    _ = masque_tls:send_failed(gen_tcp:send(Sock, Bytes), gen_tcp, Sock),
     masque_metrics:bytes_out(
         byte_size(Bytes),
         #{protocol => udp_bind, transport => h1}

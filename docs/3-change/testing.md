@@ -81,7 +81,9 @@ End-to-end behaviour pinned to a spec. Add a case here when you implement or fix
 | `masque_chain_ip_SUITE` | CONNECT-IP through a chain |
 | `masque_upstream_pool_SUITE` | pooled upstream shared by several chain tunnels |
 | `masque_two_hop_example_SUITE` | smoke test of `examples/two_hop_relay.erl` (the test profile compiles `examples/`) |
-| `masque_interop_SUITE` | an external MASQUE binary; skipped unless `MASQUE_GO_BIN` is set |
+| `masque_interop_SUITE` | quic-go's `masque-go` and `connect-ip-go` over h3, in both roles; skipped unless `MASQUE_GO_BIN` is set |
+| `masque_curl_SUITE` | real `curl` through the h1 CONNECT-TCP proxy; skipped if curl is missing |
+| `masque_load_SUITE` | busy UDP tunnels and many short tunnels; skipped unless `MASQUE_LOAD=1` |
 
 ### Property tests
 
@@ -120,14 +122,12 @@ CT logs go to `_build/test/logs/`. Open `_build/test/logs/index.html` and follow
 
 ### The interop suite
 
-`masque_interop_SUITE` drives an external MASQUE implementation through `os:cmd/1`. Without `MASQUE_GO_BIN` every case is skipped, so `rebar3 ct` stays green on a machine without it.
+`masque_interop_SUITE` runs a Go helper (`test/interop`) built on quic-go's `masque-go` and `connect-ip-go`: its CONNECT-UDP and CONNECT-IP clients through our proxy, and our client through its proxy. Without `MASQUE_GO_BIN` every case is skipped. CI builds the helper and runs the suite.
 
 ```bash
-MASQUE_GO_BIN=/path/to/masque-go MASQUE_GO_MODE=server \
-  rebar3 ct --suite test/masque_interop_SUITE
+(cd test/interop && go build -o ../../_build/masque_interop .)
+MASQUE_GO_BIN=$PWD/_build/masque_interop rebar3 ct --suite test/masque_interop_SUITE
 ```
-
-`MASQUE_GO_MODE` is `server` (default, the external binary is the proxy) or `client`.
 
 ## Known traps
 

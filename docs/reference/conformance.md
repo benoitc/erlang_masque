@@ -107,6 +107,7 @@ Open question: which revision of the draft is targeted is not recorded anywhere 
 
 Deviations and open points:
 - On HTTP/1.1, masque uses classic `CONNECT host:port` (RFC 9110) instead of the draft's upgrade; the h1 listener has no `tcp_uri_template`.
+- On HTTP/2, the listener only accepts Extended CONNECT, so a client sending classic `CONNECT host:port`, such as `curl --proxy-http2`, gets 501.
 - h1 cannot half-close: OTP `ssl` drops the connection on the peer's `close_notify`, so a FIN in either direction ends the tunnel.
 - Open question: the draft's template variables may not be `target_host` / `target_port` in the targeted revision; check before claiming interop with other implementations.
 

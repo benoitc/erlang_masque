@@ -114,6 +114,7 @@ init_session(#{
         {ok, HState, InitActions} ->
             case h1:accept_connect(Conn, StreamId, []) of
                 {ok, Transport, Socket, Buffer} ->
+                    _ = masque_tls:bound_sends(Transport, Socket),
                     State0 = arm_idle(#state{
                         transport = Transport,
                         socket = Socket,

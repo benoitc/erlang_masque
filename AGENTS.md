@@ -83,9 +83,18 @@ rebar3 xref                                          # Cross-reference analysis
 rebar3 ex_doc                                        # Generate docs
 ```
 
-`rebar3 ct` runs every suite. The interop suite (`masque_interop_SUITE`)
-self-skips unless `MASQUE_GO_BIN` points at an external MASQUE binary, so a
-normal run reports 2 skipped tests and does not cover interop.
+`rebar3 ct` runs every suite. `masque_e2e_SUITE` runs real sockets through
+real listeners on h3, h2 and h1, and any behaviour change to a tunnel needs a
+case there. `masque_interop_SUITE` runs quic-go's MASQUE libraries against ours
+and self-skips unless `MASQUE_GO_BIN` is set, so a local run without it does not
+cover interop. CI builds the helper and runs it:
+
+```bash
+(cd test/interop && go build -o ../../_build/masque_interop .)
+MASQUE_GO_BIN=$PWD/_build/masque_interop rebar3 ct --suite test/masque_interop_SUITE
+```
+
+`masque_load_SUITE` only runs with `MASQUE_LOAD=1`.
 
 ## Architecture
 

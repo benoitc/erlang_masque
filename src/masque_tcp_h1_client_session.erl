@@ -248,26 +248,36 @@ ensure_writer(#data{writer = undefined, socket = Sock} = Data) ->
     Session = self(),
     Writer = spawn(fun() ->
         Ref = erlang:monitor(process, Session),
-        writer_loop(Sock, Ref)
+        writer_loop(Sock, Ref, Session)
     end),
     Data#data{writer = Writer};
 ensure_writer(Data) ->
     Data.
 
 %% The caller's `send/2' returns once its write has landed, in order.
-writer_loop(Sock, Ref) ->
+writer_loop(Sock, Ref, Session) ->
     receive
         {send, From, Payload} ->
-            gen_statem:reply(From, ssl:send(Sock, Payload)),
-            writer_loop(Sock, Ref);
+            Result = ssl:send(Sock, Payload),
+            gen_statem:reply(From, Result),
+            report_failure(Result, Sock, Session),
+            writer_loop(Sock, Ref, Session);
         {shutdown_write, From} ->
             gen_statem:reply(From, ssl:shutdown(Sock, write)),
-            writer_loop(Sock, Ref);
+            writer_loop(Sock, Ref, Session);
         {'DOWN', Ref, process, _, _} ->
             ok
     after infinity ->
         ok
     end.
+
+%% A write timeout closes the socket without telling the process that
+%% reads it, so the session has to hear it from here.
+report_failure(ok, _Sock, _Session) ->
+    ok;
+report_failure({error, Reason}, Sock, Session) ->
+    Session ! {ssl_error, Sock, Reason},
+    ok.
 
 %%====================================================================
 %% State: closed (peer ended the tunnel, queue-mode data unread)
@@ -325,6 +335,7 @@ do_connect(Data, Opts) ->
         )
     of
         {ok, Socket} ->
+            _ = masque_tls:bound_sends(ssl, Socket),
             Req = connect_request(Data),
             case ssl:send(Socket, Req) of
                 ok ->
