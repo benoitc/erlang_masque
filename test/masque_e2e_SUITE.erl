@@ -73,7 +73,6 @@
 -define(PROBE, masque_e2e_probe).
 -define(CONCURRENT_TUNNELS, 50).
 -define(HANDOVER_ROUNDS, 20).
--define(H1_HANDOVER_WAIT_MS, 50).
 -define(CONCURRENT_BYTES, 256 * 1024).
 
 suite() -> [{timetrap, {minutes, 5}}].
@@ -372,12 +371,6 @@ tcp_client_close_reaches_target(Config) ->
 %% Bytes sent the moment the tunnel opens must reach the target, under
 %% enough load to expose a race in handing the socket to the session.
 tcp_first_bytes_survive_handover(Config) ->
-    case ?config(transport, Config) of
-        h1 -> {skip, "erlang_h1 loses bytes that race the socket handover; needs its fix"};
-        _ -> first_bytes_rounds(Config)
-    end.
-
-first_bytes_rounds(Config) ->
     Parent = self(),
     Pids = [
         spawn_link(fun() ->
@@ -1123,12 +1116,6 @@ connect(Config, Target, Opts) ->
         Target,
         Opts#{transports => [?config(transport, Config)], verify => verify_none, timeout => 5000}
     ),
-    %% Until erlang_h1 fixes its handover race, bytes sent right after
-    %% the 200 can be lost (see `tcp_first_bytes_survive_handover').
-    case ?config(transport, Config) of
-        h1 -> timer:sleep(?H1_HANDOVER_WAIT_MS);
-        _ -> ok
-    end,
     Sess.
 
 close(Sess) ->

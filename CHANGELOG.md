@@ -8,6 +8,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Bytes a client sends right after an HTTP/1.1 tunnel opens are no longer
+  lost. They could arrive while the socket was being handed over and
+  disappear, under load. This comes from the update to erlang_h1 0.9.2.
 - CONNECT-TCP tunnels no longer die under heavy traffic in both
   directions. Against a target that writes back while it is being
   written to, such as an echo service, the proxy stopped reading the
