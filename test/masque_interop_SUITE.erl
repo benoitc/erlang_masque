@@ -91,7 +91,9 @@ peer_udp_client_through_our_proxy(Config) ->
     Template = io_lib:format("https://127.0.0.1:~p~s", [Port, ?UDP_TEMPLATE]),
     Target = io_lib:format("127.0.0.1:~p", [?config(echo_port, Config)]),
     Out = run(Config, ["udp-client", "-t", Template, "-target", Target, "-payload", "ping"]),
-    ?assertEqual("echo:ping", string:trim(Out)).
+    %% quic-go may log warnings about socket buffers around the result.
+    ct:log("~s", [Out]),
+    ?assertMatch({match, _}, re:run(Out, "^echo:ping$", [multiline])).
 
 peer_ip_client_through_our_proxy(Config) ->
     #{port := Port} = ?config(server, Config),
