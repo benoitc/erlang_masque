@@ -129,7 +129,12 @@ our_udp_client_through_peer_proxy(Config) ->
     after
         {os_pid, Pid} = erlang:port_info(Port, os_pid),
         _ = os:cmd("kill " ++ integer_to_list(Pid)),
-        port_close(Port)
+        %% On Linux the port may already have closed with the process.
+        try
+            port_close(Port)
+        catch
+            error:badarg -> ok
+        end
     end.
 
 %%====================================================================
