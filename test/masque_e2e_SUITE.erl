@@ -30,8 +30,9 @@
 -define(STALL_MS, 45000).
 %% Past QUIC's 30 s default idle timeout.
 -define(QUIET_MS, 40000).
-%% QUIC's 30 s idle timeout plus retransmission and teardown.
--define(VANISH_MS, 45000).
+%% A keepalive ping after 15 s restarts QUIC's 30 s idle timer once, so
+%% the proxy gives up after 45 s, plus teardown.
+-define(VANISH_MS, 70000).
 %% Field `conn' of the h3 client session records.
 -define(H3_CONN_ELEMENT, 10).
 
