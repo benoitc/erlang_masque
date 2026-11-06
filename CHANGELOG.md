@@ -6,6 +6,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-06
+
+0.8.0 was tagged but never published to Hex. Upgrade from 0.7.0 straight
+to this release; its notes below and those of 0.8.0 both apply.
+
 ### Fixed
 
 - Bytes a client sends right after an HTTP/1.1 tunnel opens are no longer
