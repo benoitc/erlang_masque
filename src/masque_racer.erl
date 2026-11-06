@@ -353,12 +353,7 @@ pool_connect_opts(h3, _Host, Opts) ->
     Base = maps:with([verify, cacerts], Opts),
     Base#{
         connect_timeout => maps:get(timeout, Opts, 5000),
-        quic_opts => #{
-            alpn => maps:get(alpn, Opts, [<<"h3">>]),
-            max_datagram_frame_size => 65535,
-            %% QUIC closes a silent connection after 30 s; tunnels outlive that.
-            keep_alive_interval => auto
-        }
+        quic_opts => masque_quic:client_opts(Opts)
     };
 pool_connect_opts(h2, Host, Opts) ->
     #{

@@ -74,9 +74,9 @@ start_h3_listener(Name, Opts0) ->
         connection_handler := ConnectionHandler
     } =
         h3_handlers(Opts#{drain_key => Name}),
-    ServerOpts = #{
-        cert => maps:get(cert, Opts),
-        key => maps:get(key, Opts),
+    %% With an `sni_callback' in `quic_opts' the certificate is chosen
+    %% per connection, so `cert' and `key' may be left out.
+    ServerOpts = (maps:with([cert, key], Opts))#{
         settings => merged_settings(Opts),
         %% `alpn' and `max_datagram_frame_size' are not declared keys
         %% on `quic_h3:server_opts()' - they belong in `quic_opts'.
@@ -84,7 +84,14 @@ start_h3_listener(Name, Opts0) ->
         handler => Handler,
         connection_handler => ConnectionHandler
     },
-    quic_h3:start_server(Name, Port, ServerOpts).
+    case has_certificate(Opts) of
+        true -> quic_h3:start_server(Name, Port, ServerOpts);
+        false -> {error, {missing_option, cert}}
+    end.
+
+has_certificate(#{cert := _, key := _}) -> true;
+has_certificate(#{quic_opts := #{sni_callback := Fun}}) when is_function(Fun, 1) -> true;
+has_certificate(_) -> false.
 
 build_quic_opts(Opts) ->
     Base = #{
@@ -98,10 +105,13 @@ build_quic_opts(Opts) ->
     },
     %% SO_REUSEPORT lets the OS spread incoming packets across N
     %% listener processes for kernel-level scaling.
-    case maps:get(reuseport, Opts, false) of
-        true -> Base#{reuseport => true};
-        false -> Base
-    end.
+    Base1 =
+        case maps:get(reuseport, Opts, false) of
+            true -> Base#{reuseport => true};
+            false -> Base
+        end,
+    %% The caller's `quic_opts' come last, so they override the defaults.
+    maps:merge(Base1, maps:get(quic_opts, Opts, #{})).
 
 %% Stop a MASQUE listener.
 -spec stop_listener(listener_name()) -> ok | {error, term()}.

@@ -57,6 +57,8 @@ Opts = #{
 | `settings` | h3, h2 | `#{}` | Extra transport settings; the MASQUE ones are always forced on. |
 | `acceptors` | h2, h1 | library default | Acceptor processes. |
 | `reuseport`, `alpn`, `max_datagram_frame_size` | h3 | `false`, `[<<"h3">>]`, `65535` | QUIC listener tuning. |
+| `quic_opts` | h3 | `#{}` | QUIC listener options, merged over masque's defaults and winning over them. For example `sni_callback` to pick the certificate per name (then `cert` and `key` may be left out), `max_streams_bidi` to carry more than 100 tunnels per connection, `idle_timeout`, `keep_alive_interval`. |
+| `ssl_opts` | h2, h1 | `[]` | TLS options for the listening socket, for example `{sni_fun, Fun}` to pick the certificate per name. `cert` and `key` are still required. |
 
 ### Where handler options go
 
@@ -118,7 +120,7 @@ masque:connect(Proxy, Target, #{request_headers =>
     [{<<"authorization">>, <<"PrivateToken token=", Token/binary>>}]}).
 ```
 
-The request map carries `peer` (the client's address and port) on every transport. On h3 it also carries `peer_cert` (DER) when the QUIC connection has a client certificate. `start_listener/2` does not ask clients for a certificate, so `peer_cert` only shows up when you embed `masque` in your own `quic_h3` server configured for mutual TLS. The h2 and h1 libraries do not expose the client certificate, so `peer_cert` is h3 only.
+The request map carries `peer` (the client's address and port) on every transport. On h3 a listener can require client certificates with `quic_opts => #{require_client_cert => true, cacerts => TrustAnchors}`, and only certificates that chain to those anchors are accepted. The handler is meant to see the certificate as `peer_cert` (DER), but quic 2.1.4 does not return it after the handshake yet, so `peer_cert` is absent for now. The h2 and h1 libraries do not expose the client certificate either.
 
 ## Drain
 

@@ -61,7 +61,8 @@ start_h1_listener(Name, Opts0) ->
         key => maps:get(key, Opts),
         handler => Handler
     },
-    ServerOpts = maybe_add(acceptors, Opts, ServerOpts0),
+    %% `ssl_opts' are TLS options for the listening socket, such as `sni_fun'.
+    ServerOpts = maybe_add(ssl_opts, Opts, maybe_add(acceptors, Opts, ServerOpts0)),
     case h1:start_server(Name, Port, ServerOpts) of
         {ok, Ref} ->
             persistent_term:put({masque_h1_ref, Name}, Ref),

@@ -162,6 +162,10 @@ versions.
         capsule_protocol => boolean(),
         owner => pid(),
         ssl_opts => [ssl:tls_client_option()],
+        %% h3 only: QUIC connection options, merged over masque's defaults
+        %% (for example `session_ticket', `idle_timeout',
+        %% `keep_alive_interval').
+        quic_opts => map(),
         %% CONNECT-IP: local send-side MTU (1280..65535, default 1500).
         mtu => 1280..65535,
         %% Opt-in connection pooling. When `true', h2 / h3 attempts
@@ -199,6 +203,13 @@ versions.
         %% read these same keys.
         cert => term(),
         key => term(),
+        %% h3: QUIC listener options merged over masque's defaults, for
+        %% example `sni_callback', `max_streams_bidi', `require_client_cert'.
+        %% With an `sni_callback', `cert' and `key' may be left out.
+        quic_opts => map(),
+        %% h2 and h1: TLS options for the listening socket, such as
+        %% `sni_fun'.
+        ssl_opts => [ssl:tls_server_option()],
         %% CONNECT-UDP
         uri_template => binary(),
         %% CONNECT-TCP

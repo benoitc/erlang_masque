@@ -183,7 +183,13 @@ end_per_testcase(_Case, Config) ->
     catch
         error:badarg -> ok
     end,
-    Left = wait_no_server_sessions(?LEAK_MS),
+    %% A case that already failed keeps its own reason: a session left
+    %% behind by a crashed case is a symptom, not the cause.
+    Left =
+        case ?config(tc_status, Config) of
+            ok -> wait_no_server_sessions(?LEAK_MS);
+            _ -> []
+        end,
     Detail = [{session_module(P), sys:get_state(P)} || P <- Left],
     stop_server(?config(transport, Config), ?config(server, Config)),
     case Left of
@@ -616,7 +622,10 @@ udp_burst(Config) ->
     Sess = connect_udp(Config),
     Count = 2000,
     Payload = binary:copy(<<"p">>, 1024),
-    [ok = masque:send(Sess, Payload) || _ <- lists:seq(1, Count)],
+    %% QUIC refuses a datagram it has no congestion window for; UDP may
+    %% drop, so that counts as loss.
+    Results = [masque:send(Sess, Payload) || _ <- lists:seq(1, Count)],
+    [] = [R || R <- Results, R =/= ok, R =/= {error, congestion_limited}],
     Got = count_datagrams(Sess, Payload, 0),
     ct:log("udp burst: ~p of ~p echoed", [Got, Count]),
     ?assert(Got > 0),
