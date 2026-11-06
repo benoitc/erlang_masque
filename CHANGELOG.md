@@ -6,6 +6,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-06
+
+0.8.0 was tagged but never published to Hex. Upgrade from 0.7.0 straight
+to this release; its notes below and those of 0.8.0 both apply.
+
 ### Fixed
 
 - Bytes a client sends right after an HTTP/1.1 tunnel opens are no longer
@@ -30,6 +35,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - A chained CONNECT-TCP tunnel no longer loses bytes when the upstream
   is slow. Bytes the upstream refused were silently dropped; they now
   wait, and the client is slowed down to match.
+- A CONNECT-TCP tunnel over HTTP/3 is no longer reset when the path is
+  slow. The proxy gave up after 30 s if its send queue had not drained by
+  half, even while data was still flowing, so a download over a poor
+  mobile link could be cut. It now only gives up after 30 s without any
+  progress.
+- HTTP/3 is several times faster on networks that reorder packets, as
+  mobile networks do, connects in about one round trip there, and a
+  network change made while there is no network no longer loses the
+  connection. This comes from the update to quic 2.1.4.
 
 ### Added
 
