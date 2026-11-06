@@ -166,6 +166,9 @@ versions.
         %% (for example `session_ticket', `idle_timeout',
         %% `keep_alive_interval').
         quic_opts => map(),
+        %% CONNECT-TCP framing: `raw' (earlier drafts, the default) or
+        %% `capsule' (draft-ietf-httpbis-connect-tcp-10).
+        tcp_framing => raw | capsule,
         %% CONNECT-IP: local send-side MTU (1280..65535, default 1500).
         mtu => 1280..65535,
         %% Opt-in connection pooling. When `true', h2 / h3 attempts
@@ -207,6 +210,9 @@ versions.
         %% example `sni_callback', `max_streams_bidi', `require_client_cert'.
         %% With an `sni_callback', `cert' and `key' may be left out.
         quic_opts => map(),
+        %% h3 and h2: CONNECT-TCP framing, `auto' (by the request's
+        %% `capsule-protocol' header), `raw' or `capsule' (draft -10).
+        tcp_framing => auto | raw | capsule,
         %% h2 and h1: TLS options for the listening socket, such as
         %% `sni_fun'.
         ssl_opts => [ssl:tls_server_option()],

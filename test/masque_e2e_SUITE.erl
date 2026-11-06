@@ -21,6 +21,8 @@
     h3_client_vanishes/1,
     h1_udp_stalled_client/1,
     tcp_first_bytes_survive_handover/1,
+    capsule_abort_resets_target/1,
+    capsule_listener_without_header/1,
     tcp_half_close_client/1,
     tcp_half_close_target/1,
     tcp_target_reset/1,
@@ -78,7 +80,14 @@
 suite() -> [{timetrap, {minutes, 5}}].
 
 all() ->
-    [{group, h3}, {group, h2}, {group, h1}].
+    [
+        {group, h3},
+        {group, h2},
+        {group, h1},
+        {group, h3_capsule},
+        {group, h2_capsule},
+        {group, h1_capsule}
+    ].
 
 groups() ->
     Tcp = [
@@ -123,7 +132,14 @@ groups() ->
                     | GoAway
                 ]},
         {h2, [], Tcp ++ HalfClose ++ Other ++ [h2_goaway_tells_client | GoAway]},
-        {h1, [], Tcp ++ Other ++ [h1_udp_stalled_client]}
+        {h1, [], Tcp ++ Other ++ [h1_udp_stalled_client]},
+        %% CONNECT-TCP framed as in draft-ietf-httpbis-connect-tcp-10.
+        {h3_capsule, [],
+            Tcp ++ HalfClose ++ [capsule_abort_resets_target, capsule_listener_without_header]},
+        {h2_capsule, [],
+            Tcp ++ HalfClose ++ [capsule_abort_resets_target, capsule_listener_without_header]},
+        %% Capsules carry FIN, so h1 can half-close in this mode.
+        {h1_capsule, [], Tcp ++ HalfClose}
     ].
 
 init_per_suite(Config) ->
@@ -135,7 +151,9 @@ init_per_suite(Config) ->
         {ip, {127, 0, 0, 1}},
         {reuseaddr, true},
         {backlog, 128},
-        {exit_on_close, false}
+        {exit_on_close, false},
+        %% So the target can tell a reset from a clean close.
+        {show_econnreset, true}
     ]),
     {ok, TargetPort} = inet:port(Listen),
     Target = spawn(fun() -> target_accept(Listen) end),
@@ -156,8 +174,13 @@ end_per_suite(Config) ->
     masque_test_helpers:cleanup_certs(?config(certs, Config)),
     ok.
 
-init_per_group(Transport, Config) ->
-    [{transport, Transport} | Config].
+init_per_group(Group, Config) ->
+    case atom_to_list(Group) of
+        "h3_capsule" -> [{transport, h3}, {tcp_framing, capsule} | Config];
+        "h2_capsule" -> [{transport, h2}, {tcp_framing, capsule} | Config];
+        "h1_capsule" -> [{transport, h1}, {tcp_framing, capsule} | Config];
+        _ -> [{transport, Group} | Config]
+    end.
 
 end_per_group(_Transport, _Config) ->
     ok.
@@ -171,6 +194,8 @@ init_per_testcase(Case, Config) ->
     Server = start_server(Transport, Certs, case_opts(Case)),
     [{server, Server} | Config].
 
+case_opts(capsule_listener_without_header) ->
+    #{tcp_framing => capsule};
 case_opts(bind_peer_filter) ->
     #{accept_bind => true, handler_opts => #{bind_address => {127, 0, 0, 1}}};
 case_opts(_) ->
@@ -353,9 +378,11 @@ tcp_target_reset(Config) ->
     Sess = connect_tcp(Config),
     ok = masque:send(Sess, <<"rset">>),
     <<"x">> = recv_bytes(Sess, 1),
+    %% Raw h1 cannot tell a reset from a close; capsule mode can, since a
+    %% clean end sends FINAL_DATA first.
     Expected =
-        case ?config(transport, Config) of
-            h1 -> peer_closed;
+        case {?config(transport, Config), proplists:get_value(tcp_framing, Config, raw)} of
+            {h1, raw} -> peer_closed;
             _ -> peer_reset
         end,
     receive
@@ -401,6 +428,84 @@ first_bytes_round(Config) ->
     ok = masque:send(Sess, <<"z">>),
     <<"z">> = recv_bytes(Sess, 1),
     close(Sess).
+
+%% A -10 client whose stream ends without FINAL_DATA aborted the
+%% tunnel, so the target gets a reset rather than a clean close
+%% (draft-ietf-httpbis-connect-tcp-10 section 3.4).
+capsule_abort_resets_target(Config) ->
+    Headers = tcp_request(Config) ++ [{<<"capsule-protocol">>, <<"?1">>}],
+    Data = masque_tcp_capsule:encode(<<"wclo">>, false),
+    Stream =
+        case ?config(transport, Config) of
+            h3 ->
+                Conn = raw_h3_connect(Config),
+                {ok, Sid} = quic_h3:request(Conn, Headers, #{end_stream => false}),
+                receive
+                    {quic_h3, Conn, {response, Sid, 200, _}} -> ok
+                after 5000 -> ct:fail(no_response)
+                end,
+                ok = quic_h3:send_data(Conn, Sid, Data, false),
+                timer:sleep(300),
+                ok = quic_h3:send_data(Conn, Sid, <<>>, true),
+                {h3, Conn};
+            h2 ->
+                Conn = raw_h2_connect(Config),
+                {ok, Sid} = h2:request(Conn, Headers, #{protocol => <<"connect-tcp">>}),
+                receive
+                    {h2, Conn, {response, Sid, 200, _}} -> ok
+                after 5000 -> ct:fail(no_response)
+                end,
+                ok = h2:send_data(Conn, Sid, Data, false),
+                timer:sleep(300),
+                ok = h2:send_data(Conn, Sid, <<>>, true),
+                {h2, Conn}
+        end,
+    receive
+        {target, closed, Reason} -> ?assertEqual(econnreset, Reason)
+    after 5000 -> ct:fail(target_not_told)
+    end,
+    case Stream of
+        {h3, C} -> quic_h3:close(C);
+        {h2, C} -> h2:close(C)
+    end.
+
+%% A -10 client may leave `capsule-protocol' out. A listener set to
+%% `tcp_framing => capsule' still frames its tunnel in capsules.
+capsule_listener_without_header(Config) ->
+    Headers = tcp_request(Config),
+    Echo = masque_tcp_capsule:encode(<<"echo">>, false),
+    Ping = masque_tcp_capsule:encode(<<"ping">>, false),
+    case ?config(transport, Config) of
+        h3 ->
+            Conn = raw_h3_connect(Config),
+            {ok, Sid} = quic_h3:request(Conn, Headers, #{end_stream => false}),
+            receive
+                {quic_h3, Conn, {response, Sid, 200, _}} -> ok
+            after 5000 -> ct:fail(no_response)
+            end,
+            ok = quic_h3:send_data(Conn, Sid, <<Echo/binary, Ping/binary>>, false),
+            ?assertEqual(Ping, raw_recv(quic_h3, Conn, Sid, byte_size(Ping), <<>>)),
+            quic_h3:close(Conn);
+        h2 ->
+            Conn = raw_h2_connect(Config),
+            {ok, Sid} = h2:request(Conn, Headers, #{protocol => <<"connect-tcp">>}),
+            receive
+                {h2, Conn, {response, Sid, 200, _}} -> ok
+            after 5000 -> ct:fail(no_response)
+            end,
+            ok = h2:send_data(Conn, Sid, <<Echo/binary, Ping/binary>>, false),
+            ?assertEqual(Ping, raw_recv(h2, Conn, Sid, byte_size(Ping), <<>>)),
+            h2:close(Conn)
+    end.
+
+raw_recv(_Tag, _Conn, _Sid, Want, Acc) when byte_size(Acc) >= Want ->
+    Acc;
+raw_recv(Tag, Conn, Sid, Want, Acc) ->
+    receive
+        {Tag, Conn, {data, Sid, Bin, _}} ->
+            raw_recv(Tag, Conn, Sid, Want, <<Acc/binary, Bin/binary>>)
+    after 5000 -> ct:fail({no_data, Acc})
+    end.
 
 %% Many tunnels at once, sharing a connection where the transport can.
 tcp_concurrent_tunnels(Config) ->
@@ -1117,7 +1222,14 @@ connect_tcp(Config) ->
     Target = {<<"127.0.0.1">>, ?config(target_port, Config)},
     connect(Config, Target, #{protocol => tcp}).
 
-connect(Config, Target, Opts) ->
+connect(Config, Target, Opts0) ->
+    Opts =
+        case {Opts0, proplists:get_value(tcp_framing, Config)} of
+            {#{protocol := tcp}, Framing} when Framing =/= undefined ->
+                Opts0#{tcp_framing => Framing};
+            _ ->
+                Opts0
+        end,
     #{port := Port} = ?config(server, Config),
     Uri = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
     {ok, Sess} = masque:connect(

@@ -15,6 +15,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   it now hands to you after each handshake.
 - HTTP/2 and HTTP/1.1 listeners take TLS options, for example to pick the
   certificate per server name.
+- CONNECT-TCP now also speaks the current draft (connect-tcp-10), where
+  bytes travel in capsules and HTTP/1.1 uses an upgrade. Listeners answer
+  both forms; clients choose it with a new option and keep the earlier
+  form by default. With it, HTTP/1.1 tunnels can half-close, and an
+  aborted tunnel resets the target instead of closing it cleanly.
 
 ### Fixed
 

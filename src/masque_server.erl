@@ -612,7 +612,9 @@ handler_opt_keys() ->
         max_compression_contexts,
         max_compression_contexts_in,
         max_compression_contexts_out,
-        max_pending_compression_responses
+        max_pending_compression_responses,
+        %% CONNECT-TCP framing on h3 and h2: auto, raw or capsule
+        tcp_framing
     ].
 
 %% Listener names are shared by the drain flags of every transport, so

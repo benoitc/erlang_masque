@@ -67,7 +67,14 @@
     %% When set, the conn is owned by a `masque_upstream_owner';
     %% teardown releases the stream back to the pool instead of
     %% closing the conn.
-    pool_owner :: pid() | undefined
+    pool_owner :: pid() | undefined,
+    %% `raw' bytes (older connect-tcp drafts) or `capsule' framing
+    %% (draft-ietf-httpbis-connect-tcp-10), from the `tcp_framing' option.
+    framing = raw :: raw | capsule,
+    %% Capsule mode: bytes of a capsule still being received.
+    cap_buf = <<>> :: binary(),
+    %% Capsule mode: the proxy sent FINAL_DATA.
+    final_in = false :: boolean()
 }).
 
 %%====================================================================
@@ -136,7 +143,8 @@ init({Target, Opts, Owner}) ->
         extra_headers = sanitise_extra_headers(
             maps:get(request_headers, Opts, [])
         ),
-        pool_owner = maps:get(pool_owner, Opts, undefined)
+        pool_owner = maps:get(pool_owner, Opts, undefined),
+        framing = maps:get(tcp_framing, Opts, raw)
     },
     {ok, connecting, Data, [{next_event, internal, {do_handshake, Opts}}]}.
 
@@ -200,7 +208,7 @@ connecting(
     cancel_timer(Data#data.timeout_ref),
     case Status of
         S when S >= 200, S < 300 ->
-            case check_response(Headers) of
+            case check_response(Headers, Data#data.framing) of
                 ok ->
                     reply_handshake(Data, ok),
                     {next_state, open, Data#data{
@@ -271,7 +279,7 @@ open({call, From}, shutdown_write, #data{write_closed = true} = Data) ->
 open({call, From}, shutdown_write, #data{read_closed = true} = Data) ->
     %% Both directions are done: end the session, keeping queue-mode
     %% data the owner has not read yet.
-    case transport_send_data(Data, <<>>, true) of
+    case transport_send_data(Data, frame(Data, <<>>, true), true) of
         ok ->
             case masque_client_rx:keep_unread(Data#data.mode, Data#data.rx_buf) of
                 true ->
@@ -284,7 +292,7 @@ open({call, From}, shutdown_write, #data{read_closed = true} = Data) ->
             {keep_state, Data, [{reply, From, Err}]}
     end;
 open({call, From}, shutdown_write, Data) ->
-    case transport_send_data(Data, <<>>, true) of
+    case transport_send_data(Data, frame(Data, <<>>, true), true) of
         ok ->
             {keep_state, Data#data{write_closed = true}, [{reply, From, ok}]};
         Err ->
@@ -295,6 +303,28 @@ open({call, From}, stop, Data) ->
         {reply, From, ok},
         {next_event, internal, do_close}
     ]};
+%% Incoming stream data in capsule mode: DATA and FINAL_DATA payloads
+%% are the TCP bytes. A stream that ends without FINAL_DATA is an abort
+%% (draft-ietf-httpbis-connect-tcp-10 section 3.4).
+open(
+    info,
+    {Tag, _Conn, {data, StreamId, Bytes, Fin}},
+    #data{stream_id = StreamId, framing = capsule, cap_buf = Buf} = Data
+) when
+    Tag =:= quic_h3; Tag =:= h2
+->
+    case masque_tcp_capsule:decode(Buf, Bytes, ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE) of
+        {error, Reason} ->
+            end_tunnel(Reason, {stop, Reason, Data}, Data);
+        {ok, Items, Rest} ->
+            Payload = iolist_to_binary([P || {_, P} <- Items]),
+            Final = lists:keymember(final, 1, Items),
+            Data1 = Data#data{cap_buf = Rest, final_in = Data#data.final_in orelse Final},
+            case Fin andalso not Data1#data.final_in of
+                true -> end_tunnel(peer_reset, {stop, peer_reset, Data1}, Data1);
+                false -> stream_in(Payload, Final, Data1)
+            end
+    end;
 %% Incoming stream data - raw TCP bytes (no capsule decoding)
 open(
     info,
@@ -303,19 +333,7 @@ open(
 ) when
     Tag =:= quic_h3; Tag =:= h2
 ->
-    case deliver(Bytes, Data) of
-        {overflow, Data2} ->
-            rx_overflow(Data2);
-        #data{write_closed = true} = Data2 when Fin ->
-            end_tunnel(peer_fin, {stop, normal, Data2}, Data2);
-        Data2 when Fin ->
-            %% Half-close: the owner learns the peer is done sending,
-            %% its own direction stays open.
-            _ = notify_owner_closed(peer_fin, Data2),
-            {keep_state, read_fin(Data2)};
-        Data2 ->
-            {keep_state, Data2}
-    end;
+    stream_in(Bytes, Fin, Data);
 open(
     info,
     {Tag, _Conn, {stream_reset, StreamId, _}},
@@ -374,7 +392,7 @@ closing(internal, do_close, #data{write_closed = true} = Data) ->
     finish(Data);
 closing(internal, do_close, Data) ->
     _ =
-        try transport_send_data(Data, <<>>, true) of
+        try transport_send_data(Data, frame(Data, <<>>, true), true) of
             ok ->
                 ok;
             _ ->
@@ -602,8 +620,29 @@ verify_h2_peer_settings(Conn) ->
         _ -> {error, no_extended_connect}
     end.
 
+%% TCP bytes from the proxy, and whether they end its side.
+stream_in(Bytes, Fin, Data) ->
+    case deliver(Bytes, Data) of
+        {overflow, Data2} ->
+            rx_overflow(Data2);
+        #data{write_closed = true} = Data2 when Fin ->
+            end_tunnel(peer_fin, {stop, normal, Data2}, Data2);
+        Data2 when Fin ->
+            %% Half-close: the owner learns the peer is done sending,
+            %% its own direction stays open.
+            _ = notify_owner_closed(peer_fin, Data2),
+            {keep_state, read_fin(Data2)};
+        Data2 ->
+            {keep_state, Data2}
+    end.
+
 send_out(#data{} = Data, Payload) ->
-    transport_send_data(Data, iolist_to_binary(Payload), false).
+    transport_send_data(Data, frame(Data, iolist_to_binary(Payload), false), false).
+
+%% Bytes for the stream: as they are in raw mode, as DATA or FINAL_DATA
+%% in capsule mode.
+frame(#data{framing = capsule}, Bytes, Fin) -> masque_tcp_capsule:encode(Bytes, Fin);
+frame(_Data, Bytes, _Fin) -> Bytes.
 
 transport_send_data(#data{transport = h3, conn = C, stream_id = S}, Bytes, Fin) ->
     quic_h3:send_data(C, S, Bytes, Fin);
@@ -619,6 +658,7 @@ transport_close(#data{transport = h3, conn = C}) -> quic_h3:close(C);
 transport_close(#data{transport = h2, conn = C}) -> h2:close(C).
 
 request_headers(#data{
+    framing = Framing,
     proxy_host = ProxyHost,
     proxy_port = ProxyPort,
     target_host = TargetHost,
@@ -637,11 +677,16 @@ request_headers(#data{
         {<<":scheme">>, <<"https">>},
         {<<":authority">>, Authority},
         {<<":path">>, Path}
-    ] ++ Extra.
+    ] ++ framing_headers(Framing) ++ Extra.
+
+framing_headers(capsule) -> [{<<"capsule-protocol">>, <<"?1">>}];
+framing_headers(raw) -> [].
 
 %% A CONNECT-TCP 2xx must not switch the stream to capsules: the
 %% tunnel carries raw bytes (draft-ietf-httpbis-connect-tcp).
-check_response(Headers) ->
+check_response(_Headers, capsule) ->
+    ok;
+check_response(Headers, raw) ->
     case proplists:get_value(<<"capsule-protocol">>, Headers) of
         <<"?1", _/binary>> -> {error, {bad_response, capsule_protocol}};
         _ -> ok

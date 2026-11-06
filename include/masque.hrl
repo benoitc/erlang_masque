@@ -47,6 +47,11 @@
 %% `max_capsule_size' in `connect_opts' / listener `handler_opts'.
 -define(MASQUE_DEFAULT_MAX_CAPSULE_SIZE, 65536).
 
+%% CONNECT-TCP capsules, draft-ietf-httpbis-connect-tcp-10 section 8.3.
+%% Provisional code points the draft gives for testing.
+-define(MASQUE_CAPSULE_DATA, 16#2028d7f0).
+-define(MASQUE_CAPSULE_FINAL_DATA, 16#2028d7f1).
+
 %% Tunnels one client connection may hold (h3, h2); 0 means no limit.
 -define(MASQUE_DEFAULT_MAX_TUNNELS, 100).
 

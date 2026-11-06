@@ -66,7 +66,7 @@ This page records design decisions that are visible in the code, with the reason
 
 ### CONNECT-TCP over h1 cannot half-close
 
-- **Decision.** A FIN in either direction ends an h1 CONNECT-TCP tunnel.
+- **Decision.** In raw framing, a FIN in either direction ends an h1 CONNECT-TCP tunnel. Capsule framing (draft -10) carries the FIN in `FINAL_DATA` and can half-close.
 - **Why.** "OTP `ssl` drops the connection on the peer's close_notify, so a TLS tunnel cannot half-close" (comment in `masque_tcp_h1_server_session`, CHANGELOG).
 - **Where.** `masque_tcp_h1_server_session`, `masque_tcp_h1_client_session`.
 
@@ -187,7 +187,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q7.** Settled: `masque.tunnels.*` covers every protocol and transport; each server session reports one open and one close.
 - **Q8.** How stable are internal message shapes (`masque_datagram_in`, `masque_finalized`, `dial_result`, `owner_capacity`)?
 - **Q9.** Versioning: the 0.6.0 CHANGELOG entry and the v0.5/v0.6 tags are missing; is hex publishing planned?
-- **Q10.** Which connect-tcp draft revision is targeted?
+- **Q10.** Settled: masque speaks draft-ietf-httpbis-connect-tcp-10 in capsule framing and the earlier raw framing, raw by default on the client (see [connect-tcp](../2-use/connect-tcp.md#two-framings)). Switching the default is a later decision.
 - **Q11.** Settled: udp-bind is never pooled; `upstream_pool` is ignored and no pooled connection is checked out.
 - **Q12.** Is `masque_capsule` meant to become the single capsule codec? Today `quic_h3_capsule` (through `masque_capsule`), `h2_capsule` and `h1_capsule` are all used.
 - **Q13.** Settled: [a handler crash ends the tunnel](#a-handler-crash-ends-the-tunnel).

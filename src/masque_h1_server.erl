@@ -102,6 +102,7 @@ h1_handlers(Opts0) ->
 defaults(Opts) ->
     D = #{
         uri_template => ?MASQUE_DEFAULT_URI_TEMPLATE,
+        tcp_uri_template => ?MASQUE_DEFAULT_TCP_URI_TEMPLATE,
         ip_uri_template => ?MASQUE_DEFAULT_IP_URI_PATH_PATTERN,
         handler => masque_udp_proxy_handler,
         ip_handler => masque_ip_proxy_handler,
@@ -120,6 +121,7 @@ maybe_add(Key, From, Into) ->
 build_dispatch(Opts) ->
     #{
         udp_template => maps:get(uri_template, Opts),
+        tcp_template => maps:get(tcp_uri_template, Opts),
         udp_handler => maps:get(handler, Opts),
         ip_template => maps:get(ip_uri_template, Opts),
         ip_handler => maps:get(ip_handler, Opts),
@@ -188,7 +190,8 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
         masque_udp_bind_proxy_handler
     ),
     AcceptBind = maps:get(accept_bind, Dispatch, false),
-    case validate(Method, Path, Headers, UdpTpl, IpTpl, AcceptBind) of
+    TcpTpl = maps:get(tcp_template, Dispatch, ?MASQUE_DEFAULT_TCP_URI_TEMPLATE),
+    case validate_any(Method, Path, Headers, TcpTpl, UdpTpl, IpTpl, AcceptBind) of
         {ok, Req0} ->
             Protocol = maps:get(protocol, Req0),
             HandlerMod =
@@ -320,6 +323,44 @@ validate_get(Path, Headers, UdpTemplate, IpTemplate, AcceptBind) ->
                     %% RFC 9298 sec 3.2 / RFC 9110 sec 7.8: an upgrade
                     %% request carries `Connection: Upgrade'.
                     {error, bad_protocol}
+            end
+    end.
+
+%% CONNECT-TCP as in draft-ietf-httpbis-connect-tcp-10: `GET' with
+%% `Upgrade: connect-tcp' on the TCP template, framed in capsules.
+%% Everything else, classic CONNECT included, is validated as before.
+validate_any(<<"GET">> = Method, Path, Headers, TcpTpl, UdpTpl, IpTpl, AcceptBind) ->
+    case is_tcp_upgrade(Headers) of
+        true -> validate_tcp_upgrade(Path, Headers, TcpTpl);
+        false -> validate(Method, Path, Headers, UdpTpl, IpTpl, AcceptBind)
+    end;
+validate_any(Method, Path, Headers, _TcpTpl, UdpTpl, IpTpl, AcceptBind) ->
+    validate(Method, Path, Headers, UdpTpl, IpTpl, AcceptBind).
+
+is_tcp_upgrade(Headers) ->
+    has_upgrade_token(header(<<"connection">>, Headers)) andalso
+        lowercase_bin(header(<<"upgrade">>, Headers)) =:= ?MASQUE_CONNECT_TCP_PROTOCOL.
+
+validate_tcp_upgrade(Path, Headers, Template) ->
+    case header(<<"host">>, Headers) of
+        undefined ->
+            {error, bad_host};
+        Host ->
+            case masque_uri:match(Template, Path) of
+                {ok, #{target_host := TargetHost, target_port := TargetPort}} ->
+                    {ok, #{
+                        method => <<"GET">>,
+                        protocol => tcp,
+                        tcp_framing => capsule,
+                        path => Path,
+                        authority => Host,
+                        scheme => <<"https">>,
+                        target_host => TargetHost,
+                        target_port => TargetPort,
+                        headers => Headers
+                    }};
+                _ ->
+                    {error, bad_path}
             end
     end.
 

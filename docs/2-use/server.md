@@ -48,7 +48,8 @@ Opts = #{
 | `handler`, `tcp_handler`, `ip_handler`, `bind_handler` | all | built-in proxy handlers | Handler module per protocol. |
 | `handler_opts` | all | `#{}` | Passed to every handler's `init/2` and visible in `accept/1` as `handler_opts`. |
 | `uri_template` | all | `/.well-known/masque/udp/{target_host}/{target_port}/` | CONNECT-UDP and Connect-UDP-Bind path. |
-| `tcp_uri_template` | h3, h2 | `/.well-known/masque/tcp/{target_host}/{target_port}/` | CONNECT-TCP path (h1 uses classic CONNECT, no template). |
+| `tcp_framing` | h3, h2 | `auto` | CONNECT-TCP framing: `auto` follows the request's `capsule-protocol` header, `capsule` serves draft -10 clients that leave it out, `raw` only the earlier framing. See [connect-tcp](connect-tcp.md#two-framings). |
+| `tcp_uri_template` | all | `/.well-known/masque/tcp/{target_host}/{target_port}/` | CONNECT-TCP path. On h1 it is used by the draft -10 upgrade; classic CONNECT has no template. |
 | `ip_uri_template` | all | `/.well-known/masque/ip/{target}/{ipproto}/` | CONNECT-IP path. |
 | `accept_bind` | all | `false` | Accept Connect-UDP-Bind on the UDP template. See [connect-udp-bind](connect-udp-bind.md). |
 | `resolver` | all | A + AAAA lookup | Resolves CONNECT-IP host name targets before `accept/1`. Returns `{ok, [Address]}`. |

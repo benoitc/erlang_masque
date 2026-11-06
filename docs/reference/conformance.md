@@ -96,20 +96,23 @@ Stream and connection semantics from RFC 9114 and RFC 9113 that the sessions rel
 
 ## draft-ietf-httpbis-connect-tcp
 
-Open question: which revision of the draft is targeted is not recorded anywhere in the repository.
+masque implements draft-ietf-httpbis-connect-tcp-10 in capsule framing, and the earlier raw framing, which stays the client default. See [connect-tcp](../2-use/connect-tcp.md#two-framings).
 
 | Requirement | Behaviour in masque | Module |
 | --- | --- | --- |
 | Extended CONNECT with `:protocol = connect-tcp` and a URI template | Default template `/.well-known/masque/tcp/{target_host}/{target_port}/` (`tcp_uri_template` on the listener, `uri_template` on the client). | `include/masque.hrl`, `masque_tcp_client_session`, listeners |
-| The stream carries raw bytes, no capsule protocol | No `capsule-protocol` in either direction; a 2xx that claims it fails with `{bad_response, capsule_protocol}`; `send_capsule/3` returns `{error, not_supported}`. | `masque_tcp_client_session`, `masque_tcp_server_session` |
+| -10 §3, §8.3: bytes in `DATA` and `FINAL_DATA` capsules, `capsule-protocol: ?1` | With `tcp_framing => capsule`, or a request carrying `capsule-protocol: ?1`. Provisional codes `0x2028d7f0` and `0x2028d7f1`. Other capsule types are skipped. | `masque_tcp_capsule`, TCP sessions |
+| -10 §3.2: h1 `GET` with `Upgrade: connect-tcp`, answered with 101 | On the h1 listener's `tcp_uri_template`; classic `CONNECT` keeps working beside it. | `masque_h1_server`, `masque_tcp_h1_*_session` |
+| -10 §3.4: `FINAL_DATA` is a FIN; a stream ending without it is an abort | An abort resets the target (`SO_LINGER` 0) and is reported to the client as `peer_reset`. On h1 an abort closes the TLS connection with `close_notify`, where the draft asks for a TCP close without it. | TCP sessions |
+| Earlier revisions: raw bytes, no capsule protocol | The default. No `capsule-protocol` in either direction; a 2xx that claims it fails with `{bad_response, capsule_protocol}`; `send_capsule/3` returns `{error, not_supported}`. | `masque_tcp_client_session`, `masque_tcp_server_session` |
 | END_STREAM is a TCP FIN, one per direction | The peer's FIN is reported as `{masque_closed, Sess, peer_fin}` and the session stays writable; `shutdown_write/1` sends ours. A half-closed tunnel with no traffic for 30 s ends with `eof_timeout`. | TCP sessions, `masque_tcp_proxy_handler` |
 | Errors abort the stream | Target reset, target error, failed or blocked (30 s) writes, and handler crashes reset with `H3_CONNECT_ERROR` / `CONNECT_ERROR`. | `masque_tcp_server_session` |
 
 Deviations and open points:
-- On HTTP/1.1, masque uses classic `CONNECT host:port` (RFC 9110) instead of the draft's upgrade; the h1 listener has no `tcp_uri_template`.
+- On h3 and h2 the -10 framing is chosen by `capsule-protocol: ?1` by default, which the draft makes a SHOULD. A listener with `tcp_framing => capsule` serves -10 clients that leave it out, at the cost of older raw clients.
+- No other implementation of -10 was available to test against, so capsule framing is only tested between masque's own client and server.
 - On HTTP/2, the listener only accepts Extended CONNECT, so a client sending classic `CONNECT host:port`, such as `curl --proxy-http2`, gets 501.
-- h1 cannot half-close: OTP `ssl` drops the connection on the peer's `close_notify`, so a FIN in either direction ends the tunnel.
-- Open question: the draft's template variables may not be `target_host` / `target_port` in the targeted revision; check before claiming interop with other implementations.
+- h1 in raw framing cannot half-close: OTP `ssl` drops the connection on the peer's `close_notify`, so a FIN in either direction ends the tunnel. Capsule framing can.
 
 ## draft-ietf-masque-connect-udp-listen-11 (Connect-UDP-Bind)
 

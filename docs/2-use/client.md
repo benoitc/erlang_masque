@@ -29,6 +29,7 @@ This page covers everything you do on the client side of a tunnel: open it with 
 | `ssl_opts` | `[]` | Extra `ssl` client options, merged over the defaults. h2 and h1 only; h3 ignores it. An IPv6 literal proxy (`https://[::1]:443`) gets `inet6` by default. |
 | `owner` | caller | Application owner: the process that gets the session's messages. The session monitors it and closes when it exits. |
 | `mode` | `message` | Delivery mode, `message` or `queue`. Change later with `masque:set_mode/2`. |
+| `tcp_framing` | `raw` | CONNECT-TCP framing: `raw`, or `capsule` for draft-ietf-httpbis-connect-tcp-10. See [connect-tcp](connect-tcp.md#two-framings). |
 | `rx_queue_limit` | `1000` | Items a queue-mode session buffers. |
 | `request_headers` | `[]` | Extra headers on the CONNECT (or h1 Upgrade) request, for example an `authorization` token. |
 | `uri_template` | per protocol | Request path template. Must match the proxy's. CONNECT-IP needs an absolute URI. |
