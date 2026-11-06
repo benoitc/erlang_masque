@@ -35,6 +35,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   half, even while data was still flowing, so a download over a poor
   mobile link could be cut. It now only gives up after 30 s without any
   progress.
+- HTTP/3 is several times faster on networks that reorder packets, as
+  mobile networks do, connects in about one round trip there, and a
+  network change made while there is no network no longer loses the
+  connection. This comes from the update to quic 2.1.4.
 
 ### Added
 

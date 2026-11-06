@@ -31,8 +31,6 @@
     reordering_mobile/1,
     migrate_without_network/1
 ]).
-%% Kept for when erlang_quic is fixed; see `migrate_without_network/1'.
--export([migrate_without_network_case/1]).
 
 -define(PROXY, "203.0.113.1").
 -define(WIFI_NAT, {192, 168, 100, 2}).
@@ -292,13 +290,8 @@ small_mtu_mobile(Config) ->
     masque:close(Sess).
 
 %% An agent may notice the change while there is no network at all, and
-%% move then. The tunnel has to wait for a network, not die. erlang_quic
-%% gives up the new path after three failed checks and retires the
-%% connection id it is still using, so the proxy drops what follows.
-migrate_without_network(_Config) ->
-    {skip, "erlang_quic retires the connection id in use when path validation fails"}.
-
-migrate_without_network_case(Config) ->
+%% move then. The tunnel has to wait for a network, not die.
+migrate_without_network(Config) ->
     Sess = connect_tcp(Config),
     ok = send(Sess, <<"down">>),
     First = recv(Sess, ?BYTES div 4),

@@ -114,7 +114,7 @@ case masque:migrate(Sess) of
 end.
 ```
 
-- Call it once the new network is up, not while there is none. A move started with no network can fail its path checks, and the QUIC connection may not recover.
+- Call it once the new network is up. A move made while there is no network still recovers when one returns, but the tunnel stalls until then.
 - `ok` means the move started, not that the new path is validated. Datagrams sent during the move may be lost; stream data is retransmitted.
 - `{error, no_available_connection_id}`: the proxy has not issued a spare connection id yet, which happens just after the handshake.
 - `{error, not_supported}` on h2 and h1. There, a network change ends the tunnel, so reconnect.
