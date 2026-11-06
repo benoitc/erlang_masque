@@ -227,6 +227,11 @@ connecting({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
 connecting({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
+%% A ticket to resume this QUIC connection later, for the owner to keep
+%% and pass back as `quic_opts => #{session_ticket => T}'.
+connecting(info, {quic_h3, _Conn, {session_ticket, Ticket}}, #data{owner = Owner}) ->
+    masque_client_owner:send(Owner, {masque_session_ticket, self(), Ticket}),
+    keep_state_and_data;
 connecting(info, {Tag, _Conn, {closed, _Reason}}, Data) when
     Tag =:= quic_h3; Tag =:= h2
 ->
@@ -382,6 +387,11 @@ open(
     Tag =:= quic_h3; Tag =:= h2
 ->
     end_tunnel(peer_reset, {stop, peer_reset, Data}, Data);
+%% A ticket to resume this QUIC connection later, for the owner to keep
+%% and pass back as `quic_opts => #{session_ticket => T}'.
+open(info, {quic_h3, _Conn, {session_ticket, Ticket}}, #data{owner = Owner}) ->
+    masque_client_owner:send(Owner, {masque_session_ticket, self(), Ticket}),
+    keep_state_and_data;
 open(info, {Tag, _Conn, {closed, _Reason}}, Data) when
     Tag =:= quic_h3; Tag =:= h2
 ->
@@ -521,12 +531,7 @@ do_connect(#data{transport = h3} = Data, Opts) ->
         connect_timeout => maps:get(timeout, Opts, 5000),
         settings => #{enable_connect_protocol => 1, h3_datagram => 1},
         h3_datagram_enabled => true,
-        quic_opts => #{
-            alpn => maps:get(alpn, Opts, [<<"h3">>]),
-            max_datagram_frame_size => 65535,
-            %% QUIC closes a silent connection after 30 s; tunnels outlive that.
-            keep_alive_interval => auto
-        }
+        quic_opts => masque_quic:client_opts(Opts)
     },
     case
         quic_h3:connect(

@@ -6,6 +6,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- HTTP/3 listeners and clients take QUIC options. A listener can pick its
+  certificate per server name, carry more than 100 tunnels per connection,
+  or require client certificates. A client can set a certificate or idle
+  timeout, and resume a previous connection with a session ticket, which
+  it now hands to you after each handshake.
+- HTTP/2 and HTTP/1.1 listeners take TLS options, for example to pick the
+  certificate per server name.
+
+### Fixed
+
+- CONNECT-TCP clients on HTTP/3 now send keepalives themselves. A quiet
+  tunnel stayed open only because the proxy sent them.
+
 ## [0.9.0] - 2026-11-06
 
 0.8.0 was tagged but never published to Hex. Upgrade from 0.7.0 straight

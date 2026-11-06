@@ -102,6 +102,19 @@ The queue holds at most `rx_queue_limit` items. Past it, datagram tunnels (UDP, 
 #{state := open, rx_dropped := N} = masque:info(Sess).
 ```
 
+## QUIC options and session tickets
+
+On h3, `quic_opts` passes options to the QUIC connection, merged over masque's defaults. Use it, for example, for a client certificate (`cert`, `key`), an `idle_timeout`, or a session ticket. Connections with different `quic_opts` are never shared by the pool.
+
+The proxy gives the client a session ticket after the handshake, and the session passes it to you as `{masque_session_ticket, Sess, Ticket}`. Keep it, and pass it on the next connection to the same proxy to resume the TLS session:
+
+```erlang
+receive {masque_session_ticket, Sess, Ticket} -> ok end,
+{ok, Sess2} = masque:connect(Proxy, Target, #{quic_opts => #{session_ticket => Ticket}}).
+```
+
+A ticket is valid for one use and only on the listener that issued it.
+
 ## Change networks
 
 An h3 tunnel can carry on when the client's network changes. Nothing watches the network for you: call `masque:migrate/1` when your interfaces change or the proxy stops answering.

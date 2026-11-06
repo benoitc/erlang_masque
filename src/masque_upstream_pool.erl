@@ -122,7 +122,8 @@ fingerprint(Host, Port, Transport, Opts) when is_map(Opts) ->
         verify => maps:get(verify, Opts, verify_peer),
         cacerts => maps:get(cacerts, Opts, default),
         ssl_opts => canonical_ssl_opts(maps:get(ssl_opts, Opts, [])),
-        alpn => maps:get(alpn, Opts, default)
+        alpn => maps:get(alpn, Opts, default),
+        quic_opts => maps:get(quic_opts, Opts, #{})
     },
     Hash = crypto:hash(
         sha256,

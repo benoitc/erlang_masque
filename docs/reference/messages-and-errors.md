@@ -15,6 +15,7 @@ A client session sends these to its owner. `Sess` is the session pid returned by
 | `{masque_data, Sess, Data}` | Data received, in `message` mode. CONNECT-UDP: one UDP payload (context id 0). CONNECT-TCP: a chunk of the byte stream. |
 | `{masque_capsule, Sess, Type, Value}` | A capsule the session does not consume itself (CONNECT-UDP and CONNECT-IP). Sent in both delivery modes. Never sent on CONNECT-TCP, which carries no capsules; udp-bind sessions drop unknown capsules silently. |
 | `{masque_closed, Sess, Reason}` | The tunnel ended from the proxy side, in `message` mode. See [close reasons](#close-reasons). |
+| `{masque_session_ticket, Sess, Ticket}` | h3 only: a ticket to resume the QUIC connection later, through `quic_opts => #{session_ticket => Ticket}`. Sent in both delivery modes. |
 
 In `queue` mode, data is not sent as messages: you pull it with `masque:recv/2`, and the end of the tunnel shows up as an error from `recv/2` instead of `masque_closed`.
 

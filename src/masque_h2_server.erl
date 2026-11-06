@@ -64,7 +64,13 @@ start_h2_listener(Name, Opts0) ->
             {ok, N} -> ServerOpts#{acceptors => N};
             error -> ServerOpts
         end,
-    case h2:start_server(Name, Port, ServerOpts1) of
+    %% TLS options for the listening socket, such as `sni_fun'.
+    ServerOpts2 =
+        case maps:find(ssl_opts, Opts) of
+            {ok, SslOpts} -> ServerOpts1#{ssl_opts => SslOpts};
+            error -> ServerOpts1
+        end,
+    case h2:start_server(Name, Port, ServerOpts2) of
         {ok, Ref} ->
             persistent_term:put({masque_h2_ref, Name}, Ref),
             persistent_term:put({masque_h2_name, Ref}, Name),
