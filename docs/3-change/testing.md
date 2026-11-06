@@ -67,6 +67,7 @@ End-to-end behaviour pinned to a spec. Add a case here when you implement or fix
 | Suite | Covers |
 | --- | --- |
 | `masque_lifecycle_SUITE` | sessions end on connection close, GOAWAY, stream reset and FIN; output held until finalize; TCP half-close; udp-bind teardown |
+| `masque_netsim_SUITE` | Network changes on simulated Wi-Fi and mobile networks: Linux namespaces, a NAT per network, netem delay, loss and reordering, a smaller mobile MTU, links taken down and up, and a watcher that calls `masque:migrate/1`. Needs root; CI runs it in its own job, locally use `test/netsim/run-docker.sh` |
 | `masque_migration_SUITE` | Network changes under open h3 tunnels on every protocol, through the `masque_path_relay` fixture, which kills the old path and changes the source IP. Needs a second local address: 127.0.0.2 on Linux; skipped on macOS if there is no other address |
 | `masque_e2e_SUITE` | Real sockets through real listeners on h3, h2 and h1: large transfers, full duplex, stalled peers |
 | `masque_backpressure_SUITE` | `active_n` on proxy sockets: bytes arrive in order, server session mailbox stays small |

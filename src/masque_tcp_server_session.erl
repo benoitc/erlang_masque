@@ -28,6 +28,8 @@
 %% How long a tunnel write may wait for the transport to drain before
 %% the tunnel is reset.
 -define(SEND_TIMEOUT, 30000).
+%% How often a blocked h3 write checks whether the send queue moves.
+-define(PROGRESS_CHECK_MS, 2000).
 
 -define(DEFAULT_IDLE_MS, 300000).
 
@@ -508,29 +510,51 @@ do_actions([_Unknown | Rest], S) ->
     do_actions(Rest, S).
 
 %% Blocking tunnel write. h2 waits for flow-control window; quic_h3
-%% reports a full send queue, so retry until it drains or the send
-%% timeout passes.
+%% reports a full send queue, so retry until it drains. Both give up
+%% after 30 s without progress.
 tunnel_send(#state{transport = h2, conn = C, stream_id = Sid}, Bytes, Fin) ->
     h2:send_data(C, Sid, Bytes, Fin, #{block => ?SEND_TIMEOUT});
 tunnel_send(S, Bytes, Fin) ->
-    Deadline = erlang:monotonic_time(millisecond) + ?SEND_TIMEOUT,
-    tunnel_send_h3(S, Bytes, Fin, Deadline).
+    tunnel_send_h3(S, Bytes, Fin, no_progress_deadline(), undefined).
 
-%% A refused write (`send_queue_full', nothing written) is retried
-%% when quic_h3 says the queue drained (`send_ready'), until the
-%% deadline.
-tunnel_send_h3(#state{conn = C, stream_id = Sid} = S, Bytes, Fin, Deadline) ->
+%% A refused write (`send_queue_full', nothing written) is retried when
+%% quic_h3 says the queue drained to half (`send_ready'). On a slow path
+%% that can take far longer than the timeout while data still flows, so
+%% the deadline only runs while the queue is not shrinking.
+tunnel_send_h3(#state{conn = C, stream_id = Sid} = S, Bytes, Fin, Deadline, Queued) ->
     case transport_send_data(S, Bytes, Fin) of
         {error, send_queue_full} ->
-            Left = Deadline - erlang:monotonic_time(millisecond),
+            Now = erlang:monotonic_time(millisecond),
+            Wait = max(0, min(?PROGRESS_CHECK_MS, Deadline - Now)),
             receive
                 {quic_h3, C, {send_ready, Sid}} ->
-                    tunnel_send_h3(S, Bytes, Fin, Deadline)
-            after max(0, Left) ->
-                {error, send_timeout}
+                    tunnel_send_h3(S, Bytes, Fin, no_progress_deadline(), undefined)
+            after Wait ->
+                case {queued_bytes(C), Queued} of
+                    {Q, Before} when is_integer(Q), is_integer(Before), Q < Before ->
+                        tunnel_send_h3(S, Bytes, Fin, no_progress_deadline(), Q);
+                    {Q, _} ->
+                        case erlang:monotonic_time(millisecond) >= Deadline of
+                            true -> {error, send_timeout};
+                            false -> tunnel_send_h3(S, Bytes, Fin, Deadline, Q)
+                        end
+                end
             end;
         Other ->
             Other
+    end.
+
+no_progress_deadline() ->
+    erlang:monotonic_time(millisecond) + ?SEND_TIMEOUT.
+
+%% Bytes waiting in the QUIC connection's send queue, or `undefined'
+%% when the connection cannot tell.
+queued_bytes(Conn) ->
+    try quic:get_send_queue_info(quic_h3:get_quic_conn(Conn)) of
+        {ok, #{bytes := Bytes}} -> Bytes;
+        _ -> undefined
+    catch
+        exit:_ -> undefined
     end.
 
 transport_send_data(#state{transport = h3, conn = C, stream_id = Sid}, Bytes, Fin) ->

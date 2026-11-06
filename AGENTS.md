@@ -95,6 +95,9 @@ MASQUE_GO_BIN=$PWD/_build/masque_interop rebar3 ct --suite test/masque_interop_S
 ```
 
 `masque_load_SUITE` only runs with `MASQUE_LOAD=1`.
+`masque_netsim_SUITE` needs root in Linux network namespaces: CI runs it in
+its own job, and `test/netsim/run-docker.sh` runs it locally in a privileged
+container.
 
 ## Architecture
 

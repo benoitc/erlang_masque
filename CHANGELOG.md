@@ -30,6 +30,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - A chained CONNECT-TCP tunnel no longer loses bytes when the upstream
   is slow. Bytes the upstream refused were silently dropped; they now
   wait, and the client is slowed down to match.
+- A CONNECT-TCP tunnel over HTTP/3 is no longer reset when the path is
+  slow. The proxy gave up after 30 s if its send queue had not drained by
+  half, even while data was still flowing, so a download over a poor
+  mobile link could be cut. It now only gives up after 30 s without any
+  progress.
 
 ### Added
 

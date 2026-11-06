@@ -8,7 +8,7 @@ This directory holds every test for masque. Use this page to find the suite a ch
 | Component unit tests | `masque_facade_tests`, `masque_tls_tests`, `masque_h1_client_session_tests`, `masque_h2_server_tests`, `masque_racer_tests`, `masque_upstream_owner_tests`, `masque_upstream_pool_tests`, `masque_chain_handler_tests`, `masque_ip_proxy_handler_tests`, `masque_ip_session_registry_tests`, `masque_udp_bind_proxy_handler_tests` | `rebar3 eunit` |
 | Compliance suites | `masque_compliance_SUITE`, `masque_ip_compliance_SUITE`, `masque_ip_compliance_h1_SUITE`, `masque_udp_bind_compliance_SUITE` | `rebar3 ct` |
 | Per-transport suites | `masque_h1_SUITE`, `masque_h1_race_SUITE`, `masque_tcp_h1_SUITE`, `masque_ip_h1_SUITE`, `masque_ip_h2_SUITE`, `masque_ip_h3_SUITE` | `rebar3 ct` |
-| End to end | `masque_e2e_SUITE`: real sockets through real listeners on h3, h2 and h1. `masque_migration_SUITE`: network changes under open h3 tunnels | `rebar3 ct` |
+| End to end | `masque_e2e_SUITE`: real sockets through real listeners on h3, h2 and h1. `masque_migration_SUITE`: network changes under open h3 tunnels. `masque_netsim_SUITE`: the same on simulated Wi-Fi and mobile networks, run by CI or `test/netsim/run-docker.sh` | `rebar3 ct` |
 | Lifecycle and robustness | `masque_lifecycle_SUITE`, `masque_backpressure_SUITE`, `masque_client_errors_SUITE`, `masque_client_rx_SUITE` | `rebar3 ct` |
 | Features | `masque_auth_challenge_SUITE`, `masque_chain_listener_SUITE`, `masque_chain_ip_SUITE`, `masque_upstream_pool_SUITE`, `masque_two_hop_example_SUITE`, `masque_interop_SUITE` (skipped unless `MASQUE_GO_BIN` is set) | `rebar3 ct` |
 | Properties | `prop_masque` | `rebar3 as test proper` |
