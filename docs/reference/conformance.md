@@ -68,7 +68,7 @@ Deviations and additions:
 Deviations:
 - The proxy identifier is always `masque`; it is not configurable and does not name the listener.
 - No other parameters (`details`, `rcode`, `next-hop`) are sent.
-- Proxy-Status is sent on handshake rejections and on the 2xx or 101 of a -10 CONNECT-TCP tunnel (`proxy-status: masque`), not on other success responses or when a tunnel fails later.
+- Proxy-Status is sent on handshake rejections and on the 2xx or 101 of a capsule-framed CONNECT-TCP tunnel (`proxy-status: masque`), not on other success responses or when a tunnel fails later.
 - A handler can replace the header by returning `{reject, Reason, [{<<"proxy-status">>, Value}]}`.
 
 ## RFC 9110: HTTP Semantics (CONNECT, Upgrade, Via)
@@ -96,31 +96,42 @@ Stream and connection semantics from RFC 9114 and RFC 9113 that the sessions rel
 
 ## draft-ietf-httpbis-connect-tcp
 
-masque implements draft-ietf-httpbis-connect-tcp-10 in capsule framing, and the earlier raw framing, which stays the client default. See [connect-tcp](../2-use/connect-tcp.md#two-framings).
+masque implements draft-ietf-httpbis-connect-tcp-18 (in the RFC Editor queue) in capsule framing. It also keeps the raw framing of the earlier revisions, which stays the client default, and the provisional capsule codes of drafts -09 and -10 for peers that still use them. See [connect-tcp](../2-use/connect-tcp.md#two-framings).
 
 | Requirement | Behaviour in masque | Module |
 | --- | --- | --- |
-| Extended CONNECT with `:protocol = connect-tcp` and a URI template | Default template `/.well-known/masque/tcp/{target_host}/{target_port}/` (`tcp_uri_template` on the listener, `uri_template` on the client). | `include/masque.hrl`, `masque_tcp_client_session`, listeners |
-| -10 §3, §8.3: bytes in `DATA` and `FINAL_DATA` capsules, `capsule-protocol: ?1` | With `tcp_framing => capsule`, or a request carrying `capsule-protocol: ?1`. Provisional codes `0x2028d7f0` and `0x2028d7f1`. Other capsule types are skipped. | `masque_tcp_capsule`, TCP sessions |
-| -10 §3.2: h1 `GET` with `Upgrade: connect-tcp`, answered with 101 | On the h1 listener's `tcp_uri_template`, with or without `Capsule-Protocol`; classic `CONNECT` keeps working beside it. | `masque_h1_server`, `masque_tcp_h1_*_session` |
-| -10 §3.4: `FINAL_DATA` is a FIN; a stream ending without it is an abort | An abort resets the target (`SO_LINGER` 0) and is reported to the client as `peer_reset`. On h1 an abort closes the TLS connection with `close_notify`, where the draft asks for a TCP close without it (see below). | TCP sessions |
-| -10 §4.1: optimistic data before the 2xx on h2 and h3 | Bytes that arrive before the target is connected are held by the transport and written once it is; they are dropped with the request if the connection fails. The client does not send early. | `masque_tcp_server_session` |
-| -10 §4.2: `Expect: 100-continue` answered with 100 before the target is dialed | On all three transports, for every CONNECT-TCP request that carries it. The client skips interim responses, so `request_headers` can ask for one. | TCP server sessions, TCP client sessions |
-| -10 §4.2: `Proxy-Status` on success and failure | `proxy-status: masque` on the 2xx or 101 of a -10 tunnel; rejections carry it as described under RFC 9209. | TCP server sessions, listeners |
-| -10 §5.2: a client falls back from classic CONNECT | An h1 client in raw framing that gets 501, or 426 with `Upgrade: connect-tcp`, retries once in capsule framing on the default template and remembers the proxy (by host and port, until the node restarts) so later tunnels skip the refused CONNECT. | `masque_tcp_h1_client_session` |
-| -10 §8.1: the token is `connect-tcp-07` for this draft version | Listeners accept `connect-tcp-07` (`:protocol` on h3 and h2, `Upgrade` on h1) and always frame it in capsules. The client sends it in capsule framing. `connect-tcp` stays accepted, as before. | listeners, TCP client sessions |
-| Earlier revisions: raw bytes, no capsule protocol | The default. No `capsule-protocol` in either direction; a 2xx that claims it fails with `{bad_response, capsule_protocol}`; `send_capsule/3` returns `{error, not_supported}`. | `masque_tcp_client_session`, `masque_tcp_server_session` |
-| END_STREAM is a TCP FIN, one per direction | The peer's FIN is reported as `{masque_closed, Sess, peer_fin}` and the session stays writable; `shutdown_write/1` sends ours. A half-closed tunnel with no traffic for 30 s ends with `eof_timeout`. | TCP sessions, `masque_tcp_proxy_handler` |
+| §3: Extended CONNECT with `:protocol = connect-tcp` and a URI template | Default template `/.well-known/masque/tcp/{target_host}/{target_port}/` (`tcp_uri_template` on the listener, `uri_template` on the client). | `include/masque.hrl`, `masque_tcp_client_session`, listeners |
+| §3: the proxy attempts the TCP connection before its final response | The handler dials in `init/2`; the 2xx or 101 goes out only once it has connected. | TCP server sessions |
+| §3.1, §8.3: bytes in `DATA` (`0x08`) and `FINAL_DATA` (`0x09`) | Capsule framing. Empty capsules are valid. Other capsule types are skipped, including after `FINAL_DATA`. | `masque_tcp_capsule`, TCP sessions |
+| §3.1: payload is forwarded before its capsule ends | The decoder passes payload on as it arrives and only buffers capsule headers, so a capsule of any size is accepted and never held whole in memory. `max_capsule_size` does not apply to CONNECT-TCP. | `masque_tcp_capsule` |
+| §3.2: h1 `GET` with `Upgrade: connect-tcp`, answered with 101 | On the h1 listener's `tcp_uri_template`, with or without `Capsule-Protocol`; the 101 repeats the request's token. Classic `CONNECT` keeps working beside it. | `masque_h1_server`, `masque_tcp_h1_*_session` |
+| §3.2, §3.3: `Capsule-Protocol: ?1` SHOULD be on requests and successful responses | The client always sends it in capsule framing; listeners always answer with it. On h3 and h2 a plain `connect-tcp` request without it is raw framing, unless the listener sets `tcp_framing => capsule`. | TCP sessions |
+| §3.4.3: h1 responses that could be cached carry `Cache-Control: no-store` | Every h1 listener rejection carries it. No other caching headers are sent. | `masque_h1_server` |
+| §3.5: `FINAL_DATA` is a FIN; a stream ending without it is an abort | An abort resets the target (`SO_LINGER` 0) and the stream (`H3_CONNECT_ERROR`, `CONNECT_ERROR`); the client reports `peer_reset`. A clean end sends `FINAL_DATA` before the stream's FIN. | TCP sessions |
+| §3.5: a local timeout is an abrupt close | In capsule framing the session idle timeout and the handler's `eof_timeout` reset the stream and the target instead of closing them. | TCP server sessions, `masque_tcp_proxy_handler` |
+| §3.5.1: invalid data is an abrupt close | A second `FINAL_DATA`, `DATA` after `FINAL_DATA`, or a capsule cut by the end of the stream aborts the tunnel with `{bad_capsule, Reason}`. | `masque_tcp_capsule`, TCP sessions |
+| §4.1: optimistic data before the 2xx on h2 and h3 | Bytes that arrive before the target is connected are held by the transport and written once it is; they are dropped with the request if the connection fails. The client does not send early. | `masque_tcp_server_session` |
+| §4.1: race address families (Happy Eyeballs) | In capsule framing the default handler resolves both families and races them (RFC 8305 order, 250 ms apart); losing connections are closed before any payload. Raw framing dials the first address, as before. | `masque_tcp_dial`, `masque_tcp_proxy_handler` |
+| §4.2: 4xx for refused requests, 5xx for failed connections | Malformed requests get 400, 404 or 405. In capsule framing a target the policy refuses gets 403, a connection timeout 504, and any other failed connection 502. Raw framing keeps 502 for all three. | `masque_tcp_proxy_handler`, `masque_errors` |
+| §4.3: 100 (Continue) when the proxy accepts a request | Every capsule-framed request gets 100 before the target is dialed, on all three transports. Raw requests get it only when they carry `Expect: 100-continue`. The client skips interim responses. | TCP server sessions, TCP client sessions |
+| §4.3: `Proxy-Status` on success and failure; no trailers | `proxy-status: masque` on the 2xx or 101 of a capsule tunnel; rejections carry it as described under RFC 9209. No trailers are sent. | TCP server sessions, listeners |
+| §5.2: a client falls back from classic CONNECT | An h1 client in raw framing that gets 501, or 426 with `Upgrade: connect-tcp`, retries once in capsule framing on the default template and remembers the proxy (by host and port, until the node restarts) so later tunnels skip the refused CONNECT. | `masque_tcp_h1_client_session` |
+| §8.1.1: the interop token is `connect-tcp-12` | Listeners accept `connect-tcp-12` and always frame it in capsules with the permanent codes. The client sends it in capsule framing unless `tcp_protocol` says otherwise. | listeners, TCP client sessions |
+| Drafts -09 and -10: tokens `connect-tcp-08` and `connect-tcp-07`, codes `0x2028d7f0` and `0x2028d7f1` | Listeners accept both tokens and use the provisional codes for them; the client uses them with `tcp_protocol => <<"connect-tcp-08">>` or `<<"connect-tcp-07">>`. | `masque_tcp_capsule`, listeners, TCP client sessions |
+| Earlier revisions: raw bytes, no capsule protocol | The client default. No `capsule-protocol` in either direction; a 2xx that claims it fails with `{bad_response, capsule_protocol}`; `send_capsule/3` returns `{error, not_supported}`. | `masque_tcp_client_session`, `masque_tcp_server_session` |
+| END_STREAM is a TCP FIN, one per direction (raw) | The peer's FIN is reported as `{masque_closed, Sess, peer_fin}` and the session stays writable; `shutdown_write/1` sends ours. A half-closed tunnel with no traffic for 30 s ends with `eof_timeout`. | TCP sessions, `masque_tcp_proxy_handler` |
 | Errors abort the stream | Target reset, target error, failed or blocked (30 s) writes, and handler crashes reset with `H3_CONNECT_ERROR` / `CONNECT_ERROR`. | `masque_tcp_server_session` |
 
 Deviations and open points:
-- On h3 and h2 the -10 framing is chosen by `capsule-protocol: ?1` by default, which the draft makes a SHOULD. A listener with `tcp_framing => capsule` serves -10 clients that leave it out, at the cost of older raw clients.
-- No other implementation of -10 was available to test against, so capsule framing is only tested between masque's own client and server.
-- On HTTP/2, the listener only accepts Extended CONNECT, so a client sending classic `CONNECT host:port`, such as `curl --proxy-http2`, gets 501.
+- On h3 and h2 a plain `connect-tcp` request is capsule framing only with `capsule-protocol: ?1` by default, since raw clients of the earlier revisions send the same token. A listener with `tcp_framing => capsule` serves -18 clients that leave the header out, at the cost of those raw clients. Interop tokens are never ambiguous.
+- The client sends `connect-tcp-12` because section 8.1.1 asks for it until publication. Once the RFC is out the default should become `connect-tcp`; `tcp_protocol => <<"connect-tcp">>` does that today.
+- The only other capsule implementation found is the draft author's masque-go fork, which speaks draft -09 (`connect-tcp-08`). It is not yet part of the interop suite.
+- On HTTP/2, the listener only accepts Extended CONNECT, so a client sending classic `CONNECT host:port`, such as `curl --proxy-http2`, gets 501. A -18 client takes that as the cue to retry on the default template (§5.2).
 - h1 in raw framing cannot half-close: OTP `ssl` drops the connection on the peer's `close_notify`, so a FIN in either direction ends the tunnel. Capsule framing can.
-- An h1 abort is sent as a TLS close with `close_notify`, because OTP `ssl` has no way to close a connection without it. A -10 peer still sees the abort, since the stream ends without `FINAL_DATA`; masque's client reports it as `peer_reset`. A peer that relies only on the missing `close_notify` sees a clean close.
+- An h1 abort is sent as a TLS close with `close_notify`, because OTP `ssl` has no way to close a connection without it. A capsule peer still sees the abort, since the stream ends without `FINAL_DATA`; masque's client reports it as `peer_reset`. A peer that relies only on the missing `close_notify` sees a clean close.
 - Only h1 clients fall back from classic CONNECT: on h3 and h2 masque's client always uses Extended CONNECT.
-- The TLS early data options of §4.1 are all optional, and masque does nothing specific for them: whether early data is used is left to the transport options.
+- The TLS early data options of §4.1 are all optional, and masque does nothing specific for them: whether early data is used is left to the transport options. `RESET_STREAM_AT` (§3.5) is not used.
+- Happy Eyeballs applies to the default resolver and to a `resolver` that returns a list; with `family` set, only that family is dialed.
 
 ## draft-ietf-masque-connect-udp-listen-11 (Connect-UDP-Bind)
 

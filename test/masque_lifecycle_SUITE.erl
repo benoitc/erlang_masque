@@ -1093,14 +1093,15 @@ h2_failed_session_releases_tunnel_slot(Config) ->
     ok = h2:close(Conn),
     ok = wait_until(fun() -> ets:info(masque_h2_tunnel_counts, size) =:= Rows end, 50).
 
-%% A -10 request that expects `100-continue' hears it before the target
-%% is dialed; a refused target then gets the final error response, and
-%% the session start leaves nothing behind.
+%% A CONNECT-TCP request in capsule framing hears `100 Continue' before
+%% the target is dialed (draft-ietf-httpbis-connect-tcp-18 section 4.3);
+%% a refused target then gets the final error response, and the session
+%% start leaves nothing behind.
 h3_tcp_continue_then_refused_target(Config) ->
     {ok, Conn} = masque_test_helpers:h3_client_connect(
         maps:get(port, ?config(h3, Config)), #{}
     ),
-    Headers = [{<<":protocol">>, <<"connect-tcp-07">>} | continue_headers()],
+    Headers = [{<<":protocol">>, <<"connect-tcp-12">>} | continue_headers()],
     {ok, Sid} = quic_h3:request(Conn, Headers, #{end_stream => false}),
     receive
         {quic_h3, Conn, {response, Sid, 100, _}} -> ok
@@ -1115,7 +1116,7 @@ h3_tcp_continue_then_refused_target(Config) ->
 h2_tcp_continue_then_refused_target(Config) ->
     Rows = ets:info(masque_h2_tunnel_counts, size),
     {ok, Conn} = h2_connect(Config),
-    {ok, Sid} = h2:request(Conn, continue_headers(), #{protocol => <<"connect-tcp-07">>}),
+    {ok, Sid} = h2:request(Conn, continue_headers(), #{protocol => <<"connect-tcp-12">>}),
     receive
         {h2, Conn, {informational, Sid, 100, _}} -> ok
     after 5000 -> ct:fail(no_continue)
@@ -1139,8 +1140,7 @@ continue_headers() ->
             masque_uri:expand(
                 <<"/.well-known/masque/tcp/{target_host}/{target_port}/">>,
                 #{target_host => <<"127.0.0.1">>, target_port => Port}
-            )},
-        {<<"expect">>, <<"100-continue">>}
+            )}
     ].
 
 h3_tcp_target_reset_resets_tunnel(Config) ->

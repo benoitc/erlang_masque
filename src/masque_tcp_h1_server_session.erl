@@ -49,11 +49,11 @@
     %% until this is zero, which is what holding credit means here.
     held = 0 :: non_neg_integer(),
     %% `raw': classic CONNECT, bytes as they are. `capsule': GET with
-    %% `Upgrade: connect-tcp' (draft-ietf-httpbis-connect-tcp-10), bytes
-    %% in DATA and FINAL_DATA capsules.
+    %% `Upgrade: connect-tcp' (draft-ietf-httpbis-connect-tcp-18), bytes
+    %% in DATA and FINAL_DATA capsules, with the codes of `version'.
     framing = raw :: raw | capsule,
-    cap_buf = <<>> :: binary(),
-    max_cap = ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE :: pos_integer(),
+    version = final :: masque_tcp_capsule:version(),
+    dec :: masque_tcp_capsule:decoder() | undefined,
     %% Capsule mode: FINAL_DATA received and sent. Capsules carry the FIN,
     %% so unlike raw mode each direction can end on its own.
     final_in = false :: boolean(),
@@ -118,14 +118,16 @@ init_session(#{
     stream_id := StreamId,
     handler := Handler,
     handler_opts := HOpts,
-    req := Req
+    req := Req0
 }) ->
     process_flag(trap_exit, true),
     IdleMs = maps:get(idle_timeout_ms, HOpts, 300000),
-    ok = continue(Conn, StreamId, Req),
+    Framing = maps:get(tcp_framing, Req0, raw),
+    Version = maps:get(tcp_version, Req0, final),
+    Req = Req0#{tcp_framing => Framing, tcp_version => Version},
+    ok = continue(Conn, StreamId, Framing, Req),
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, InitActions} ->
-            Framing = maps:get(tcp_framing, Req, raw),
             case accept(Framing, Conn, StreamId) of
                 {ok, Transport, Socket, Buffer} ->
                     _ = masque_tls:bound_sends(Transport, Socket),
@@ -137,9 +139,8 @@ init_session(#{
                         req = Req,
                         idle_ms = IdleMs,
                         framing = Framing,
-                        max_cap = maps:get(
-                            max_capsule_size, HOpts, ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE
-                        )
+                        version = Version,
+                        dec = masque_tcp_capsule:decoder(Version)
                     }),
                     case apply_init_actions(InitActions, State0) of
                         {ok, State1} ->
@@ -175,7 +176,7 @@ init_session(#{
             {stop, Reason}
     end.
 
-%% Classic CONNECT answers 200; the -10 upgrade answers 101 and switches
+%% Classic CONNECT answers 200; the -18 upgrade answers 101 and switches
 %% the connection to capsules.
 accept(raw, Conn, StreamId) ->
     h1:accept_connect(Conn, StreamId, []);
@@ -186,10 +187,14 @@ accept(capsule, Conn, StreamId) ->
         {error, _} = Err -> Err
     end.
 
-%% draft-ietf-httpbis-connect-tcp-10 section 4.2: `100 Continue' goes
-%% out before the target is dialed.
-continue(Conn, StreamId, Req) ->
-    case masque_tcp_capsule:expects_continue(maps:get(headers, Req, [])) of
+%% draft-ietf-httpbis-connect-tcp-18 section 4.3: `100 Continue' goes
+%% out before the target is dialed, for every -18 request. Classic
+%% CONNECT only gets one when it expects it.
+continue(Conn, StreamId, Framing, Req) ->
+    case
+        Framing =:= capsule orelse
+            masque_tcp_capsule:expects_continue(maps:get(headers, Req, []))
+    of
         true ->
             _ = h1:send_informational(Conn, StreamId, 100, []),
             ok;
@@ -240,9 +245,20 @@ terminate(
     } = S
 ) ->
     _ = cancel_idle(S),
+    _ = final_data(Reason, S),
     _ = safe_close_socket(S),
     try_callback(Handler, terminate, [Reason, HState]),
     _ = emit_tunnel_closed(Start),
+    ok.
+
+%% Capsule mode: a clean end the client has not seen yet is sent as
+%% FINAL_DATA before the socket closes. Anything else, a local timeout
+%% included, closes without it: an abort (section 3.5).
+final_data(Reason, #state{framing = capsule, fin_sent = false} = S) when
+    Reason =:= normal; Reason =:= target_closed
+->
+    proxy_send(S, frame(S, <<>>, true));
+final_data(_Reason, _S) ->
     ok.
 
 code_change(_OldVsn, S, _Extra) ->
@@ -297,10 +313,14 @@ release_credit(_N, S) ->
     S.
 
 %% Capsule mode: the socket closing after FINAL_DATA is a clean end;
-%% without it the tunnel was aborted (draft-ietf-httpbis-connect-tcp-10
-%% section 3.4), and the target gets a reset.
-handle_proxy_eof(#state{framing = capsule, final_in = true} = S) ->
-    {stop, normal, S};
+%% without it, or inside a capsule, the tunnel was aborted
+%% (draft-ietf-httpbis-connect-tcp-18 section 3.5), and the target gets
+%% a reset.
+handle_proxy_eof(#state{framing = capsule, final_in = true, dec = Dec} = S) ->
+    case masque_tcp_capsule:end_of_stream(Dec) of
+        ok -> {stop, normal, S};
+        {error, Reason} -> {stop, {bad_capsule, Reason}, S}
+    end;
 handle_proxy_eof(#state{framing = capsule} = S) ->
     {stop, peer_aborted, S};
 handle_proxy_eof(#state{handler = Handler} = S) ->
@@ -329,11 +349,15 @@ seed_handler(Bytes, S) ->
 
 %% Socket bytes in capsule mode. Payloads go to the handler one by one,
 %% each held or not as the handler says; FINAL_DATA is the client's FIN.
-capsule_in(Bytes, #state{cap_buf = Buf, max_cap = Max} = S) ->
-    case masque_tcp_capsule:decode(Buf, Bytes, Max) of
-        {ok, Items, Rest} -> capsule_items(Items, S#state{cap_buf = Rest});
-        {error, Reason} -> {stop, Reason, S}
+%% Invalid data aborts the tunnel (section 3.5.1).
+capsule_in(Bytes, #state{dec = Dec} = S) ->
+    case masque_tcp_capsule:decode(Dec, Bytes) of
+        {ok, Items, Dec2} -> capsule_items(Items, S#state{dec = Dec2});
+        {error, Reason} -> {stop, {bad_capsule, Reason}, S}
     end.
+
+frame(#state{version = V}, Bytes, Fin) ->
+    masque_tcp_capsule:encode(V, Bytes, Fin).
 
 capsule_items([], S) ->
     {noreply, S};
@@ -430,8 +454,8 @@ do_actions([{send_data, Bytes} | Rest], S) ->
     do_actions([{send_data, Bytes, false} | Rest], S);
 do_actions([{send_data, Bytes, Fin} | Rest], #state{framing = capsule} = S) ->
     ok = count_out(Bytes, S),
-    case proxy_send(S, masque_tcp_capsule:encode(Bytes, Fin)) of
-        ok when Fin, S#state.final_in -> {stop, normal, S};
+    case proxy_send(S, frame(S, Bytes, Fin)) of
+        ok when Fin, S#state.final_in -> {stop, normal, S#state{fin_sent = true}};
         ok when Fin -> do_actions(Rest, S#state{fin_sent = true});
         ok -> do_actions(Rest, S);
         {error, Reason} -> {stop, {tunnel_send_failed, Reason}, S}
@@ -453,8 +477,8 @@ do_actions([hold_credit | Rest], S) ->
 do_actions([{release_credit, N} | Rest], S) ->
     do_actions(Rest, release_credit(N, S));
 do_actions([close_session | _Rest], #state{framing = capsule, fin_sent = false} = S) ->
-    _ = proxy_send(S, masque_tcp_capsule:encode(<<>>, true)),
-    {stop, normal, S};
+    _ = proxy_send(S, frame(S, <<>>, true)),
+    {stop, normal, S#state{fin_sent = true}};
 do_actions([close_session | _Rest], S) ->
     {stop, normal, S};
 do_actions([_Unknown | Rest], S) ->

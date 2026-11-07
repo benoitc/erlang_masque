@@ -190,7 +190,7 @@ What the server session does when each event happens. "Reset" means the stream i
 | GOAWAY from the client | ignored by the router; tunnels keep running | delivered to the handler's `handle_info/2` (built-in handlers ignore it) | n/a |
 | Handler crash in `init/2` | worker returns `{handler_crash, R}`, 502 | 502 | 502 |
 | Handler crash in a later callback | logged, stop `{handler_crash, R}`, reset (`H3_INTERNAL_ERROR` for ip) | same, `internal_error` for ip | logged, stop `{handler_crash, R}`, socket closed |
-| Target error (handler returns `{stop, Reason, S}`) | udp: reset `H3_MESSAGE_ERROR`; tcp: `target_closed` or `eof_timeout` end with FIN, anything else resets with `H3_CONNECT_ERROR`; ip: FIN; udp-bind: reset `H3_INTERNAL_ERROR` | same shape with `protocol_error`, `connect_error`, FIN, `internal_error` | the socket is closed |
+| Target error (handler returns `{stop, Reason, S}`) | udp: reset `H3_MESSAGE_ERROR`; tcp: `target_closed` or `eof_timeout` end with FIN (`FINAL_DATA` first in capsule framing, where `eof_timeout` resets instead), anything else resets with `H3_CONNECT_ERROR`; ip: FIN; udp-bind: reset `H3_INTERNAL_ERROR` | same shape with `protocol_error`, `connect_error`, FIN, `internal_error` | the socket is closed |
 | `close_session` action | stop `normal`, FIN (tcp skips it if a FIN was already sent) | same | the socket is closed |
 | Capsule buffer overflow | reset | reset | stop, socket closed |
 | Idle | `idle_timeout` after `idle_timeout_ms` without traffic; reset | same | same; socket closed |

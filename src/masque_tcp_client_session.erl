@@ -69,10 +69,13 @@
     %% closing the conn.
     pool_owner :: pid() | undefined,
     %% `raw' bytes (older connect-tcp drafts) or `capsule' framing
-    %% (draft-ietf-httpbis-connect-tcp-10), from the `tcp_framing' option.
+    %% (draft-ietf-httpbis-connect-tcp-18), from the `tcp_framing' option.
     framing = raw :: raw | capsule,
-    %% Capsule mode: bytes of a capsule still being received.
-    cap_buf = <<>> :: binary(),
+    %% The `:protocol' token and, in capsule mode, the capsule codes
+    %% (`tcp_protocol' option) and the decoder of the proxy's capsules.
+    token = ?MASQUE_CONNECT_TCP_PROTOCOL :: binary(),
+    version = final :: masque_tcp_capsule:version(),
+    dec :: masque_tcp_capsule:decoder() | undefined,
     %% Capsule mode: the proxy sent FINAL_DATA.
     final_in = false :: boolean()
 }).
@@ -124,6 +127,7 @@ init({Target, Opts, Owner}) ->
     MRef = erlang:monitor(process, Owner),
     ok = masque_client_owner:init(Opts),
     Mode = maps:get(mode, Opts, message),
+    {Framing, Token, Version} = masque_tcp_capsule:client_protocol(Opts),
     Transport = maps:get(transport, Opts, h3),
     Data = #data{
         owner = Owner,
@@ -144,7 +148,10 @@ init({Target, Opts, Owner}) ->
             maps:get(request_headers, Opts, [])
         ),
         pool_owner = maps:get(pool_owner, Opts, undefined),
-        framing = maps:get(tcp_framing, Opts, raw)
+        framing = Framing,
+        token = Token,
+        version = Version,
+        dec = masque_tcp_capsule:decoder(Version)
     },
     {ok, connecting, Data, [{next_event, internal, {do_handshake, Opts}}]}.
 
@@ -315,24 +322,31 @@ open({call, From}, stop, Data) ->
     ]};
 %% Incoming stream data in capsule mode: DATA and FINAL_DATA payloads
 %% are the TCP bytes. A stream that ends without FINAL_DATA is an abort
-%% (draft-ietf-httpbis-connect-tcp-10 section 3.4).
+%% (draft-ietf-httpbis-connect-tcp-18 section 3.5), and so is invalid
+%% data (section 3.5.1).
 open(
     info,
     {Tag, _Conn, {data, StreamId, Bytes, Fin}},
-    #data{stream_id = StreamId, framing = capsule, cap_buf = Buf} = Data
+    #data{stream_id = StreamId, framing = capsule, dec = Dec} = Data
 ) when
     Tag =:= quic_h3; Tag =:= h2
 ->
-    case masque_tcp_capsule:decode(Buf, Bytes, ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE) of
-        {error, Reason} ->
+    case masque_tcp_capsule:decode(Dec, Bytes) of
+        {error, Why} ->
+            Reason = {bad_capsule, Why},
             end_tunnel(Reason, {stop, Reason, Data}, Data);
-        {ok, Items, Rest} ->
+        {ok, Items, Dec2} ->
             Payload = iolist_to_binary([P || {_, P} <- Items]),
             Final = lists:keymember(final, 1, Items),
-            Data1 = Data#data{cap_buf = Rest, final_in = Data#data.final_in orelse Final},
-            case Fin andalso not Data1#data.final_in of
-                true -> end_tunnel(peer_reset, {stop, peer_reset, Data1}, Data1);
-                false -> stream_in(Payload, Final, Data1)
+            Data1 = Data#data{dec = Dec2, final_in = Data#data.final_in orelse Final},
+            case {Fin, Data1#data.final_in, masque_tcp_capsule:end_of_stream(Dec2)} of
+                {true, false, _} ->
+                    end_tunnel(peer_reset, {stop, peer_reset, Data1}, Data1);
+                {true, true, {error, Why}} ->
+                    Reason = {bad_capsule, Why},
+                    end_tunnel(Reason, {stop, Reason, Data1}, Data1);
+                _ ->
+                    stream_in(Payload, Final, Data1)
             end
     end;
 %% Incoming stream data - raw TCP bytes (no capsule decoding)
@@ -518,7 +532,7 @@ do_connect(#data{pool_owner = PoolOwner} = Data, _Opts) when
     ReqOpts =
         case Data#data.transport of
             h3 -> #{end_stream => false};
-            h2 -> #{protocol => protocol(Data#data.framing)}
+            h2 -> #{protocol => Data#data.token}
         end,
     case
         masque_upstream_owner:acquire_stream(
@@ -591,7 +605,7 @@ do_connect(#data{transport = h2} = Data, Opts) ->
                         h2:request(
                             Conn,
                             ReqHeaders,
-                            #{protocol => protocol(Data#data.framing)}
+                            #{protocol => Data#data.token}
                         )
                     of
                         {ok, StreamId} ->
@@ -648,8 +662,10 @@ send_out(#data{} = Data, Payload) ->
 
 %% Bytes for the stream: as they are in raw mode, as DATA or FINAL_DATA
 %% in capsule mode.
-frame(#data{framing = capsule}, Bytes, Fin) -> masque_tcp_capsule:encode(Bytes, Fin);
-frame(_Data, Bytes, _Fin) -> Bytes.
+frame(#data{framing = capsule, version = V}, Bytes, Fin) ->
+    masque_tcp_capsule:encode(V, Bytes, Fin);
+frame(_Data, Bytes, _Fin) ->
+    Bytes.
 
 transport_send_data(#data{transport = h3, conn = C, stream_id = S}, Bytes, Fin) ->
     quic_h3:send_data(C, S, Bytes, Fin);
@@ -666,6 +682,7 @@ transport_close(#data{transport = h2, conn = C}) -> h2:close(C).
 
 request_headers(#data{
     framing = Framing,
+    token = Token,
     proxy_host = ProxyHost,
     proxy_port = ProxyPort,
     target_host = TargetHost,
@@ -680,16 +697,11 @@ request_headers(#data{
     Authority = build_authority(ProxyHost, ProxyPort),
     [
         {<<":method">>, <<"CONNECT">>},
-        {<<":protocol">>, protocol(Framing)},
+        {<<":protocol">>, Token},
         {<<":scheme">>, <<"https">>},
         {<<":authority">>, Authority},
         {<<":path">>, Path}
     ] ++ framing_headers(Framing) ++ Extra.
-
-%% draft-ietf-httpbis-connect-tcp-10 section 8.1: implementations of
-%% that draft version use `connect-tcp-07'.
-protocol(capsule) -> ?MASQUE_CONNECT_TCP_07_PROTOCOL;
-protocol(raw) -> ?MASQUE_CONNECT_TCP_PROTOCOL.
 
 framing_headers(capsule) -> [{<<"capsule-protocol">>, <<"?1">>}];
 framing_headers(raw) -> [].

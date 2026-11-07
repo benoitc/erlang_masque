@@ -52,11 +52,15 @@
     %% process reading: the peer may be blocked writing to us.
     writer :: pid() | undefined,
     %% `raw': classic CONNECT. `capsule': GET with `Upgrade: connect-tcp'
-    %% and DATA / FINAL_DATA capsules (draft-ietf-httpbis-connect-tcp-10),
+    %% and DATA / FINAL_DATA capsules (draft-ietf-httpbis-connect-tcp-18),
     %% from the `tcp_framing' option.
     framing = raw :: raw | capsule,
+    %% The `Upgrade' token and capsule codes (`tcp_protocol' option),
+    %% and the decoder of the proxy's capsules.
+    token = ?MASQUE_CONNECT_TCP_PROTOCOL :: binary(),
+    version = final :: masque_tcp_capsule:version(),
+    dec :: masque_tcp_capsule:decoder() | undefined,
     uri_template = ?MASQUE_DEFAULT_TCP_URI_TEMPLATE :: binary(),
-    cap_buf = <<>> :: binary(),
     %% Capsule mode: the proxy sent FINAL_DATA.
     final_in = false :: boolean()
 }).
@@ -114,6 +118,7 @@ init({Target, Opts, Owner}) ->
     ok = masque_client_owner:init(Opts),
     Mode = maps:get(mode, Opts, message),
     ProxyAuth = maps:get(proxy_authorization, Opts, undefined),
+    {Framing, Token, Version} = masque_tcp_capsule:client_protocol(Opts),
     ok = validate_proxy_auth(ProxyAuth),
     Data = #data{
         owner = Owner,
@@ -129,7 +134,10 @@ init({Target, Opts, Owner}) ->
         extra_headers = sanitise_extra_headers(
             maps:get(request_headers, Opts, [])
         ),
-        framing = maps:get(tcp_framing, Opts, raw),
+        framing = Framing,
+        token = Token,
+        version = Version,
+        dec = masque_tcp_capsule:decoder(Version),
         uri_template = maps:get(uri_template, Opts, ?MASQUE_DEFAULT_TCP_URI_TEMPLATE)
     },
     %% Defer `do_handshake' until `handshake_await' arrives so the
@@ -238,7 +246,13 @@ open(info, {ssl, Sock, Bytes}, #data{socket = Sock} = Data) ->
 %% Capsule mode: the connection closing after FINAL_DATA is the end of
 %% a finished tunnel; without it the tunnel was aborted.
 open(info, {ssl_closed, Sock}, #data{socket = Sock, framing = capsule, final_in = true} = Data) ->
-    {stop, normal, Data};
+    case masque_tcp_capsule:end_of_stream(Data#data.dec) of
+        ok ->
+            {stop, normal, Data};
+        {error, Why} ->
+            Reason = {bad_capsule, Why},
+            end_tunnel(Reason, {stop, Reason, Data}, Data)
+    end;
 open(info, {ssl_closed, Sock}, #data{socket = Sock, framing = capsule} = Data) ->
     end_tunnel(peer_reset, {stop, peer_reset, Data}, Data);
 open(info, {ssl_closed, Sock}, #data{socket = Sock} = Data) ->
@@ -367,7 +381,7 @@ do_connect(Data0, Opts) ->
         {ok, Socket, Leftover} ->
             {ok, Socket, Leftover, Data};
         {fallback, Rejected} ->
-            %% draft-ietf-httpbis-connect-tcp-10 section 5.2: a proxy
+            %% draft-ietf-httpbis-connect-tcp-18 section 5.2: a proxy
             %% that refuses classic CONNECT this way may only speak
             %% connect-tcp, so retry on the default template.
             Upgrade = upgrade(Data),
@@ -446,7 +460,14 @@ wants_upgrade(_Data, _Code, _Hdrs) ->
     false.
 
 upgrade(Data) ->
-    Data#data{framing = capsule, uri_template = ?MASQUE_DEFAULT_TCP_URI_TEMPLATE}.
+    {capsule, Token, Version} = masque_tcp_capsule:client_protocol(#{tcp_framing => capsule}),
+    Data#data{
+        framing = capsule,
+        token = Token,
+        version = Version,
+        dec = masque_tcp_capsule:decoder(Version),
+        uri_template = ?MASQUE_DEFAULT_TCP_URI_TEMPLATE
+    }.
 
 %% Section 5.2 also asks the client to remember a proxy that only
 %% speaks connect-tcp, so later tunnels skip the refused CONNECT.
@@ -491,10 +512,11 @@ connect_request(#data{
     <<"CONNECT ", Authority/binary, " HTTP/1.1\r\n", "Host: ", Authority/binary, "\r\n",
         AuthLine/binary, ExtraLines/binary, "\r\n">>.
 
-%% draft-ietf-httpbis-connect-tcp-10 section 3.2: the target goes in the
-%% path of a `GET' that upgrades to `connect-tcp', spelled
-%% `connect-tcp-07' as section 8.1 asks of this draft version.
+%% draft-ietf-httpbis-connect-tcp-18 section 3.2: the target goes in the
+%% path of a `GET' that upgrades to `connect-tcp', or the draft's
+%% interop token.
 upgrade_request(#data{
+    token = Token,
     proxy_host = ProxyHost,
     proxy_port = ProxyPort,
     target_host = Host,
@@ -513,7 +535,7 @@ upgrade_request(#data{
         end,
     ExtraLines = iolist_to_binary([[N, <<": ">>, Val, <<"\r\n">>] || {N, Val} <- Extra]),
     <<"GET ", Path/binary, " HTTP/1.1\r\n", "Host: ", ProxyAuthority/binary, "\r\n",
-        "Connection: Upgrade\r\n", "Upgrade: connect-tcp-07\r\n", "Capsule-Protocol: ?1\r\n",
+        "Connection: Upgrade\r\n", "Upgrade: ", Token/binary, "\r\n", "Capsule-Protocol: ?1\r\n",
         AuthLine/binary, ExtraLines/binary, "\r\n">>.
 
 %% Bytes from the proxy: as they are in raw mode, the DATA and
@@ -521,19 +543,21 @@ upgrade_request(#data{
 %% proxy's side.
 incoming(Bytes, #data{framing = raw} = Data) ->
     {deliver_bytes(Bytes, Data), false};
-incoming(Bytes, #data{cap_buf = Buf} = Data) ->
-    case masque_tcp_capsule:decode(Buf, Bytes, ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE) of
-        {ok, Items, Rest} ->
+incoming(Bytes, #data{dec = Dec} = Data) ->
+    case masque_tcp_capsule:decode(Dec, Bytes) of
+        {ok, Items, Dec2} ->
             Payload = iolist_to_binary([P || {_, P} <- Items]),
             Final = lists:keymember(final, 1, Items),
-            Data1 = Data#data{cap_buf = Rest, final_in = Data#data.final_in orelse Final},
+            Data1 = Data#data{dec = Dec2, final_in = Data#data.final_in orelse Final},
             {deliver_bytes(Payload, Data1), Final};
-        {error, _} = Err ->
-            Err
+        {error, Why} ->
+            {error, {bad_capsule, Why}}
     end.
 
-frame(#data{framing = capsule}, Bytes, Fin) -> masque_tcp_capsule:encode(Bytes, Fin);
-frame(_Data, Bytes, _Fin) -> Bytes.
+frame(#data{framing = capsule, version = V}, Bytes, Fin) ->
+    masque_tcp_capsule:encode(V, Bytes, Fin);
+frame(_Data, Bytes, _Fin) ->
+    Bytes.
 
 sanitise_extra_headers(List) when is_list(List) ->
     %% Strip CR/LF to prevent header injection on the raw CONNECT

@@ -23,9 +23,22 @@
     tcp_first_bytes_survive_handover/1,
     capsule_abort_resets_target/1,
     capsule_listener_without_header/1,
-    capsule_07_token/1,
     capsule_h1_without_header/1,
-    capsule_expect_continue/1,
+    vec_tokens/1,
+    vec_graceful_close/1,
+    vec_half_close_then_data/1,
+    vec_target_reset/1,
+    vec_client_abort/1,
+    vec_idle_timeout_aborts/1,
+    vec_second_final/1,
+    vec_data_after_final/1,
+    vec_truncated_capsule/1,
+    vec_truncated_without_final/1,
+    vec_large_capsule_streams/1,
+    vec_continue_before_dial/1,
+    vec_rejections/1,
+    vec_policy_refusal/1,
+    vec_happy_eyeballs/1,
     capsule_optimistic_data/1,
     tcp_fallback_on_426/1,
     tcp_fallback_on_501/1,
@@ -93,7 +106,13 @@ all() ->
         {group, h1},
         {group, h3_capsule},
         {group, h2_capsule},
-        {group, h1_capsule}
+        {group, h1_capsule},
+        {group, h3_token_final},
+        {group, h2_token_final},
+        {group, h1_token_final},
+        {group, h3_token_08},
+        {group, h2_token_08},
+        {group, h1_token_08}
     ].
 
 groups() ->
@@ -129,8 +148,36 @@ groups() ->
         stop_listener_with_open_tunnels,
         owner_crash_cleans_up
     ],
-    Capsule1 = [capsule_07_token, capsule_expect_continue],
-    Capsule = [capsule_abort_resets_target, capsule_listener_without_header | Capsule1],
+    %% draft-ietf-httpbis-connect-tcp-18 wire vectors, on every transport.
+    Vectors = [
+        vec_tokens,
+        vec_graceful_close,
+        vec_half_close_then_data,
+        vec_target_reset,
+        vec_client_abort,
+        vec_idle_timeout_aborts,
+        vec_second_final,
+        vec_data_after_final,
+        vec_truncated_capsule,
+        vec_truncated_without_final,
+        vec_large_capsule_streams,
+        vec_continue_before_dial,
+        vec_rejections,
+        vec_policy_refusal,
+        vec_happy_eyeballs
+    ],
+    Capsule = [
+        capsule_abort_resets_target, capsule_listener_without_header, capsule_optimistic_data
+    ],
+    %% The CONNECT-TCP cases that matter for each token's framing.
+    Core = [
+        tcp_download,
+        tcp_upload,
+        tcp_full_duplex,
+        tcp_target_reset,
+        tcp_client_close_reaches_target
+        | HalfClose
+    ],
     Fallback = [tcp_fallback_on_426, tcp_fallback_on_501, tcp_no_fallback_on_plain_426],
     [
         {h3, [],
@@ -143,11 +190,20 @@ groups() ->
                 ]},
         {h2, [], Tcp ++ HalfClose ++ Other ++ [h2_goaway_tells_client | GoAway]},
         {h1, [], Tcp ++ Other ++ [h1_udp_stalled_client | Fallback]},
-        %% CONNECT-TCP framed as in draft-ietf-httpbis-connect-tcp-10.
-        {h3_capsule, [], Tcp ++ HalfClose ++ Capsule ++ [capsule_optimistic_data]},
-        {h2_capsule, [], Tcp ++ HalfClose ++ Capsule ++ [capsule_optimistic_data]},
+        %% CONNECT-TCP in capsules (draft-ietf-httpbis-connect-tcp-18),
+        %% with the client's default token, `connect-tcp-12'.
+        {h3_capsule, [], Tcp ++ HalfClose ++ Capsule ++ Vectors},
+        {h2_capsule, [], Tcp ++ HalfClose ++ Capsule ++ Vectors},
         %% Capsules carry FIN, so h1 can half-close in this mode.
-        {h1_capsule, [], Tcp ++ HalfClose ++ [capsule_h1_without_header | Capsule1]}
+        {h1_capsule, [], Tcp ++ HalfClose ++ [capsule_h1_without_header | Vectors]},
+        %% The client on the final token, and on draft -09's token and
+        %% provisional codes.
+        {h3_token_final, [], Core},
+        {h2_token_final, [], Core},
+        {h1_token_final, [], Core},
+        {h3_token_08, [], Core},
+        {h2_token_08, [], Core},
+        {h1_token_08, [], Core}
     ].
 
 init_per_suite(Config) ->
@@ -187,8 +243,18 @@ init_per_group(Group, Config) ->
         "h3_capsule" -> [{transport, h3}, {tcp_framing, capsule} | Config];
         "h2_capsule" -> [{transport, h2}, {tcp_framing, capsule} | Config];
         "h1_capsule" -> [{transport, h1}, {tcp_framing, capsule} | Config];
+        [$h, N | "_token_final"] -> token_group([$h, N], <<"connect-tcp">>, Config);
+        [$h, N | "_token_08"] -> token_group([$h, N], <<"connect-tcp-08">>, Config);
         _ -> [{transport, Group} | Config]
     end.
+
+token_group(Transport, Token, Config) ->
+    [
+        {transport, list_to_existing_atom(Transport)},
+        {tcp_framing, capsule},
+        {tcp_protocol, Token}
+        | Config
+    ].
 
 end_per_group(_Transport, _Config) ->
     ok.
@@ -204,6 +270,16 @@ init_per_testcase(Case, Config) ->
 
 case_opts(capsule_listener_without_header) ->
     #{tcp_framing => capsule};
+case_opts(vec_policy_refusal) ->
+    #{handler_opts => #{allow_private => false}};
+case_opts(vec_idle_timeout_aborts) ->
+    #{handler_opts => #{allow_private => true, allow_self => true, idle_timeout_ms => 1000}};
+case_opts(vec_continue_before_dial) ->
+    Slow = fun(_Host) ->
+        timer:sleep(1500),
+        {ok, {127, 0, 0, 1}}
+    end,
+    #{handler_opts => #{allow_private => true, allow_self => true, resolver => Slow}};
 case_opts(bind_peer_filter) ->
     #{accept_bind => true, handler_opts => #{bind_address => {127, 0, 0, 1}}};
 case_opts(_) ->
@@ -437,12 +513,12 @@ first_bytes_round(Config) ->
     <<"z">> = recv_bytes(Sess, 1),
     close(Sess).
 
-%% A -10 client whose stream ends without FINAL_DATA aborted the
-%% tunnel, so the target gets a reset rather than a clean close
-%% (draft-ietf-httpbis-connect-tcp-10 section 3.4).
+%% A client whose stream ends without FINAL_DATA aborted the tunnel, so
+%% the target gets a reset rather than a clean close
+%% (draft-ietf-httpbis-connect-tcp-18 section 3.5).
 capsule_abort_resets_target(Config) ->
     Headers = tcp_request(Config) ++ [{<<"capsule-protocol">>, <<"?1">>}],
-    Data = masque_tcp_capsule:encode(<<"wclo">>, false),
+    Data = masque_tcp_capsule:encode(final, <<"wclo">>, false),
     Stream =
         case ?config(transport, Config) of
             h3 ->
@@ -477,12 +553,13 @@ capsule_abort_resets_target(Config) ->
         {h2, C} -> h2:close(C)
     end.
 
-%% A -10 client may leave `capsule-protocol' out. A listener set to
+%% A client of the plain `connect-tcp' token may leave
+%% `capsule-protocol' out (section 3.3 makes it a SHOULD). A listener set to
 %% `tcp_framing => capsule' still frames its tunnel in capsules.
 capsule_listener_without_header(Config) ->
     Headers = tcp_request(Config),
-    Echo = masque_tcp_capsule:encode(<<"echo">>, false),
-    Ping = masque_tcp_capsule:encode(<<"ping">>, false),
+    Echo = masque_tcp_capsule:encode(final, <<"echo">>, false),
+    Ping = masque_tcp_capsule:encode(final, <<"ping">>, false),
     case ?config(transport, Config) of
         h3 ->
             Conn = raw_h3_connect(Config),
@@ -506,40 +583,26 @@ capsule_listener_without_header(Config) ->
             h2:close(Conn)
     end.
 
-%% A -10 client spells the protocol `connect-tcp-07' (section 8.1) and
-%% may leave `capsule-protocol' out: the tunnel is framed in capsules
-%% whatever the listener's `tcp_framing', and the 2xx carries
-%% `capsule-protocol' and `Proxy-Status'.
-capsule_07_token(Config) ->
-    capsule_echo(Config, <<"connect-tcp-07">>, []).
-
-%% On h1 the upgrade itself says -10, so `Capsule-Protocol' may be left
-%% out of the request.
+%% On h1 the upgrade token says CONNECT-TCP, so `Capsule-Protocol' may be
+%% left out of the request (section 3.2 makes it a SHOULD).
 capsule_h1_without_header(Config) ->
-    capsule_echo(Config, <<"connect-tcp">>, []).
-
-%% A request that expects `100-continue' hears it before the final
-%% response (section 4.2), and a client that asked for it with
-%% `request_headers' still gets its tunnel.
-capsule_expect_continue(Config) ->
-    capsule_echo(Config, <<"connect-tcp-07">>, [{<<"expect">>, <<"100-continue">>}]),
-    Target = {<<"127.0.0.1">>, ?config(target_port, Config)},
-    Sess = connect(Config, Target, #{
-        protocol => tcp, request_headers => [{<<"expect">>, <<"100-continue">>}]
-    }),
-    ok = masque:send(Sess, <<"echo">>),
-    ok = masque:send(Sess, <<"z">>),
-    <<"z">> = recv_bytes(Sess, 1),
-    close(Sess).
+    W = wire_open(Config, <<"connect-tcp">>, []),
+    ok = wire_send(W, [
+        masque_tcp_capsule:encode(final, <<"echo">>, false),
+        masque_tcp_capsule:encode(final, <<"ping">>, false)
+    ]),
+    ?assertEqual(<<"ping">>, wire_payload(W, final, 4)),
+    wire_close(W).
 
 %% Bytes sent before the 2xx (section 4.1) reach the target once it is
 %% connected, and are dropped with the request when the target refuses.
 capsule_optimistic_data(Config) ->
-    Echo = masque_tcp_capsule:encode(<<"echo">>, false),
-    Ping = masque_tcp_capsule:encode(<<"ping">>, false),
-    Token = <<"connect-tcp-07">>,
+    Echo = masque_tcp_capsule:encode(final, <<"echo">>, false),
+    Ping = masque_tcp_capsule:encode(final, <<"ping">>, false),
+    Token = <<"connect-tcp-12">>,
     {Tag, Conn, Sid} = raw_request(Config, tcp_request(Config, Token), Token),
     ok = raw_send(Tag, Conn, Sid, <<Echo/binary, Ping/binary>>),
+    {100, _} = raw_response(Tag, Conn, Sid),
     {200, _} = raw_response(Tag, Conn, Sid),
     ?assertEqual(Ping, raw_recv(Tag, Conn, Sid, byte_size(Ping), <<>>)),
     {ok, Closed} = gen_tcp:listen(0, [{ip, {127, 0, 0, 1}}]),
@@ -548,42 +611,378 @@ capsule_optimistic_data(Config) ->
     Refused = tcp_request(Config, Token, ClosedPort),
     {Tag, Conn, Sid2} = raw_request(Config, Conn, Refused, Token),
     ok = raw_send(Tag, Conn, Sid2, Ping),
+    {100, _} = raw_response(Tag, Conn, Sid2),
     {Status, _} = raw_response(Tag, Conn, Sid2),
     ?assert(Status >= 400),
     raw_close(Tag, Conn).
 
-capsule_echo(Config, Token, Extra) ->
-    Echo = masque_tcp_capsule:encode(<<"echo">>, false),
-    Ping = masque_tcp_capsule:encode(<<"ping">>, false),
-    Expect = Extra =/= [],
+%%--------------------------------------------------------------------
+%% draft-ietf-httpbis-connect-tcp-18 wire vectors
+%%
+%% These cases drive the listener with hand-built requests and capsules
+%% on all three transports, so every byte on the wire is the test's.
+%%--------------------------------------------------------------------
+
+%% Every token a client may use (sections 3.2, 3.3, 8.1.1, and the -09
+%% and -10 tokens with their provisional codes): the listener confirms
+%% with 100 (section 4.3), then answers 2xx or 101 with
+%% `capsule-protocol' and `Proxy-Status', and frames the tunnel with
+%% that token's codes. Unknown capsules in between are skipped.
+vec_tokens(Config) ->
+    lists:foreach(
+        fun({Token, Version, Extra}) ->
+            ct:log("token ~s", [Token]),
+            W = wire_open(Config, Token, Extra),
+            Other = iolist_to_binary(masque_capsule:encode(16#ff37a0, <<"skip me">>)),
+            ok = wire_send(W, [
+                masque_tcp_capsule:encode(Version, <<"echo">>, false),
+                Other,
+                masque_tcp_capsule:encode(Version, <<"ping">>, false)
+            ]),
+            ?assertEqual(<<"ping">>, wire_payload(W, Version, 4)),
+            wire_close(W)
+        end,
+        [
+            {<<"connect-tcp-12">>, final, []},
+            {<<"connect-tcp">>, final, [{<<"capsule-protocol">>, <<"?1">>}]},
+            {<<"connect-tcp-08">>, provisional, []},
+            {<<"connect-tcp-07">>, provisional, []}
+        ]
+    ).
+
+%% Figure 6: DATA{"abc"}, FINAL_DATA{""} reach the target as bytes and
+%% a FIN; the target's answer and FIN come back as capsules ending in
+%% FINAL_DATA, and the stream ends cleanly.
+vec_graceful_close(Config) ->
+    W = wire_open(Config, <<"connect-tcp-12">>, []),
+    ok = wire_send(W, [
+        masque_tcp_capsule:encode(final, <<"grac">>, false),
+        masque_tcp_capsule:encode(final, <<"abc">>, false),
+        masque_tcp_capsule:encode(final, <<>>, true)
+    ]),
+    receive
+        {target, got_all, Got} -> ?assertEqual(<<"abc">>, Got)
+    after 5000 -> ct:fail(target_no_fin)
+    end,
+    ?assertEqual({<<"xyz">>, final, clean}, wire_drain(W, final)),
+    wire_close(W).
+
+%% Figure 9, first half: the target answers after the client's FIN, and
+%% its last bytes and FIN arrive while the client side is closed.
+vec_half_close_then_data(Config) ->
+    W = wire_open(Config, <<"connect-tcp-12">>, []),
+    ok = wire_send(W, [
+        masque_tcp_capsule:encode(final, <<"fin1">>, false)
+    ]),
+    %% The target sent "bye" and its FIN; ours is still open.
+    {Bye, final, _} = wire_drain_until_final(W, final),
+    ?assertEqual(<<"bye">>, Bye),
+    ok = wire_send(W, masque_tcp_capsule:encode(final, <<"late">>, true)),
+    receive
+        {target, got, Late} -> ?assertEqual(<<"late">>, Late)
+    after 5000 -> ct:fail(late_bytes_lost)
+    end,
+    wire_close(W).
+
+%% Figure 7: a target RST aborts the stream (H3_CONNECT_ERROR,
+%% CONNECT_ERROR, or on h1 a close without FINAL_DATA).
+vec_target_reset(Config) ->
+    W = wire_open(Config, <<"connect-tcp-12">>, []),
+    ok = wire_send(W, masque_tcp_capsule:encode(final, <<"rset">>, false)),
+    ?assertMatch({<<"x">>, _, aborted}, wire_drain(W, final)),
+    wire_close(W).
+
+%% Figure 7 the other way: the client aborts, the target gets an RST.
+vec_client_abort(Config) ->
+    W = wire_open(Config, <<"connect-tcp-12">>, []),
+    ok = wire_send(W, masque_tcp_capsule:encode(final, <<"wclo">>, false)),
+    timer:sleep(200),
+    ok = wire_abort(W),
+    expect_target_reset().
+
+%% Figure 8 and section 3.5: a local timeout is an abrupt close. The
+%% listener's idle timeout resets the stream and the target.
+vec_idle_timeout_aborts(Config) ->
+    W = wire_open(Config, <<"connect-tcp-12">>, []),
+    ok = wire_send(W, masque_tcp_capsule:encode(final, <<"wclo">>, false)),
+    expect_target_reset(),
+    ?assertMatch({<<"x">>, _, aborted}, wire_drain(W, final)),
+    wire_close(W).
+
+%% Section 3.5.1: invalid data is an abrupt close. Each vector follows
+%% a FINAL_DATA, so a target still writing sees its connection reset.
+vec_second_final(Config) ->
+    invalid_after_final(Config, masque_tcp_capsule:encode(final, <<>>, true), end_stream).
+
+vec_data_after_final(Config) ->
+    invalid_after_final(Config, masque_tcp_capsule:encode(final, <<"x">>, false), end_stream).
+
+%% A capsule cut by the end of the stream, after FINAL_DATA.
+vec_truncated_capsule(Config) ->
+    invalid_after_final(Config, <<16#3f, 10, "abc">>, end_stream).
+
+%% A capsule cut by the end of the stream, without FINAL_DATA: an abort.
+vec_truncated_without_final(Config) ->
+    W = wire_open(Config, <<"connect-tcp-12">>, []),
+    ok = wire_send(W, [masque_tcp_capsule:encode(final, <<"wclo">>, false), <<16#08, 5, "ab">>]),
+    timer:sleep(200),
+    ok = wire_end(W),
+    expect_target_reset(),
+    wire_close(W).
+
+invalid_after_final(Config, Bad, end_stream) ->
+    W = wire_open(Config, <<"connect-tcp-12">>, []),
+    ok = wire_send(W, [
+        masque_tcp_capsule:encode(final, <<"fins">>, false),
+        masque_tcp_capsule:encode(final, <<>>, true)
+    ]),
+    receive
+        {target, fin} -> ok
+    after 5000 -> ct:fail(target_no_fin)
+    end,
+    ok = wire_send(W, Bad),
+    ok = wire_end(W),
+    receive
+        {target, after_fin, Result} -> ?assertMatch({error, _}, Result)
+    after 5000 -> ct:fail(target_not_reset)
+    end,
+    wire_close(W).
+
+%% Section 3.1: payload is forwarded before its capsule ends. One DATA
+%% capsule of 1 MiB: the target echoes its first bytes while the rest
+%% has not been sent.
+vec_large_capsule_streams(Config) ->
+    Len = 1024 * 1024,
+    W = wire_open(Config, <<"connect-tcp-12">>, []),
+    First = binary:copy(<<"a">>, 1000),
+    ok = wire_send(W, [<<16#08, 2#10:2, Len:30>>, <<"echo">>, First]),
+    ?assertEqual(First, wire_payload(W, final, 1000)),
+    Rest = binary:copy(<<"b">>, Len - 1004),
+    ok = wire_send(W, Rest),
+    ?assertEqual(Rest, wire_payload(W, final, byte_size(Rest))),
+    wire_close(W).
+
+%% Section 4.3: the 100 comes before the target is dialed. The resolver
+%% takes 1.5 s; the 100 must not wait for it.
+vec_continue_before_dial(Config) ->
+    T0 = erlang:monotonic_time(millisecond),
+    W = wire_open(Config, <<"connect-tcp-12">>, [], fun(Status) ->
+        Elapsed = erlang:monotonic_time(millisecond) - T0,
+        ct:log("status ~p after ~p ms", [Status, Elapsed]),
+        case Status of
+            100 -> ?assert(Elapsed < 1000);
+            _ -> ?assert(Elapsed >= 1400)
+        end
+    end),
+    ok = wire_send(W, masque_tcp_capsule:encode(final, <<"echo">>, false)),
+    wire_close(W).
+
+%% Section 4.2 and 4.3: a refused request gets a 4xx or 5xx with
+%% `Proxy-Status' and no tunnel; on h1 the response is not cacheable
+%% (section 3.4.3). A target that refuses the connection is a 5xx,
+%% after the 100.
+vec_rejections(Config) ->
+    {ok, Closed} = gen_tcp:listen(0, [{ip, {127, 0, 0, 1}}]),
+    {ok, ClosedPort} = inet:port(Closed),
+    ok = gen_tcp:close(Closed),
+    {Statuses, Hdrs} = wire_reject(Config, <<"connect-tcp-12">>, ClosedPort),
+    ?assertEqual(100, hd(Statuses)),
+    Final = lists:last(Statuses),
+    ?assert(Final >= 500 andalso Final < 600),
+    ?assertMatch(<<"masque; error=", _/binary>>, proplists:get_value(<<"proxy-status">>, Hdrs)),
+    {Statuses2, Hdrs2} = wire_reject(Config, <<"connect-tcp-12">>, 0),
+    ?assert(lists:last(Statuses2) >= 400 andalso lists:last(Statuses2) < 500),
+    ?assertNotEqual(undefined, proplists:get_value(<<"proxy-status">>, Hdrs2)),
     case ?config(transport, Config) of
         h1 ->
-            {Sock, Heads, Rest} = h1_upgrade(Config, Token, Extra),
-            Statuses = [St || {St, _} <- Heads],
-            ?assertEqual(
-                case Expect of
-                    true -> [100, 101];
-                    false -> [101]
-                end,
-                Statuses
-            ),
+            ?assertEqual(<<"no-store">>, proplists:get_value(<<"cache-control">>, Hdrs)),
+            ?assertEqual(<<"no-store">>, proplists:get_value(<<"cache-control">>, Hdrs2));
+        _ ->
+            ok
+    end.
+
+%% Section 4.2: a target the proxy's policy refuses (here a private
+%% address) is a 403, not a failed connection.
+vec_policy_refusal(Config) ->
+    {Statuses, Hdrs} = wire_reject(Config, <<"connect-tcp-12">>, ?config(target_port, Config)),
+    ?assertEqual([100, 403], Statuses),
+    ?assertEqual(
+        <<"masque; error=destination_ip_prohibited">>,
+        proplists:get_value(<<"proxy-status">>, Hdrs)
+    ).
+
+%% Section 4.1: a target name with addresses in both families is raced.
+%% `localhost' gives `::1' first, where nothing listens, then
+%% `127.0.0.1', where the target is.
+vec_happy_eyeballs(Config) ->
+    Sess = connect(Config, {<<"localhost">>, ?config(target_port, Config)}, #{protocol => tcp}),
+    ok = masque:send(Sess, <<"echo">>),
+    ok = masque:send(Sess, <<"z">>),
+    <<"z">> = recv_bytes(Sess, 1),
+    close(Sess).
+
+expect_target_reset() ->
+    receive
+        {target, closed, Reason} -> ?assertEqual(econnreset, Reason)
+    after 5000 -> ct:fail(target_not_reset)
+    end.
+
+%%--------------------------------------------------------------------
+%% Wire helpers: one request on the transport under test.
+%%--------------------------------------------------------------------
+
+wire_open(Config, Token, Extra) ->
+    wire_open(Config, Token, Extra, fun(_) -> ok end).
+
+%% Opens the request, checks the 100 and the success response, and
+%% calls `OnStatus' for each status as it arrives.
+wire_open(Config, Token, Extra, OnStatus) ->
+    TargetPort = ?config(target_port, Config),
+    case ?config(transport, Config) of
+        h1 ->
+            {Sock, Heads, Rest} = h1_upgrade(Config, Token, Extra, TargetPort, OnStatus),
+            ?assertEqual([100, 101], [St || {St, _} <- Heads]),
             {101, Hdrs} = lists:last(Heads),
             assert_capsule_response(Hdrs),
             ?assertEqual(Token, proplists:get_value(<<"upgrade">>, Hdrs)),
-            ok = ssl:send(Sock, <<Echo/binary, Ping/binary>>),
-            ?assertEqual(Ping, h1_recv(Sock, byte_size(Ping), Rest)),
-            ssl:close(Sock);
+            Ref = make_ref(),
+            put({h1_rest, Ref}, Rest),
+            {h1, Sock, Rest, Ref};
         _ ->
-            {Tag, Conn, Sid} = raw_request(Config, tcp_request(Config, Token) ++ Extra, Token),
-            case Expect of
-                true -> {100, _} = raw_response(Tag, Conn, Sid);
-                false -> ok
-            end,
+            {Tag, Conn, Sid} = raw_request(
+                Config, tcp_request(Config, Token, TargetPort) ++ Extra, Token
+            ),
+            {100, _} = raw_response(Tag, Conn, Sid),
+            OnStatus(100),
             {200, Hdrs} = raw_response(Tag, Conn, Sid),
+            OnStatus(200),
             assert_capsule_response(Hdrs),
-            ok = raw_send(Tag, Conn, Sid, <<Echo/binary, Ping/binary>>),
-            ?assertEqual(Ping, raw_recv(Tag, Conn, Sid, byte_size(Ping), <<>>)),
-            raw_close(Tag, Conn)
+            {Tag, Conn, Sid, make_ref()}
+    end.
+
+%% A request that is refused: the statuses seen and the final headers.
+wire_reject(Config, Token, TargetPort) ->
+    case ?config(transport, Config) of
+        h1 ->
+            {Sock, Heads, _} = h1_upgrade(Config, Token, [], TargetPort, fun(_) -> ok end),
+            ssl:close(Sock),
+            {[St || {St, _} <- Heads], element(2, lists:last(Heads))};
+        _ ->
+            {Tag, Conn, Sid} = raw_request(Config, tcp_request(Config, Token, TargetPort), Token),
+            Result = reject_statuses(Tag, Conn, Sid, []),
+            raw_close(Tag, Conn),
+            Result
+    end.
+
+reject_statuses(Tag, Conn, Sid, Acc) ->
+    case raw_response(Tag, Conn, Sid) of
+        {St, _} when St < 200 -> reject_statuses(Tag, Conn, Sid, [St | Acc]);
+        {St, Hdrs} -> {lists:reverse([St | Acc]), Hdrs}
+    end.
+
+wire_send({h1, Sock, _, _}, Bin) -> ssl:send(Sock, Bin);
+wire_send({Tag, Conn, Sid, _}, Bin) -> raw_send(Tag, Conn, Sid, iolist_to_binary(Bin)).
+
+%% End our side of the stream without FINAL_DATA. On h1 there is no
+%% stream FIN, only the connection's end.
+wire_end({h1, Sock, _, _}) ->
+    ssl:close(Sock),
+    ok;
+wire_end({quic_h3, Conn, Sid, _}) ->
+    quic_h3:send_data(Conn, Sid, <<>>, true);
+wire_end({h2, Conn, Sid, _}) ->
+    h2:send_data(Conn, Sid, <<>>, true).
+
+wire_abort({h1, Sock, _, _}) ->
+    ssl:close(Sock),
+    ok;
+wire_abort({quic_h3, Conn, Sid, _}) ->
+    quic_h3:cancel(Conn, Sid, 16#10f);
+wire_abort({h2, Conn, Sid, _}) ->
+    h2:cancel(Conn, Sid, connect_error).
+
+wire_close({h1, Sock, _, _}) -> ssl:close(Sock);
+wire_close({Tag, Conn, _, _}) -> raw_close(Tag, Conn).
+
+%% `Want' bytes of decoded payload.
+wire_payload(W, Version, Want) ->
+    wire_payload(W, masque_tcp_capsule:decoder(Version), Want, <<>>).
+
+wire_payload(_W, _Dec, Want, Acc) when byte_size(Acc) >= Want ->
+    Acc;
+wire_payload(W, Dec, Want, Acc) ->
+    case wire_recv(W) of
+        {data, Bin, _} ->
+            {ok, Items, Dec2} = masque_tcp_capsule:decode(Dec, Bin),
+            wire_payload(W, Dec2, Want, <<Acc/binary, (payload(Items))/binary>>);
+        Other ->
+            ct:fail({stream_ended, Other, Acc})
+    end.
+
+%% Everything until the stream ends: the payload, whether FINAL_DATA
+%% came, and whether the stream ended `clean' or `aborted'.
+wire_drain(W, Version) ->
+    wire_drain(W, masque_tcp_capsule:decoder(Version), <<>>, no_final).
+
+wire_drain(W, Dec, Acc, Final) ->
+    case wire_recv(W) of
+        {data, Bin, Fin} ->
+            {ok, Items, Dec2} = masque_tcp_capsule:decode(Dec, Bin),
+            Final2 =
+                case lists:keymember(final, 1, Items) of
+                    true -> final;
+                    false -> Final
+                end,
+            Acc2 = <<Acc/binary, (payload(Items))/binary>>,
+            case Fin of
+                true -> {Acc2, Final2, ending(Final2)};
+                false -> wire_drain(W, Dec2, Acc2, Final2)
+            end;
+        reset ->
+            {Acc, Final, aborted};
+        closed ->
+            {Acc, Final, ending(Final)}
+    end.
+
+%% Until FINAL_DATA, without waiting for the stream to end.
+wire_drain_until_final(W, Version) ->
+    wire_drain_until_final(W, masque_tcp_capsule:decoder(Version), <<>>).
+
+wire_drain_until_final(W, Dec, Acc) ->
+    case wire_recv(W) of
+        {data, Bin, _} ->
+            {ok, Items, Dec2} = masque_tcp_capsule:decode(Dec, Bin),
+            Acc2 = <<Acc/binary, (payload(Items))/binary>>,
+            case lists:keymember(final, 1, Items) of
+                true -> {Acc2, final, open};
+                false -> wire_drain_until_final(W, Dec2, Acc2)
+            end;
+        Other ->
+            ct:fail({stream_ended, Other, Acc})
+    end.
+
+ending(final) -> clean;
+ending(no_final) -> aborted.
+
+payload(Items) -> iolist_to_binary([P || {_, P} <- Items]).
+
+%% On h1 the bytes read past the 101 come first.
+wire_recv({h1, Sock, _, Ref} = W) ->
+    case erase({h1_rest, Ref}) of
+        Rest when is_binary(Rest), Rest =/= <<>> ->
+            {data, Rest, false};
+        _ ->
+            case ssl:recv(Sock, 0, 10000) of
+                {ok, Bin} -> {data, Bin, false};
+                {error, closed} -> closed;
+                {error, Reason} -> ct:fail({h1_recv, Reason, W})
+            end
+    end;
+wire_recv({Tag, Conn, Sid, _}) ->
+    receive
+        {Tag, Conn, {data, Sid, Bin, Fin}} -> {data, Bin, Fin};
+        {Tag, Conn, {stream_reset, Sid, _}} -> reset
+    after 10000 -> ct:fail(no_stream_event)
     end.
 
 assert_capsule_response(Hdrs) ->
@@ -620,9 +1019,10 @@ raw_response(Tag, Conn, Sid) ->
     after 5000 -> ct:fail(no_response)
     end.
 
-%% A raw -10 upgrade on h1. Returns the responses read (interim ones
-%% first) and the bytes past the last one.
-h1_upgrade(Config, Token, Extra) ->
+%% A raw upgrade on h1. Returns the responses read (interim ones first)
+%% and the bytes past the last one; `OnStatus' sees each status as it
+%% arrives.
+h1_upgrade(Config, Token, Extra, TargetPort, OnStatus) ->
     #{port := Port} = ?config(server, Config),
     {ok, Sock} = ssl:connect(
         "127.0.0.1",
@@ -637,7 +1037,7 @@ h1_upgrade(Config, Token, Extra) ->
     ),
     Host = iolist_to_binary(["127.0.0.1:", integer_to_list(Port)]),
     Path = iolist_to_binary([
-        "/.well-known/masque/tcp/127.0.0.1/", integer_to_list(?config(target_port, Config)), "/"
+        "/.well-known/masque/tcp/127.0.0.1/", integer_to_list(TargetPort), "/"
     ]),
     ok = ssl:send(Sock, [
         <<"GET ">>,
@@ -650,10 +1050,10 @@ h1_upgrade(Config, Token, Extra) ->
         [[K, <<": ">>, V, <<"\r\n">>] || {K, V} <- Extra],
         <<"\r\n">>
     ]),
-    {Heads, Rest} = h1_heads(Sock, <<>>, []),
+    {Heads, Rest} = h1_heads(Sock, <<>>, [], OnStatus),
     {Sock, Heads, Rest}.
 
-h1_heads(Sock, Buf, Acc) ->
+h1_heads(Sock, Buf, Acc, OnStatus) ->
     case binary:split(Buf, <<"\r\n\r\n">>) of
         [Head, Rest] ->
             [StatusLine | Lines] = binary:split(Head, <<"\r\n">>, [global]),
@@ -663,23 +1063,18 @@ h1_heads(Sock, Buf, Acc) ->
              || L <- Lines, [K, V] <- [binary:split(L, <<":">>)]
             ],
             Status = binary_to_integer(Code),
+            OnStatus(Status),
             Acc1 = [{Status, Hdrs} | Acc],
             case Status of
-                100 -> h1_heads(Sock, Rest, Acc1);
+                100 -> h1_heads(Sock, Rest, Acc1, OnStatus);
                 _ -> {lists:reverse(Acc1), Rest}
             end;
         [_] ->
             {ok, More} = ssl:recv(Sock, 0, 5000),
-            h1_heads(Sock, <<Buf/binary, More/binary>>, Acc)
+            h1_heads(Sock, <<Buf/binary, More/binary>>, Acc, OnStatus)
     end.
 
-h1_recv(_Sock, Want, Acc) when byte_size(Acc) >= Want ->
-    Acc;
-h1_recv(Sock, Want, Acc) ->
-    {ok, More} = ssl:recv(Sock, 0, 5000),
-    h1_recv(Sock, Want, <<Acc/binary, More/binary>>).
-
-%% draft-ietf-httpbis-connect-tcp-10 section 5.2: a proxy that refuses
+%% draft-ietf-httpbis-connect-tcp-18 section 5.2: a proxy that refuses
 %% classic CONNECT with 426 and `Upgrade: connect-tcp', or with 501, is
 %% retried on the default template, and remembered.
 tcp_fallback_on_426(Config) ->
@@ -780,7 +1175,7 @@ fake_serve(Sock, Refusal, Parent) ->
                 Sock,
                 <<
                     "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n"
-                    "Upgrade: connect-tcp-07\r\nCapsule-Protocol: ?1\r\n\r\n"
+                    "Upgrade: connect-tcp-12\r\nCapsule-Protocol: ?1\r\n\r\n"
                 >>
             ),
             fake_echo(Sock, Rest)
@@ -1553,7 +1948,10 @@ connect(Config, Target, Opts0) ->
     Opts =
         case {Opts0, proplists:get_value(tcp_framing, Config)} of
             {#{protocol := tcp}, Framing} when Framing =/= undefined ->
-                Opts0#{tcp_framing => Framing};
+                case proplists:get_value(tcp_protocol, Config) of
+                    undefined -> Opts0#{tcp_framing => Framing};
+                    Token -> Opts0#{tcp_framing => Framing, tcp_protocol => Token}
+                end;
             _ ->
                 Opts0
         end,
@@ -1752,6 +2150,19 @@ target_mode(<<"fin1">>, Sock) ->
     {ok, Late} = gen_tcp:recv(Sock, 4, 5000),
     probe({target, got, Late}),
     gen_tcp:close(Sock);
+%% Figure 6: everything until the client's FIN, then an answer and ours.
+target_mode(<<"grac">>, Sock) ->
+    Bin = target_read_all(Sock, []),
+    probe({target, got_all, Bin}),
+    ok = gen_tcp:send(Sock, <<"xyz">>),
+    gen_tcp:close(Sock);
+%% After the client's FIN, keep writing: a reset shows as a failed
+%% write, a healthy tunnel takes the bytes.
+target_mode(<<"fins">>, Sock) ->
+    _ = target_read_all(Sock, []),
+    probe({target, fin}),
+    probe({target, after_fin, target_write_until_error(Sock, 30)}),
+    gen_tcp:close(Sock);
 target_mode(<<"rset">>, Sock) ->
     ok = gen_tcp:send(Sock, <<"x">>),
     timer:sleep(200),
@@ -1759,8 +2170,7 @@ target_mode(<<"rset">>, Sock) ->
     gen_tcp:close(Sock);
 target_mode(<<"wclo">>, Sock) ->
     ok = gen_tcp:send(Sock, <<"x">>),
-    {error, Reason} = gen_tcp:recv(Sock, 0),
-    probe({target, closed, Reason}),
+    probe({target, closed, target_recv_error(Sock)}),
     gen_tcp:close(Sock);
 target_mode(<<"floo">>, Sock) ->
     target_flood(Sock, binary:copy(<<"f">>, 64 * 1024));
@@ -1784,6 +2194,23 @@ target_slow_sink(Sock, Left, Ctx) ->
         {error, Reason} ->
             probe({target, slow_sink_failed, Reason, Left}),
             exit(normal)
+    end.
+
+%% Bytes may still arrive (a capsule cut short is forwarded as far as
+%% it went); the end is what counts.
+target_recv_error(Sock) ->
+    case gen_tcp:recv(Sock, 0) of
+        {ok, _} -> target_recv_error(Sock);
+        {error, Reason} -> Reason
+    end.
+
+target_write_until_error(_Sock, 0) ->
+    ok;
+target_write_until_error(Sock, N) ->
+    timer:sleep(100),
+    case gen_tcp:send(Sock, <<"y">>) of
+        ok -> target_write_until_error(Sock, N - 1);
+        {error, _} = Err -> Err
     end.
 
 target_read_all(Sock, Acc) ->

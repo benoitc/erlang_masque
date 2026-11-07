@@ -395,12 +395,10 @@ validate(
                     match_path(Path, Headers, UdpTemplate, udp);
                 ?MASQUE_CONNECT_TCP_PROTOCOL ->
                     match_path(Path, Headers, TcpTemplate, tcp);
-                ?MASQUE_CONNECT_TCP_07_PROTOCOL ->
-                    capsule_framed(match_path(Path, Headers, TcpTemplate, tcp));
                 ?MASQUE_CONNECT_IP_PROTOCOL ->
                     match_ip_path(Path, Headers, IpTemplate);
                 _ ->
-                    {error, bad_protocol}
+                    match_tcp_draft(Protocol, Path, Headers, TcpTemplate)
             end;
         _ ->
             {error, bad_method}
@@ -449,10 +447,18 @@ match_udp_or_bind(Path, Headers, Template) ->
             match_path(Path, Headers, Template, udp)
     end.
 
-%% A `connect-tcp-07' request speaks draft-ietf-httpbis-connect-tcp-10,
-%% whatever its headers say.
-capsule_framed({ok, Req}) -> {ok, Req#{tcp_framing => capsule}};
-capsule_framed(Error) -> Error.
+%% A CONNECT-TCP draft interop token (`connect-tcp-12', `-08', `-07')
+%% always means capsule framing, with the capsule codes of that draft.
+match_tcp_draft(Protocol, Path, Headers, TcpTemplate) ->
+    case masque_tcp_capsule:token_version(Protocol) of
+        {capsule, Version} ->
+            case match_path(Path, Headers, TcpTemplate, tcp) of
+                {ok, Req} -> {ok, Req#{tcp_framing => capsule, tcp_version => Version}};
+                Error -> Error
+            end;
+        _ ->
+            {error, bad_protocol}
+    end.
 
 match_path(Path, Headers, Template, Protocol) ->
     case masque_uri:match(Template, Path) of

@@ -326,7 +326,7 @@ validate_get(Path, Headers, UdpTemplate, IpTemplate, AcceptBind) ->
             end
     end.
 
-%% CONNECT-TCP as in draft-ietf-httpbis-connect-tcp-10: `GET' with
+%% CONNECT-TCP as in draft-ietf-httpbis-connect-tcp-18: `GET' with
 %% `Upgrade: connect-tcp' on the TCP template, framed in capsules.
 %% Everything else, classic CONNECT included, is validated as before.
 validate_any(<<"GET">> = Method, Path, Headers, TcpTpl, UdpTpl, IpTpl, AcceptBind) ->
@@ -337,13 +337,23 @@ validate_any(<<"GET">> = Method, Path, Headers, TcpTpl, UdpTpl, IpTpl, AcceptBin
 validate_any(Method, Path, Headers, _TcpTpl, UdpTpl, IpTpl, AcceptBind) ->
     validate(Method, Path, Headers, UdpTpl, IpTpl, AcceptBind).
 
-%% `connect-tcp-07' is the token section 8.1 of the draft asks for while
-%% it is a draft.
+%% `connect-tcp' or one of the drafts' interop tokens.
 is_tcp_upgrade(Headers) ->
     has_upgrade_token(header(<<"connection">>, Headers)) andalso
-        lists:member(lowercase_bin(header(<<"upgrade">>, Headers)), [
-            ?MASQUE_CONNECT_TCP_PROTOCOL, ?MASQUE_CONNECT_TCP_07_PROTOCOL
-        ]).
+        masque_tcp_capsule:token_version(upgrade_token(Headers)) =/= unknown.
+
+upgrade_token(Headers) ->
+    case header(<<"upgrade">>, Headers) of
+        undefined -> undefined;
+        V -> lowercase_bin(V)
+    end.
+
+%% The plain token speaks the current draft.
+tcp_version(Headers) ->
+    case masque_tcp_capsule:token_version(upgrade_token(Headers)) of
+        {capsule, Version} -> Version;
+        auto -> final
+    end.
 
 validate_tcp_upgrade(Path, Headers, Template) ->
     case header(<<"host">>, Headers) of
@@ -356,6 +366,7 @@ validate_tcp_upgrade(Path, Headers, Template) ->
                         method => <<"GET">>,
                         protocol => tcp,
                         tcp_framing => capsule,
+                        tcp_version => tcp_version(Headers),
                         path => Path,
                         authority => Host,
                         scheme => <<"https">>,
@@ -547,6 +558,9 @@ reject(Conn, StreamId, Reason, ExtraHeaders) ->
         {<<"content-type">>, <<"text/plain; charset=utf-8">>},
         {<<"content-length">>, integer_to_binary(byte_size(Body))},
         {<<"connection">>, <<"close">>},
+        %% draft-ietf-httpbis-connect-tcp-18 section 3.4.3: a rejected
+        %% upgrade is a GET, so its response must not be cached.
+        {<<"cache-control">>, <<"no-store">>},
         {<<"proxy-status">>, proxy_status_field(Reason)}
     ],
     Headers = merge_extra_headers(Base, ExtraHeaders),

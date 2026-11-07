@@ -18,9 +18,12 @@
 %% The value of the `:protocol' pseudo-header for draft-ietf-httpbis-connect-tcp.
 -define(MASQUE_CONNECT_TCP_PROTOCOL, <<"connect-tcp">>).
 
-%% The token draft-ietf-httpbis-connect-tcp-10 section 8.1 asks
-%% implementations of that version to use for interop testing. It always
-%% means capsule framing.
+%% Interop tokens of the CONNECT-TCP drafts. Each always means capsule
+%% framing. `connect-tcp-12' (drafts -12 to -18) uses the permanent
+%% capsule codes; `connect-tcp-08' (draft -09) and `connect-tcp-07'
+%% (draft -10) use the provisional ones.
+-define(MASQUE_CONNECT_TCP_12_PROTOCOL, <<"connect-tcp-12">>).
+-define(MASQUE_CONNECT_TCP_08_PROTOCOL, <<"connect-tcp-08">>).
 -define(MASQUE_CONNECT_TCP_07_PROTOCOL, <<"connect-tcp-07">>).
 
 %% Proxies that refused classic CONNECT but took connect-tcp
@@ -56,10 +59,12 @@
 %% `max_capsule_size' in `connect_opts' / listener `handler_opts'.
 -define(MASQUE_DEFAULT_MAX_CAPSULE_SIZE, 65536).
 
-%% CONNECT-TCP capsules, draft-ietf-httpbis-connect-tcp-10 section 8.3.
-%% Provisional code points the draft gives for testing.
--define(MASQUE_CAPSULE_DATA, 16#2028d7f0).
--define(MASQUE_CAPSULE_FINAL_DATA, 16#2028d7f1).
+%% CONNECT-TCP capsules, draft-ietf-httpbis-connect-tcp-18 section 8.3.
+-define(MASQUE_CAPSULE_DATA, 16#08).
+-define(MASQUE_CAPSULE_FINAL_DATA, 16#09).
+%% The provisional codes of drafts -09 and -10.
+-define(MASQUE_CAPSULE_DATA_PROVISIONAL, 16#2028d7f0).
+-define(MASQUE_CAPSULE_FINAL_DATA_PROVISIONAL, 16#2028d7f1).
 
 %% Tunnels one client connection may hold (h3, h2); 0 means no limit.
 -define(MASQUE_DEFAULT_MAX_TUNNELS, 100).
