@@ -90,7 +90,7 @@ end.
 ```
 
 - `{Target, IpProto}` is the scope you accept: `local` (your own services), `'*'`, a host name, `{wildcard, Domain}`, an address or a prefix; and `tcp`, `udp` or `'*'`.
-- The accept stream is a CONNECT-TCP tunnel: `masque:send/2`, `{masque_data, Stream, Bytes}`, `shutdown_write/1`, `close/1`. Connect it to the service the request named; if that fails, close the stream.
+- For a TCP service the accept stream is a CONNECT-TCP tunnel: `masque:send/2`, `{masque_data, Stream, Bytes}`, `shutdown_write/1`, `close/1`. For a UDP service it is a CONNECT-UDP tunnel, one datagram per message. Connect it to the service the request named; if that fails, close the stream.
 - `masque:migrate(Listen)` moves the HTTP/3 connection to a new address; the accept streams on it move too.
 - `{masque_closed, Listen, Reason}` arrives if the proxy ends the channel; `masque:close(Listen)` ends it from your side.
 
@@ -101,4 +101,4 @@ end.
 - The control channel has no idle timeout by default (`listen_idle_timeout_ms` sets one). QUIC keepalives keep an HTTP/3 channel up.
 - Capsule writes on the channel wait for the transport instead of being dropped, so a busy connection cannot lose a request.
 - The draft has not assigned capsule codes yet; masque uses provisional values (see [conformance](../reference/conformance.md#draft-rosomakho-masque-reverse-connect-01)). Only masque peers speak them.
-- Accept streams carry TCP in this release.
+- A UDP service's stream carries one datagram per `{masque_data, Stream, Payload}` and per `send/2`. UDP has no flow control: datagrams too large for the path are dropped, and `consumed/2` does nothing.

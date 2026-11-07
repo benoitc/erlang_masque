@@ -23,6 +23,7 @@ This page lists every module in `src/`, grouped by role, with one line on what i
 | `masque_listen_h1_client_session` | The same over h1, on its own TLS connection. | as above, for h1. |
 | `masque_reverse_listener` | Listener side of reverse connect, shared by the three listeners: recognises `connect-listen` and `connect-accept`, authenticates, checks accepts (id, connection, identity). | you change what a listener accepts for reverse connect. |
 | `masque_reverse_accept_handler` | Handler for TCP accept streams on the proxy: takes the pending request and relays the stream to the requester, with `handle_call/3` for its API. | you change the proxy-side accept stream API. |
+| `masque_reverse_accept_udp_handler` | Handler for UDP accept streams on the proxy: relays datagrams to the requester. | you change the proxy-side UDP accept stream. |
 | `masque_reverse_registry` | ETS table of pending requests (id to control session, connection, identity, requester, service). | you change how requests are matched to accepts. |
 | `masque_reverse_capsule` | Codec for AVAILABLE_SERVICES, CONNECTION_REQUEST, CONNECTION_REQUEST_DECLINED and the service record. | the draft changes a capsule. |
 | `masque_uri_reverse` | Listen and accept URI templates. | the draft changes a template or target form. |

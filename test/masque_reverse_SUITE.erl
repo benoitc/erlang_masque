@@ -30,7 +30,10 @@
     many_accepts/1,
     slow_edge_holds_agent/1,
     off_by_default/1,
-    declined_for_unknown_id_aborts/1
+    declined_for_unknown_id_aborts/1,
+    udp_echo/1,
+    udp_burst/1,
+    udp_too_big_dropped/1
 ]).
 
 %% listen_handler callbacks
@@ -61,10 +64,14 @@ groups() ->
         services_delivered,
         many_accepts,
         slow_edge_holds_agent,
-        off_by_default
+        off_by_default,
+        udp_echo,
+        udp_burst
     ],
     [
-        {h3, [], Common ++ [connection_end_ends_streams, declined_for_unknown_id_aborts]},
+        {h3, [],
+            Common ++
+                [connection_end_ends_streams, declined_for_unknown_id_aborts, udp_too_big_dropped]},
         {h2, [], Common ++ [connection_end_ends_streams, declined_for_unknown_id_aborts]},
         {h1, [], Common}
     ].
@@ -374,6 +381,57 @@ declined_for_unknown_id_aborts(Config) ->
     after 10000 -> ct:fail(not_aborted)
     end,
     raw_close(Tag, Conn).
+
+udp_service() -> #{destination => local, protocol => udp, port => 53}.
+
+%% A UDP service: each datagram comes back as it went.
+udp_echo(Config) ->
+    {Agent, Control} = start_agent(Config, echo),
+    {ok, Stream} = masque:request_connection(Control, udp_service()),
+    lists:foreach(
+        fun(Size) ->
+            D = crypto:strong_rand_bytes(Size),
+            ok = masque:send(Stream, D),
+            receive
+                {masque_data, Stream, Got} -> ?assertEqual(D, Got)
+            after 5000 -> ct:fail({no_echo, Size})
+            end
+        end,
+        [1, 100, 1000, 1200]
+    ),
+    ok = masque:close(Stream),
+    stop_agent(Agent).
+
+%% A burst of datagrams; UDP may drop some, most come back.
+udp_burst(Config) ->
+    {Agent, Control} = start_agent(Config, echo),
+    {ok, Stream} = masque:request_connection(Control, udp_service()),
+    [ok = masque:send(Stream, <<N:32, 0:(996 * 8)>>) || N <- lists:seq(1, 200)],
+    Got = count_datagrams(Stream, 0),
+    ct:log("~p of 200 datagrams came back", [Got]),
+    ?assert(Got >= 150),
+    ok = masque:close(Stream),
+    stop_agent(Agent).
+
+%% h3: a datagram larger than the path carries is dropped, as on any
+%% CONNECT-UDP tunnel; the next one gets through.
+udp_too_big_dropped(Config) ->
+    {Agent, Control} = start_agent(Config, echo),
+    {ok, Stream} = masque:request_connection(Control, udp_service()),
+    ok = masque:send(Stream, binary:copy(<<"b">>, 4000)),
+    ok = masque:send(Stream, <<"small">>),
+    receive
+        {masque_data, Stream, Got} -> ?assertEqual(<<"small">>, Got)
+    after 5000 -> ct:fail(no_echo)
+    end,
+    ok = masque:close(Stream),
+    stop_agent(Agent).
+
+count_datagrams(Stream, N) ->
+    receive
+        {masque_data, Stream, _} -> count_datagrams(Stream, N + 1)
+    after 2000 -> N
+    end.
 
 %%====================================================================
 %% Agent

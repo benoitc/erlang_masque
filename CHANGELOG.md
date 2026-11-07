@@ -30,7 +30,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 - Reverse connect (draft-rosomakho-masque-reverse-connect): a client
   behind NAT or a firewall can keep a control channel open to a proxy
-  and accept TCP connections through it. Listeners offer it when asked,
+  and accept TCP connections and UDP flows through it. Listeners offer it when asked,
   authenticate each client through a new handler, and let the
   application request connections and read and write them with the usual
   calls and flow control. Clients open the channel, accept or decline

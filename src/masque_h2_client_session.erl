@@ -41,6 +41,11 @@
     target_port :: 1..65535,
     uri_template :: binary(),
     capsule_proto :: boolean(),
+    %% The `:protocol' / `Upgrade' token and template variables other
+    %% than the target: a reverse connect accept stream sets them
+    %% (`protocol_token', `uri_vars').
+    token = ?MASQUE_CONNECT_UDP_PROTOCOL :: binary(),
+    uri_vars :: map() | undefined,
     conn :: pid() | undefined,
     stream_id :: non_neg_integer() | undefined,
     handshake_from :: gen_statem:from() | undefined,
@@ -131,6 +136,8 @@ init({Target, Opts, Owner}) ->
             ?MASQUE_DEFAULT_URI_TEMPLATE
         ),
         capsule_proto = maps:get(capsule_protocol, Opts, true),
+        token = maps:get(protocol_token, Opts, ?MASQUE_CONNECT_UDP_PROTOCOL),
+        uri_vars = maps:get(uri_vars, Opts, undefined),
         mode = Mode,
         max_cap = MaxCap,
         extra_headers = sanitise_extra_headers(
@@ -404,7 +411,7 @@ do_connect(#data{pool_owner = PoolOwner} = Data, _Opts) when
             PoolOwner,
             ReqHeaders,
             self(),
-            #{protocol => ?MASQUE_CONNECT_UDP_PROTOCOL}
+            #{protocol => Data#data.token}
         )
     of
         {ok, StreamId, Conn} -> {ok, Conn, StreamId};
@@ -434,10 +441,7 @@ do_connect(Data, Opts) ->
                         h2:request(
                             Conn,
                             ReqHeaders,
-                            #{
-                                protocol =>
-                                    ?MASQUE_CONNECT_UDP_PROTOCOL
-                            }
+                            #{protocol => Data#data.token}
                         )
                     of
                         {ok, StreamId} ->
@@ -469,12 +473,10 @@ request_headers(#data{
     target_port = TargetPort,
     uri_template = Template,
     capsule_proto = CapProto,
+    uri_vars = UriVars,
     extra_headers = Extra
 }) ->
-    Path = masque_uri:expand(Template, #{
-        target_host => TargetHost,
-        target_port => TargetPort
-    }),
+    Path = request_path(Template, UriVars, TargetHost, TargetPort),
     Authority = build_authority(ProxyHost, ProxyPort),
     Base = [
         {<<":method">>, <<"CONNECT">>},
@@ -488,6 +490,15 @@ request_headers(#data{
             false -> Base
         end,
     WithCap ++ Extra.
+
+%% The request path. `uri_vars' replaces the target variables for a
+%% template that has others, such as a reverse connect accept's
+%% `request_id'.
+request_path(Template, undefined, Host, Port) ->
+    masque_uri:expand(Template, #{target_host => Host, target_port => Port});
+request_path(Template, Vars, _Host, _Port) ->
+    {ok, T} = masque_uri_template:parse_pattern(masque_uri:to_path(Template)),
+    masque_uri_template:expand(T, Vars).
 
 sanitise_extra_headers(List) when is_list(List) ->
     Reserved = [

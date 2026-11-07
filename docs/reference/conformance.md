@@ -171,11 +171,10 @@ Reverse connect is off unless a listener sets `accept_listen => true`. The draft
 | §5.2.1, §5.2.2 | Malformed accept: 400; unknown id: 404 | `bad_request` (400) and `unknown_request` (404). An accept on another connection (h2, h3) or with another identity (h1) also gets 404. | `masque_reverse_listener` |
 | §5.2.2 | h2/h3 accepts run on the control channel's connection | The client opens the channel on a connection of its own and every accept stream on it; the proxy checks the connection. | `masque_upstream_owner`, `masque_reverse_listener` |
 | §5.3 | TCP in connect-tcp DATA and FINAL_DATA capsules | Accept streams run as CONNECT-TCP in capsule framing with the draft -18 codes (`0x08`, `0x09`), with its half-close, abort and flow control. No `100 Continue` is sent. | `masque_tcp_*_session`, `masque_reverse_accept_handler` |
-| §5.3 | UDP like CONNECT-UDP | Not supported yet: a request for a UDP service cannot be accepted. | |
+| §5.3 | UDP like CONNECT-UDP | Accept streams for UDP services run as CONNECT-UDP sessions: QUIC datagrams on h3, DATAGRAM capsules on h2 and h1. Datagrams too large for the path are dropped. | `masque_*_server_session`, `masque_reverse_accept_udp_handler`, UDP client sessions |
 | §6 | Authenticated users only; on h1 authenticate the channel and each accept; random ids | `listen_handler`'s `authenticate/1` runs for every `connect-listen` and every h1 `connect-accept`; without a handler, channels get 403. | `masque_reverse_listener` |
 | §7.3 | Capsule types TBD | Provisional private values: AVAILABLE_SERVICES `0x5243a0`, CONNECTION_REQUEST `0x5243a1`, CONNECTION_REQUEST_DECLINED `0x5243a2`. None is a GREASE value. | `include/masque_reverse.hrl` |
 
 Deviations and open points:
 - The capsule codes are masque's own until the draft assigns them, so only masque peers interoperate. No other implementation of the draft is known.
-- UDP accept streams are not implemented yet.
 - The control channel has no idle timeout by default (`listen_idle_timeout_ms`); the draft does not set one.

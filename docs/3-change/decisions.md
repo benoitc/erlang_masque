@@ -95,10 +95,10 @@ This page records design decisions that are visible in the code, with the reason
 - **Consequences.** A slow client stalls the session process, and through it the target reads. Target writes do not share this: they run in the handler's writer process, because a target blocked writing to us would otherwise never read what we write to it.
 - **Where.** `tunnel_send/3` in `masque_tcp_server_session`, `proxy_send/2` in `masque_tcp_h1_server_session`.
 
-### Reverse connect accept streams reuse the CONNECT-TCP sessions
+### Reverse connect accept streams reuse the CONNECT-TCP and CONNECT-UDP sessions
 
-- **Decision.** A reverse connect accept stream for a TCP service runs in `masque_tcp_server_session` / `masque_tcp_h1_server_session` with the `masque_reverse_accept_handler`, and on the agent in `masque_tcp_client_session` / `masque_tcp_h1_client_session` with `tcp_protocol => <<"connect-accept">>` and `uri_vars`. Only the control channel has its own sessions.
-- **Why.** The draft carries TCP in the connect-tcp DATA and FINAL_DATA capsules, so the CONNECT-TCP sessions already give blocking writes, half-close, aborts, invalid-data handling and flow control. Two seams were added, both off unless asked for: `tcp_continue => false` in the request, and the optional handler callback `handle_call/3`.
+- **Decision.** A reverse connect accept stream for a TCP service runs in `masque_tcp_server_session` / `masque_tcp_h1_server_session` with the `masque_reverse_accept_handler`, and on the agent in `masque_tcp_client_session` / `masque_tcp_h1_client_session` with `tcp_protocol => <<"connect-accept">>` and `uri_vars`. A UDP service's stream runs in the CONNECT-UDP sessions the same way (`masque_reverse_accept_udp_handler`, `protocol_token`). Only the control channel has its own sessions.
+- **Why.** The draft carries TCP in the connect-tcp DATA and FINAL_DATA capsules, so the CONNECT-TCP sessions already give blocking writes, half-close, aborts, invalid-data handling and flow control. The seams added are all off unless asked for: `tcp_continue => false` in the request, the optional handler callback `handle_call/3` (TCP and UDP sessions), and the `protocol_token` and `uri_vars` client options.
 - **Where.** `masque_reverse_listener`, `masque_reverse_accept_handler`, `masque:reverse_accept/3`.
 
 ### Reverse connect control capsules are never dropped

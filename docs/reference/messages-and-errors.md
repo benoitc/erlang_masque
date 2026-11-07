@@ -228,7 +228,7 @@ Reasons used by the built-in handlers:
 | `masque_tcp_proxy_handler` | `{resolution_failed, private_address}`, `{resolution_failed, {resolve, R}}`, `{resolution_failed, {tcp_connect, R}}` (from `init/2`, all 502); in capsule framing a policy refusal is `{reject, forbidden}` (403) and a connect timeout `{reject, upstream_timeout}` (504) instead; `target_closed`, `{target_error, R}`, `eof_timeout` (a half-closed tunnel idle for 30 s) |
 | `masque_udp_bind_proxy_handler` | `{udp_open, R}` (from `init/2`); `{bind_socket_error, R}`, `bind_socket_closed` |
 | `masque_chain_handler` | `{resolution_failed, {upstream, R}}` or `{reject, loop_detected}` (from `init/2`); `upstream_closed` |
-| `masque_reverse_accept_handler` | `{reject, unknown_request}` (from `init/2`, 404); `requester_gone` (the process that requested the connection died) |
+| `masque_reverse_accept_handler`, `masque_reverse_accept_udp_handler` | `{reject, unknown_request}` (from `init/2`, 404); `requester_gone` (the process that requested the connection died) |
 
 Reverse connect control sessions end with `normal` (the agent closed the channel), `malformed_capsule` (a bad capsule, or a DECLINED for no outstanding request), `truncated_capsule`, `capsule_buffer_overflow`, `idle_timeout`, `{control_send_failed, R}`, or the client and connection reasons above. A bad capsule resets the stream (`H3_MESSAGE_ERROR`, `PROTOCOL_ERROR`); other ends close it with FIN.
 

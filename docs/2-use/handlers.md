@@ -32,7 +32,7 @@ All callbacks are optional. An event whose callback is not exported is ignored, 
 | `handle_eof(S)` | The client sent FIN on a CONNECT-TCP tunnel. | see below |
 | `handle_capsule(Type, Value, S)` | A capsule type the session does not handle itself. | see below |
 | `handle_info(Msg, S)` | Any other message to the session process. | see below |
-| `handle_call(Request, From, S)` | A call to a CONNECT-TCP session, such as the API of a reverse connect accept stream. | `{reply, Reply, S}`, `{reply, Reply, S, Actions}` (the reply goes out after the actions), `{stop, Reason, Reply, S}`. Without it calls get `{error, unknown_call}`. |
+| `handle_call(Request, From, S)` | A call to a CONNECT-TCP or CONNECT-UDP session, such as the API of a reverse connect accept stream. | `{reply, Reply, S}`, `{reply, Reply, S, Actions}` (the reply goes out after the actions), `{stop, Reason, Reply, S}`. Without it calls get `{error, unknown_call}`. |
 | `handle_ip_packet(Packet, S)` | IP packet from the client (context id 0). | see below |
 | `handle_address_request(Requests, S)` | Client ADDRESS_REQUEST (`[#ip_prefix_request{}]`). | see below |
 | `handle_address_assign(Entries, S)` | Client ADDRESS_ASSIGN (`[#ip_assignment{}]`). | see below |

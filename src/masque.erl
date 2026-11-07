@@ -703,26 +703,27 @@ reverse_accept(Listen, Id) ->
 -doc """
 Accept a connection request: open the accept stream for request `Id`.
 
-The result is a tunnel like a CONNECT-TCP one: `{masque_data, Stream,
-Bytes}` messages, `send/2`, `shutdown_write/1`, `close/1`. Connect it to
-the service the request named; if that fails, close the stream, as the
-draft asks. `Opts` are merged over the channel's options (`owner`,
-`mode`, `timeout`...).
+The result is a tunnel to the service the request named: for a TCP
+service it behaves like a CONNECT-TCP one (`{masque_data, Stream,
+Bytes}`, `send/2`, `shutdown_write/1`, `close/1`), for a UDP service like
+a CONNECT-UDP one (one datagram per message and per `send/2`). Connect it
+to the service; if that fails, close the stream, as the draft asks.
+`Opts` are merged over the channel's options (`owner`, `mode`,
+`timeout`...).
 """.
 -spec reverse_accept(pid(), non_neg_integer(), map()) -> {ok, session()} | {error, term()}.
 reverse_accept(Listen, Id, Opts) when is_map(Opts) ->
     case call_listen(Listen, {accept_spec, Id}) of
-        {ok, #{service := #{protocol := tcp} = Service} = Spec} ->
-            #{transport := T, accept_uri_template := Template, opts := ListenOpts} = Spec,
+        {ok, #{service := Service, transport := T, opts := ListenOpts} = Spec} ->
             AcceptOpts0 = maps:merge(maps:without([owner, listen_path], ListenOpts), Opts),
-            AcceptOpts1 = AcceptOpts0#{
-                protocol => tcp,
-                transport => T,
-                tcp_framing => capsule,
-                tcp_protocol => ?MASQUE_CONNECT_ACCEPT_PROTOCOL,
-                uri_template => Template,
-                uri_vars => #{request_id => integer_to_binary(Id)}
-            },
+            AcceptOpts1 = maps:merge(
+                AcceptOpts0#{
+                    transport => T,
+                    uri_template => maps:get(accept_uri_template, Spec),
+                    uri_vars => #{request_id => integer_to_binary(Id)}
+                },
+                accept_protocol(Service)
+            ),
             AcceptOpts =
                 case Spec of
                     #{pool_owner := Up} -> AcceptOpts1#{pool_owner => Up};
@@ -730,11 +731,24 @@ reverse_accept(Listen, Id, Opts) when is_map(Opts) ->
                 end,
             Owner = maps:get(owner, Opts, self()),
             dial_single(session_mod(AcceptOpts, T), service_target(Service), AcceptOpts, Owner);
-        {ok, _} ->
-            {error, not_supported};
         {error, _} = Err ->
             Err
     end.
+
+%% Section 5.3: TCP in connect-tcp capsules, UDP like CONNECT-UDP, both
+%% under the `connect-accept' token.
+accept_protocol(#{protocol := tcp}) ->
+    #{
+        protocol => tcp,
+        tcp_framing => capsule,
+        tcp_protocol => ?MASQUE_CONNECT_ACCEPT_PROTOCOL
+    };
+accept_protocol(#{protocol := udp}) ->
+    #{
+        protocol => udp,
+        protocol_token => ?MASQUE_CONNECT_ACCEPT_PROTOCOL,
+        capsule_protocol => true
+    }.
 
 %% A target for `info/1'; the stream itself is addressed by its id.
 service_target(#{destination := local, port := Port}) -> {<<"localhost">>, Port};

@@ -74,7 +74,7 @@ token(_) -> false.
 %% listener knows of the client (`peer', `peer_cert') and its
 %% `handler_opts'. `Conn' is the h3 or h2 connection, `undefined' on h1.
 -spec route(config(), h3 | h2 | h1, pid() | undefined, binary(), map()) ->
-    {ok, listen | tcp, module(), map(), masque_handler:req()}
+    {ok, listen | tcp | udp, module(), map(), masque_handler:req()}
     | {reject, masque_errors:handshake_error()}
     | {reject, masque_errors:handshake_error(), [{binary(), binary()}]}.
 route(Config, Transport, Conn, Path, #{headers := Headers} = Base) ->
@@ -173,8 +173,10 @@ accept_session(Id, #{service := #{protocol := tcp}}, Req) ->
         tcp_continue => false
     },
     {ok, tcp, masque_reverse_accept_handler, maps:get(handler_opts, Req, #{}), Req1};
-accept_session(_Id, _Entry, _Req) ->
-    {reject, unknown_request}.
+%% UDP accept streams run as CONNECT-UDP (section 5.3).
+accept_session(Id, #{service := #{protocol := udp}}, Req) ->
+    Req1 = Req#{protocol => udp, reverse_id => Id},
+    {ok, udp, masque_reverse_accept_udp_handler, maps:get(handler_opts, Req, #{}), Req1}.
 
 authenticate(undefined, _Req) ->
     {reject, forbidden};
