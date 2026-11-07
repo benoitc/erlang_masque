@@ -67,6 +67,8 @@
     h3_unknown_reject_reason_gets_response/1,
     h2_unknown_reject_reason_gets_response/1,
     h2_failed_session_releases_tunnel_slot/1,
+    h3_listen_init_stop_answers_502/1,
+    h2_listen_end_releases_tunnel_slot/1,
     h3_tcp_continue_then_refused_target/1,
     h2_tcp_continue_then_refused_target/1,
     h3_tcp_target_reset_resets_tunnel/1,
@@ -144,6 +146,8 @@ all() ->
         h3_unknown_reject_reason_gets_response,
         h2_unknown_reject_reason_gets_response,
         h2_failed_session_releases_tunnel_slot,
+        h3_listen_init_stop_answers_502,
+        h2_listen_end_releases_tunnel_slot,
         h3_tcp_continue_then_refused_target,
         h2_tcp_continue_then_refused_target,
         h3_tcp_target_reset_resets_tunnel,
@@ -238,6 +242,11 @@ extra_opts(Case) when
     Case =:= h2_unknown_reject_reason_gets_response
 ->
     #{handler => masque_weird_reject_handler};
+extra_opts(Case) when
+    Case =:= h3_listen_init_stop_answers_502;
+    Case =:= h2_listen_end_releases_tunnel_slot
+->
+    #{accept_listen => true, listen_handler => masque_listen_test_handler};
 extra_opts(h3_tcp_data_before_finalize_is_kept) ->
     #{tcp_handler => masque_report_tcp_handler, handler_opts => #{early_data => <<"early">>}};
 extra_opts(h3_udp_output_before_finalize_is_kept) ->
@@ -1141,6 +1150,53 @@ continue_headers() ->
                 <<"/.well-known/masque/tcp/{target_host}/{target_port}/">>,
                 #{target_host => <<"127.0.0.1">>, target_port => Port}
             )}
+    ].
+
+%% A reverse connect control channel whose handler refuses it in `init/2'
+%% gets a 502, and no session stays behind.
+h3_listen_init_stop_answers_502(Config) ->
+    {ok, Conn} = masque_test_helpers:h3_client_connect(
+        maps:get(port, ?config(h3, Config)), #{}
+    ),
+    Headers = [{<<":protocol">>, <<"connect-listen">>} | listen_headers(<<"refuse">>)],
+    {ok, Sid} = quic_h3:request(Conn, Headers, #{end_stream => false}),
+    receive
+        {quic_h3, Conn, {response, Sid, Status, _}} -> ?assertEqual(502, Status)
+    after 5000 -> ct:fail(no_response)
+    end,
+    ok = quic_h3:close(Conn),
+    ok = wait_until(fun() -> listen_sessions() =:= [] end, 50).
+
+%% A control channel holds a tunnel slot on h2 until it ends.
+h2_listen_end_releases_tunnel_slot(Config) ->
+    Rows = ets:info(masque_h2_tunnel_counts, size),
+    {ok, Conn} = h2_connect(Config),
+    {ok, Sid} = h2:request(Conn, listen_headers(<<"alice">>), #{protocol => <<"connect-listen">>}),
+    receive
+        {h2, Conn, {response, Sid, 200, _}} -> ok
+    after 5000 -> ct:fail(no_response)
+    end,
+    ?assertMatch([_], listen_sessions()),
+    ok = h2:close(Conn),
+    ok = wait_until(fun() -> listen_sessions() =:= [] end, 50),
+    ok = wait_until(fun() -> ets:info(masque_h2_tunnel_counts, size) =:= Rows end, 50).
+
+listen_headers(Identity) ->
+    [
+        {<<":method">>, <<"CONNECT">>},
+        {<<":scheme">>, <<"https">>},
+        {<<":authority">>, <<"localhost">>},
+        {<<":path">>, <<"/.well-known/masque/listen/./6/">>},
+        {<<"capsule-protocol">>, <<"?1">>},
+        {<<"x-identity">>, Identity}
+    ].
+
+listen_sessions() ->
+    [
+        P
+     || P <- processes(),
+        {dictionary, D} <- [process_info(P, dictionary)],
+        {_, {masque_listen_server_session, init, 1}} <- [lists:keyfind('$initial_call', 1, D)]
     ].
 
 h3_tcp_target_reset_resets_tunnel(Config) ->

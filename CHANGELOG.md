@@ -28,6 +28,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
   proxy refuses classic CONNECT now retries with the new form and
   remembers that proxy.
 
+- Reverse connect (draft-rosomakho-masque-reverse-connect): a client
+  behind NAT or a firewall can keep a control channel open to a proxy
+  and accept TCP connections through it. Listeners offer it when asked,
+  authenticate each client through a new handler, and let the
+  application request connections and read and write them with the usual
+  calls and flow control. Clients open the channel, accept or decline
+  each request, advertise their services, and on HTTP/3 move the
+  connection to a new network with the streams on it.
+
 ### Fixed
 
 - CONNECT-TCP clients on HTTP/3 now send keepalives themselves. A quiet

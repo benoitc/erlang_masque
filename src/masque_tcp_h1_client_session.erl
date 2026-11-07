@@ -58,6 +58,8 @@
     %% The `Upgrade' token and capsule codes (`tcp_protocol' option),
     %% and the decoder of the proxy's capsules.
     token = ?MASQUE_CONNECT_TCP_PROTOCOL :: binary(),
+    %% Template variables other than the target (`uri_vars' option).
+    uri_vars :: map() | undefined,
     version = final :: masque_tcp_capsule:version(),
     dec :: masque_tcp_capsule:decoder() | undefined,
     uri_template = ?MASQUE_DEFAULT_TCP_URI_TEMPLATE :: binary(),
@@ -138,7 +140,8 @@ init({Target, Opts, Owner}) ->
         token = Token,
         version = Version,
         dec = masque_tcp_capsule:decoder(Version),
-        uri_template = maps:get(uri_template, Opts, ?MASQUE_DEFAULT_TCP_URI_TEMPLATE)
+        uri_template = maps:get(uri_template, Opts, ?MASQUE_DEFAULT_TCP_URI_TEMPLATE),
+        uri_vars = maps:get(uri_vars, Opts, undefined)
     },
     %% Defer `do_handshake' until `handshake_await' arrives so the
     %% reply can be delivered synchronously (classic CONNECT is a
@@ -522,10 +525,11 @@ upgrade_request(#data{
     target_host = Host,
     target_port = Port,
     uri_template = Template,
+    uri_vars = UriVars,
     proxy_auth = Auth,
     extra_headers = Extra
 }) ->
-    Path = masque_uri:expand(Template, #{target_host => Host, target_port => Port}),
+    Path = request_path(Template, UriVars, Host, Port),
     ProxyAuthority = masque_uri:build_authority(ProxyHost, ProxyPort),
     nomatch = binary:match(Path, [<<"\r">>, <<"\n">>, <<" ">>]),
     AuthLine =
@@ -537,6 +541,15 @@ upgrade_request(#data{
     <<"GET ", Path/binary, " HTTP/1.1\r\n", "Host: ", ProxyAuthority/binary, "\r\n",
         "Connection: Upgrade\r\n", "Upgrade: ", Token/binary, "\r\n", "Capsule-Protocol: ?1\r\n",
         AuthLine/binary, ExtraLines/binary, "\r\n">>.
+
+%% The request path. `uri_vars' replaces the target variables for a
+%% template that has others, such as a reverse connect accept's
+%% `request_id'.
+request_path(Template, undefined, Host, Port) ->
+    masque_uri:expand(Template, #{target_host => Host, target_port => Port});
+request_path(Template, Vars, _Host, _Port) ->
+    {ok, T} = masque_uri_template:parse_pattern(masque_uri:to_path(Template)),
+    masque_uri_template:expand(T, Vars).
 
 %% Bytes from the proxy: as they are in raw mode, the DATA and
 %% FINAL_DATA payloads in capsule mode. Also says whether they end the

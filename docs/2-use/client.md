@@ -148,6 +148,10 @@ receive {masque_capsule, Sess, 16#cafe, Value} -> Value end.
 
 Capsule types the session itself understands (DATAGRAM, CONNECT-IP control capsules, udp-bind compression capsules) are consumed and never reach you as `masque_capsule`. CONNECT-TCP has no capsule channel: `send_capsule/3` returns `{error, not_supported}`.
 
+## Accept inbound connections
+
+`masque:reverse_listen/3` opens a reverse connect control channel, so the proxy can ask you to accept connections; you answer with `masque:reverse_accept/2,3` or `masque:reverse_decline/2`. It takes one transport in `transports` and the options of `connect/3`, plus `listen_uri_template` and `accept_uri_template`. See [reverse connect](reverse-connect.md).
+
 ## Close
 
 `masque:close(Sess)` ends the tunnel: the session sends FIN on its stream and closes its connection (or gives the stream back to the pool). It always returns `ok`, within 5 seconds even if the session is stuck. You do not get a `masque_closed` message for your own close, except on Connect-UDP-Bind sessions in message mode, which report `{masque_closed, Sess, normal}`.

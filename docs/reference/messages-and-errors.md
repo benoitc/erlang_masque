@@ -39,6 +39,16 @@ The records are defined in `include/masque_ip.hrl`. The moduledoc of `masque_ip_
 | `{masque_compression_acked, Sess, ContextId}` | The proxy acknowledged a context you opened; it is now used for sending. |
 | `{masque_compression_closed, Sess, ContextId}` | A context was closed by either side. |
 
+### Reverse connect
+
+| Message | When |
+| --- | --- |
+| `{masque_connection_request, Listen, Id, Service}` | Agent: the proxy asks you to accept a connection to `Service`; answer with `reverse_accept/2,3` or `reverse_decline/2`. |
+| `{masque_closed, Listen, Reason}` | Agent: the control channel ended from the proxy side (`peer_fin`, `peer_reset`, `peer_closed`, `malformed_capsule` for a bad or reused request, `truncated_capsule`, `{control_send_failed, R}`). Not sent after `masque:close/1`. |
+| `{masque_data, Stream, Bytes}` | Proxy: bytes from the agent on an accept stream. Return credit with `consumed/2`. |
+| `{masque_closed, Stream, peer_fin}` | Proxy: the agent finished sending; you can still send. |
+| `{masque_closed, Stream, Reason}` | Proxy: the accept stream ended (`normal` once both sides finished, otherwise the session's exit reason). Not sent after you call `masque:close/1`. |
+
 ### Messages produced during a race
 
 When `transports` lists more than one transport, the session first belongs to a race worker. Anything it would send before the racer hands it to you (for example an ADDRESS_ASSIGN right after the 2xx) is held and delivered to you, in order, when the handoff happens. You never see messages addressed to the worker.
@@ -139,6 +149,12 @@ When several transports race, the reason you get is the last attempt's reason, n
 | `shutdown_write/1` | `{error, not_supported}` | CONNECT-UDP, CONNECT-IP and udp-bind sessions |
 | `shutdown_write/1` | `{error, not_ready}` / `{error, closing}` / `{error, already_closed}` | TCP session still connecting, closing, or already shut down |
 | `send_capsule/3` | `{error, not_supported}` | CONNECT-TCP |
+| `reverse_accept/2,3`, `reverse_decline/2` | `{error, unknown_request}` | the id was not offered on this channel, or was already answered |
+| `reverse_accept/2,3` | `{error, {handshake_rejected, 404, _}}` (h3/h2 `{handshake_rejected, 404}`) | the proxy no longer waits for the id (its request timed out) |
+| `reverse_listen/3` | `{error, {invalid_opts, {transports, T}}}` | `transports` is not a single transport |
+| reverse connect calls | `{error, closed}` | the control channel is gone |
+| `request_connection/2,3` | `{error, declined}`, `{error, timeout}`, `{error, closed}` | proxy side: the agent declined, did not accept in time, or the channel ended |
+| `consumed/2` | `ok` | also on a stream that already ended |
 | `set_mode/2`, `send/3`, `send_capsule/3`, `send_to/3` | `{error, badarg}` | a mode other than `message`/`queue`, a negative or non-integer context id or capsule type, a peer that is not `{IP, Port}` |
 | any call | `{error, not_ready}` | the handshake has not finished (`info/1` and `close/1` still work) |
 | any call | `{error, not_supported}` | the session's protocol has no such operation, for example `send/3` on CONNECT-TCP |
@@ -168,6 +184,8 @@ When a request is refused before the tunnel opens, the listener answers with a s
 | `forbidden` | 403 | `destination_ip_prohibited` | built-in handlers' `accept/1`: the `allow` fun said no (UDP, TCP, chain), or a CONNECT-IP target is `'*'` or non-public without `allow_private` |
 | `loop_detected` | 508 | `proxy_loop_detected` | `masque_chain_handler`: the `via` header already names this listener, or the upstream answered 508 |
 | `overload` | 503 | `proxy_internal_error` | listener draining; `max_tunnels_per_connection` reached |
+| `bad_request` | 400 | `http_protocol_error` | reverse connect: no `:scheme`, `:authority` or `Host`, or a malformed listen target or request id |
+| `unknown_request` | 404 | `http_request_error` | reverse connect: an accept for an id that is not pending, or that comes on another connection (h3/h2) or with another identity (h1) |
 | `{other, Status}` | `Status` (400..599) | `proxy_internal_error` | handler rejection with an explicit status |
 | anything else | 502 | `proxy_internal_error` | unknown `{reject, _}` reason |
 
@@ -210,6 +228,9 @@ Reasons used by the built-in handlers:
 | `masque_tcp_proxy_handler` | `{resolution_failed, private_address}`, `{resolution_failed, {resolve, R}}`, `{resolution_failed, {tcp_connect, R}}` (from `init/2`, all 502); in capsule framing a policy refusal is `{reject, forbidden}` (403) and a connect timeout `{reject, upstream_timeout}` (504) instead; `target_closed`, `{target_error, R}`, `eof_timeout` (a half-closed tunnel idle for 30 s) |
 | `masque_udp_bind_proxy_handler` | `{udp_open, R}` (from `init/2`); `{bind_socket_error, R}`, `bind_socket_closed` |
 | `masque_chain_handler` | `{resolution_failed, {upstream, R}}` or `{reject, loop_detected}` (from `init/2`); `upstream_closed` |
+| `masque_reverse_accept_handler` | `{reject, unknown_request}` (from `init/2`, 404); `requester_gone` (the process that requested the connection died) |
+
+Reverse connect control sessions end with `normal` (the agent closed the channel), `malformed_capsule` (a bad capsule, or a DECLINED for no outstanding request), `truncated_capsule`, `capsule_buffer_overflow`, `idle_timeout`, `{control_send_failed, R}`, or the client and connection reasons above. A bad capsule resets the stream (`H3_MESSAGE_ERROR`, `PROTOCOL_ERROR`); other ends close it with FIN.
 
 ## Internal messages
 
@@ -257,6 +278,18 @@ The racer receives on an alias that it drops before returning, so none of these 
 | call `{acquire, Headers, SessionPid, ReqOpts}` | session to upstream owner | open a stream on the pooled connection |
 | cast `{release, StreamId}` | session to upstream owner | give the stream back |
 | `{timeout, Ref, idle}` | timer to upstream owner | no streams for `idle_timeout_ms` (default 30000); close and stop |
+| call `migrate` | reverse connect channel to its dedicated owner | migrate the h3 connection |
+
+### Reverse connect
+
+| Message | Direction | Meaning |
+| --- | --- | --- |
+| call `{request_connection, Service, Timeout}` | edge to control session | send CONNECTION_REQUEST; replied when the accept stream starts, on DECLINED, timeout or channel end |
+| `{masque_reverse_accepted, Id, Stream}` | accept stream to control session | the accept stream is open; the control session replies `{ok, Stream}` |
+| `{timeout, TRef, {request_timeout, Id}}` | timer to control session | the request was not answered in time |
+| `masque_reverse_opened` | accept handler to itself | handled once the 2xx is out |
+| calls `{accept_spec, Id}`, `{decline, Id}`, `{advertise, Services}`, `migrate` | agent to its control session | reverse connect client calls |
+| calls `{send, Data}`, `shutdown_write`, `{consumed, N}`, `stop` | edge to accept stream | the stream API, through the handler's `handle_call/3` |
 
 The upstream owner forwards h3 datagrams, responses, resets, connection close and h3 GOAWAY to the sessions on its connection as the original `{quic_h3, ...}` / `{h2, ...}` messages.
 

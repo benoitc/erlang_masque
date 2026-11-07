@@ -23,6 +23,10 @@ status code for each failure mode.
     | forbidden
     | loop_detected
     | overload
+    %% Reverse connect: a malformed request, and an accept whose request
+    %% id is not pending for this client.
+    | bad_request
+    | unknown_request
     | {other, 400..599}.
 
 -export_type([handshake_error/0]).
@@ -53,6 +57,10 @@ handshake_status(loop_detected) ->
     ?MASQUE_STATUS_LOOP_DETECTED;
 handshake_status(overload) ->
     503;
+handshake_status(bad_request) ->
+    ?MASQUE_STATUS_BAD_REQUEST;
+handshake_status(unknown_request) ->
+    ?MASQUE_STATUS_NOT_FOUND;
 handshake_status({other, Status}) when
     is_integer(Status), Status >= 400, Status =< 599
 ->
@@ -74,4 +82,6 @@ status_reason(upstream_timeout) -> <<"target did not respond in time">>;
 status_reason(forbidden) -> <<"target denied by policy">>;
 status_reason(loop_detected) -> <<"proxy loop detected">>;
 status_reason(overload) -> <<"proxy overloaded">>;
+status_reason(bad_request) -> <<"malformed request">>;
+status_reason(unknown_request) -> <<"no such connection request">>;
 status_reason(_) -> <<"request rejected">>.

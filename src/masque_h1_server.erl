@@ -134,7 +134,8 @@ build_dispatch(Opts) ->
             maps:with(masque_server:handler_opt_keys(), Opts),
             maps:get(handler_opts, Opts, #{})
         ),
-        name => maps:get(drain_key, Opts, undefined)
+        name => maps:get(drain_key, Opts, undefined),
+        reverse => masque_reverse_listener:config(Opts)
     }.
 
 default_resolver(Host) when is_binary(Host) ->
@@ -175,7 +176,28 @@ dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch) ->
             )
     end.
 
+%% Reverse connect requests (`accept_listen') take their own path; every
+%% other request is validated as before.
 dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
+    Rev = maps:get(reverse, Dispatch, disabled),
+    case masque_reverse_listener:match(Rev, Method, Headers) of
+        false ->
+            dispatch_masque(Conn, StreamId, Method, Path, Headers, Dispatch);
+        _ ->
+            Base = add_peer(Conn, #{
+                headers => Headers, handler_opts => maps:get(handler_opts, Dispatch)
+            }),
+            case masque_reverse_listener:route(Rev, h1, undefined, Path, Base) of
+                {ok, Protocol, Handler, HOpts, Req} ->
+                    spawn_session(Conn, StreamId, Protocol, Handler, HOpts, Req);
+                {reject, Reason} ->
+                    reject(Conn, StreamId, Reason);
+                {reject, Reason, Extra} ->
+                    reject(Conn, StreamId, Reason, Extra)
+            end
+    end.
+
+dispatch_masque(Conn, StreamId, Method, Path, Headers, Dispatch) ->
     #{
         udp_template := UdpTpl,
         udp_handler := UdpHandler,
@@ -600,6 +622,8 @@ proxy_status_error(bad_protocol) -> <<"http_protocol_error">>;
 proxy_status_error(bad_path) -> <<"http_protocol_error">>;
 proxy_status_error(bad_port) -> <<"http_protocol_error">>;
 proxy_status_error(bad_host) -> <<"http_protocol_error">>;
+proxy_status_error(bad_request) -> <<"http_protocol_error">>;
+proxy_status_error(unknown_request) -> <<"http_request_error">>;
 proxy_status_error(resolution_failed) -> <<"dns_error">>;
 proxy_status_error(upstream_timeout) -> <<"connection_timeout">>;
 proxy_status_error(forbidden) -> <<"destination_ip_prohibited">>;

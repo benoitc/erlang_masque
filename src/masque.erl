@@ -19,6 +19,8 @@ versions.
 -export([send/2, send/3, recv/2, set_mode/2]).
 -export([send_capsule/3, shutdown_write/1]).
 -export([migrate/1]).
+-export([reverse_listen/3, reverse_accept/2, reverse_accept/3, reverse_decline/2]).
+-export([advertise_services/2, request_connection/2, request_connection/3, consumed/2]).
 -export([start_listener/2, stop_listener/1]).
 -export([start_listener_h2/2, stop_listener_h2/1]).
 -export([start_listener_h1/2, stop_listener_h1/1]).
@@ -51,6 +53,19 @@ versions.
 
 -include("masque.hrl").
 -include("masque_ip.hrl").
+-include("masque_reverse.hrl").
+
+%% Reverse connect (draft-rosomakho-masque-reverse-connect-01): a service
+%% a connection request names or a client advertises, and the scope of a
+%% control channel.
+-type reverse_service() :: #{
+    destination := local | binary() | inet:ip_address(),
+    protocol := tcp | udp,
+    port := inet:port_number()
+}.
+-type reverse_target() ::
+    '*' | local | {wildcard, binary()} | masque_uri_ip:ip_target().
+-type reverse_ipproto() :: '*' | tcp | udp.
 
 -export_type([
     session/0,
@@ -69,6 +84,10 @@ versions.
     ip_target/0,
     request_id/0,
     nz_request_id/0,
+    %% Reverse connect.
+    reverse_service/0,
+    reverse_target/0,
+    reverse_ipproto/0,
     %% Embedding in a user-owned quic_h3 server.
     h3_handler_fun/0,
     connection_handler_fun/0
@@ -626,6 +645,168 @@ path is validated.
 -spec migrate(session()) -> ok | {error, term()}.
 migrate(Sess) when is_pid(Sess) ->
     gen_statem:call(Sess, migrate).
+
+%%====================================================================
+%% Reverse connect (draft-rosomakho-masque-reverse-connect-01)
+%%====================================================================
+
+-doc """
+Open a reverse connect control channel to a proxy, so it can ask you to
+accept inbound connections.
+
+`Scope` says which connections you take: `Target` is `local` (your own
+services, `.` on the wire), `'*'`, a host name, `{wildcard, Domain}`, an
+address or a `{4 | 6, Address, PrefixLen}` prefix; `IpProto` is `tcp`,
+`udp` or `'*'`.
+
+The owner (`owner`, default the caller) gets
+`{masque_connection_request, Listen, Id, Service}` for each request and
+answers with `reverse_accept/2,3` or `reverse_decline/2`. It gets
+`{masque_closed, Listen, Reason}` if the channel ends from the proxy
+side. Close it with `masque:close/1`.
+
+Options are those of `connect/3` with one transport in `transports`
+(default `[h3]`), plus `listen_uri_template` and `accept_uri_template`
+(the draft's defaults otherwise). Pass your credentials in
+`request_headers`. On HTTP/3 and HTTP/2 the channel gets a connection
+of its own, which its accept streams share.
+""".
+-spec reverse_listen(
+    binary() | string(), {reverse_target(), reverse_ipproto()}, map()
+) ->
+    {ok, pid()} | {error, term()}.
+reverse_listen(ProxyURI, {Target, IpProto}, Opts) when is_map(Opts) ->
+    maybe
+        {ok, Host, Port} ?= parse_proxy_uri(ProxyURI),
+        {ok, Transport} ?= listen_transport(maps:get(transports, Opts, [h3])),
+        {ok, Template} ?=
+            masque_uri_reverse:parse_listen_template(
+                maps:get(listen_uri_template, Opts, ?MASQUE_DEFAULT_LISTEN_URI_TEMPLATE)
+            ),
+        Path = masque_uri_reverse:expand_listen(Template, #{target => Target, ipproto => IpProto}),
+        Owner = maps:get(owner, Opts, self()),
+        SessOpts = Opts#{proxy => {Host, Port}, transport => Transport, listen_path => Path},
+        case Transport of
+            h1 -> masque_listen_h1_client_session:start(SessOpts, Owner);
+            _ -> masque_listen_client_session:start(SessOpts, Owner)
+        end
+    end.
+
+listen_transport([T]) when T =:= h3; T =:= h2; T =:= h1 -> {ok, T};
+listen_transport(Other) -> {error, {invalid_opts, {transports, Other}}}.
+
+-doc "Equivalent to `reverse_accept(Listen, Id, #{})`.".
+-spec reverse_accept(pid(), non_neg_integer()) -> {ok, session()} | {error, term()}.
+reverse_accept(Listen, Id) ->
+    reverse_accept(Listen, Id, #{}).
+
+-doc """
+Accept a connection request: open the accept stream for request `Id`.
+
+The result is a tunnel like a CONNECT-TCP one: `{masque_data, Stream,
+Bytes}` messages, `send/2`, `shutdown_write/1`, `close/1`. Connect it to
+the service the request named; if that fails, close the stream, as the
+draft asks. `Opts` are merged over the channel's options (`owner`,
+`mode`, `timeout`...).
+""".
+-spec reverse_accept(pid(), non_neg_integer(), map()) -> {ok, session()} | {error, term()}.
+reverse_accept(Listen, Id, Opts) when is_map(Opts) ->
+    case call_listen(Listen, {accept_spec, Id}) of
+        {ok, #{service := #{protocol := tcp} = Service} = Spec} ->
+            #{transport := T, accept_uri_template := Template, opts := ListenOpts} = Spec,
+            AcceptOpts0 = maps:merge(maps:without([owner, listen_path], ListenOpts), Opts),
+            AcceptOpts1 = AcceptOpts0#{
+                protocol => tcp,
+                transport => T,
+                tcp_framing => capsule,
+                tcp_protocol => ?MASQUE_CONNECT_ACCEPT_PROTOCOL,
+                uri_template => Template,
+                uri_vars => #{request_id => integer_to_binary(Id)}
+            },
+            AcceptOpts =
+                case Spec of
+                    #{pool_owner := Up} -> AcceptOpts1#{pool_owner => Up};
+                    _ -> AcceptOpts1
+                end,
+            Owner = maps:get(owner, Opts, self()),
+            dial_single(session_mod(AcceptOpts, T), service_target(Service), AcceptOpts, Owner);
+        {ok, _} ->
+            {error, not_supported};
+        {error, _} = Err ->
+            Err
+    end.
+
+%% A target for `info/1'; the stream itself is addressed by its id.
+service_target(#{destination := local, port := Port}) -> {<<"localhost">>, Port};
+service_target(#{destination := Host, port := Port}) when is_binary(Host) -> {Host, Port};
+service_target(#{destination := IP, port := Port}) -> {list_to_binary(inet:ntoa(IP)), Port}.
+
+-doc "Decline a connection request (CONNECTION_REQUEST_DECLINED).".
+-spec reverse_decline(pid(), non_neg_integer()) -> ok | {error, term()}.
+reverse_decline(Listen, Id) ->
+    call_listen(Listen, {decline, Id}).
+
+-doc """
+Tell the proxy which services you offer (AVAILABLE_SERVICES). Each call
+replaces the previous list; it is a hint, not a restriction.
+""".
+-spec advertise_services(pid(), [reverse_service()]) -> ok | {error, term()}.
+advertise_services(Listen, Services) when is_list(Services) ->
+    call_listen(Listen, {advertise, Services}).
+
+call_listen(Listen, Request) ->
+    try
+        gen_server:call(Listen, Request, 35000)
+    catch
+        exit:{noproc, _} -> {error, closed};
+        exit:{normal, _} -> {error, closed};
+        exit:{{shutdown, _}, _} -> {error, closed};
+        exit:{_, {gen_server, call, _}} -> {error, closed}
+    end.
+
+-doc "Equivalent to `request_connection(Control, Service, #{})`.".
+-spec request_connection(pid(), reverse_service()) ->
+    {ok, pid()} | {error, declined | timeout | closed}.
+request_connection(Control, Service) ->
+    request_connection(Control, Service, #{}).
+
+-doc """
+Proxy side: ask the client of a control channel to accept a connection
+to `Service` (CONNECTION_REQUEST), and wait for its accept stream.
+
+`Control` is the control session: `self()` inside the `listen_handler`
+callbacks. Returns `{ok, Stream}` once the client opened the stream,
+`{error, declined}`, `{error, timeout}` after `timeout` ms (default
+10000), or `{error, closed}` if the channel ended. The caller owns the
+stream: it gets `{masque_data, Stream, Bytes}` and
+`{masque_closed, Stream, Reason}`, writes with `send/2`, half-closes with
+`shutdown_write/1`, closes with `close/1`, and returns receive credit
+with `consumed/2`.
+""".
+-spec request_connection(pid(), reverse_service(), map()) ->
+    {ok, pid()} | {error, declined | timeout | closed}.
+request_connection(Control, Service, Opts) when is_map(Opts) ->
+    Timeout = maps:get(timeout, Opts, 10000),
+    try
+        gen_server:call(Control, {request_connection, Service, Timeout}, Timeout + 5000)
+    catch
+        exit:{_, {gen_server, call, _}} -> {error, closed}
+    end.
+
+-doc """
+Proxy side: give back receive credit for `N` bytes of an accept stream,
+once you have passed them on. A stream whose bytes are not consumed
+stops the client from sending. On a stream that already ended it does
+nothing.
+""".
+-spec consumed(pid(), non_neg_integer()) -> ok | {error, term()}.
+consumed(Stream, N) when is_integer(N), N >= 0 ->
+    try
+        gen_server:call(Stream, {consumed, N})
+    catch
+        %% The stream ended: there is no credit left to return.
+        exit:{_, {gen_server, call, _}} -> ok
+    end.
 
 %%====================================================================
 %% CONNECT-IP client API (RFC 9484)

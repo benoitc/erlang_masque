@@ -175,7 +175,8 @@ build_dispatch(Opts) ->
         ),
         fallback => maps:get(fallback, Opts, undefined),
         max_tunnels => maps:get(max_tunnels_per_connection, Opts, ?MASQUE_DEFAULT_MAX_TUNNELS),
-        name => maps:get(drain_key, Opts, undefined)
+        name => maps:get(drain_key, Opts, undefined),
+        reverse => masque_reverse_listener:config(Opts)
     }.
 
 make_dispatch_fun(Dispatch) ->
@@ -198,7 +199,28 @@ dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch) ->
             )
     end.
 
+%% Reverse connect requests (`accept_listen') take their own path; every
+%% other request is validated as before.
 dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
+    Rev = maps:get(reverse, Dispatch, disabled),
+    case masque_reverse_listener:match(Rev, Method, Headers) of
+        false ->
+            dispatch_masque(Conn, StreamId, Method, Path, Headers, Dispatch);
+        _ ->
+            Base = add_peer(Conn, #{
+                headers => Headers, handler_opts => maps:get(handler_opts, Dispatch)
+            }),
+            case masque_reverse_listener:route(Rev, h2, Conn, Path, Base) of
+                {ok, Protocol, Handler, HOpts, Req} ->
+                    start_tunnel(Conn, StreamId, Protocol, Handler, HOpts, Req, Dispatch);
+                {reject, Reason} ->
+                    reject(Conn, StreamId, Reason);
+                {reject, Reason, Extra} ->
+                    reject(Conn, StreamId, Reason, Extra)
+            end
+    end.
+
+dispatch_masque(Conn, StreamId, Method, Path, Headers, Dispatch) ->
     #{
         udp_template := UdpTpl,
         tcp_template := TcpTpl,
@@ -235,43 +257,11 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
             Req1 = add_peer(Conn, Req0#{handler_opts => HandlerOpts}),
             case masque_ip:resolve_target(Protocol, Req1, Resolver) of
                 {ok, Req} ->
-                    MaxT = maps:get(max_tunnels, Dispatch, 0),
                     case accept_request(HandlerMod, Req) of
-                        accept when MaxT > 0 ->
-                            case try_reserve_tunnel(Conn, MaxT) of
-                                true ->
-                                    case
-                                        spawn_session(
-                                            Conn,
-                                            StreamId,
-                                            Protocol,
-                                            HandlerMod,
-                                            HandlerOpts,
-                                            Req
-                                        )
-                                    of
-                                        ok ->
-                                            ok;
-                                        not_started ->
-                                            %% No session ever ran: give
-                                            %% the slot back. A session
-                                            %% that started releases it
-                                            %% itself.
-                                            release_tunnel(Conn)
-                                    end;
-                                false ->
-                                    reject(Conn, StreamId, overload)
-                            end;
                         accept ->
-                            _ = spawn_session(
-                                Conn,
-                                StreamId,
-                                Protocol,
-                                HandlerMod,
-                                HandlerOpts,
-                                Req
-                            ),
-                            ok;
+                            start_tunnel(
+                                Conn, StreamId, Protocol, HandlerMod, HandlerOpts, Req, Dispatch
+                            );
                         {reject, Reason} ->
                             reject(Conn, StreamId, Reason);
                         {reject, Reason, Extra} when is_list(Extra) ->
@@ -287,6 +277,28 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch) ->
                 Fun when is_function(Fun, 5) ->
                     Fun(Conn, StreamId, Method, Path, Headers)
             end
+    end.
+
+%% Start the session within the connection's tunnel limit.
+start_tunnel(Conn, StreamId, Protocol, HandlerMod, HandlerOpts, Req, Dispatch) ->
+    case maps:get(max_tunnels, Dispatch, 0) of
+        MaxT when MaxT > 0 ->
+            case try_reserve_tunnel(Conn, MaxT) of
+                true ->
+                    case spawn_session(Conn, StreamId, Protocol, HandlerMod, HandlerOpts, Req) of
+                        ok ->
+                            ok;
+                        not_started ->
+                            %% No session ever ran: give the slot back. A
+                            %% session that started releases it itself.
+                            release_tunnel(Conn)
+                    end;
+                false ->
+                    reject(Conn, StreamId, overload)
+            end;
+        _ ->
+            _ = spawn_session(Conn, StreamId, Protocol, HandlerMod, HandlerOpts, Req),
+            ok
     end.
 
 spawn_session(Conn, StreamId, Protocol, Handler, HOpts, Req) ->
@@ -532,6 +544,8 @@ proxy_status_error(bad_protocol) -> <<"http_protocol_error">>;
 proxy_status_error(bad_path) -> <<"http_protocol_error">>;
 proxy_status_error(bad_port) -> <<"http_protocol_error">>;
 proxy_status_error(bad_host) -> <<"http_protocol_error">>;
+proxy_status_error(bad_request) -> <<"http_protocol_error">>;
+proxy_status_error(unknown_request) -> <<"http_request_error">>;
 proxy_status_error(resolution_failed) -> <<"dns_error">>;
 proxy_status_error(upstream_timeout) -> <<"connection_timeout">>;
 proxy_status_error(forbidden) -> <<"destination_ip_prohibited">>;

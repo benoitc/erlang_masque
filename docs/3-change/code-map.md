@@ -17,6 +17,17 @@ This page lists every module in `src/`, grouped by role, with one line on what i
 | `masque_tcp_proxy_handler` | Default CONNECT-TCP handler: opens a `gen_tcp` connection, relays bytes, maps FIN both ways, `eof_timeout` for half-closed tunnels. | you change TCP dialing, half-close or target policy. |
 | `masque_tcp_dial` | Happy Eyeballs (RFC 8305) for the CONNECT-TCP handler: races a target's addresses and hands over the first connection. | you change how capsule-framed tunnels dial their target. |
 | `masque_tcp_capsule` | CONNECT-TCP capsule framing: tokens and versions, `DATA`/`FINAL_DATA` encoding, the streaming decoder and its invalid-data checks. | the CONNECT-TCP draft changes its tokens, codes or framing rules. |
+| `masque_listen_server_session` | Reverse connect control channel, proxy side, h3 and h2: sends CONNECTION_REQUEST for `request_connection/3`, answers the caller when the accept stream starts, on DECLINED or timeout; runs the `listen_handler`. | you change the control channel on the proxy. |
+| `masque_listen_h1_server_session` | The same over h1, on the upgraded socket. | as above, for h1. |
+| `masque_listen_client_session` | Reverse connect control channel, agent side, h3 and h2, on a dedicated connection owner; delivers `masque_connection_request` and hands out accept specs. | you change the control channel on the agent. |
+| `masque_listen_h1_client_session` | The same over h1, on its own TLS connection. | as above, for h1. |
+| `masque_reverse_listener` | Listener side of reverse connect, shared by the three listeners: recognises `connect-listen` and `connect-accept`, authenticates, checks accepts (id, connection, identity). | you change what a listener accepts for reverse connect. |
+| `masque_reverse_accept_handler` | Handler for TCP accept streams on the proxy: takes the pending request and relays the stream to the requester, with `handle_call/3` for its API. | you change the proxy-side accept stream API. |
+| `masque_reverse_registry` | ETS table of pending requests (id to control session, connection, identity, requester, service). | you change how requests are matched to accepts. |
+| `masque_reverse_capsule` | Codec for AVAILABLE_SERVICES, CONNECTION_REQUEST, CONNECTION_REQUEST_DECLINED and the service record. | the draft changes a capsule. |
+| `masque_uri_reverse` | Listen and accept URI templates. | the draft changes a template or target form. |
+| `masque_listen_handler` | Behaviour for the proxy's `listen_handler`. | you add a callback. |
+| `masque_stream_send` | Blocking write on an h3 or h2 stream (h2 flow-control wait, h3 retry on `send_ready`, 30 s without progress). Used by CONNECT-TCP and the reverse connect control channel. | you change how stream writes wait for the transport. |
 | `masque_ip_proxy_handler` | Default CONNECT-IP handler: address allocation from `address_pool`, route advertisement, source filtering, TTL and MTU handling, `forward_fun` and `lifecycle_fun` hooks. | you change the CONNECT-IP forwarding plane or address policy. |
 | `masque_udp_bind_proxy_handler` | Default Connect-UDP-Bind handler: owns the bind `gen_udp` socket, builds `Proxy-Public-Address`, filters peers. Adds `handle_bind_packet/3`, which is not part of `masque_handler`. | you change bind socket policy or public address reporting. |
 | `masque_chain_handler` | Relay handler: opens a MASQUE client tunnel to `upstream_proxy` and relays UDP, TCP and IP; `via` loop detection and the node token. | you change relay behaviour or loop detection. |
@@ -95,7 +106,7 @@ Change a session module when you change the wire behaviour of that cell: framing
 | Module | Role | Change this when... |
 |---|---|---|
 | `masque_app` | Application callback: starts `masque_sup`, sets up metrics, creates the node `via` token. | you add application start-up work. |
-| `masque_sup` | Top supervisor: the eight session supervisors, the pool, the IP registry, and the `masque_h2_tunnel_counts` and `masque_tcp_upgrade_proxies` ETS tables. | you add a supervised process or a global table. |
+| `masque_sup` | Top supervisor: the ten session supervisors, the pool, the IP registry, and the `masque_h2_tunnel_counts`, `masque_tcp_upgrade_proxies` and `masque_reverse_pending` ETS tables. | you add a supervised process or a global table. |
 | `masque_h2_session_sup` | One module, four `simple_one_for_one` instances (UDP, TCP, IP, bind) for h2 server sessions. | you add an h2 protocol. |
 | `masque_session_start` | Deferred start of h2 and h1 sessions: `init/1` returns at once, the real start runs in `handle_continue/2` and is reported to the waiting listener. | you change how an h2 or h1 session start is reported or timed out. |
 | `masque_h1_session_sup` | Same for h1 server sessions. | you add an h1 protocol. |

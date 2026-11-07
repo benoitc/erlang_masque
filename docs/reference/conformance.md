@@ -155,3 +155,27 @@ Library policy, not required by the draft:
 - `upstream_pool => true` is ignored for udp-bind; each bind session dials its own connection and closes it with the session.
 
 Next: [messages-and-errors](messages-and-errors.md), or [testing](../3-change/testing.md) for the suites that pin these rows.
+
+## draft-rosomakho-masque-reverse-connect-01
+
+Reverse connect is off unless a listener sets `accept_listen => true`. The draft is an individual draft (21 June 2026, expires 23 December 2026). See [reverse connect](../2-use/reverse-connect.md).
+
+| Section | Requirement | Behaviour in masque | Module |
+| --- | --- | --- | --- |
+| §4.1 | Listener template with optional `target` and `ipproto` | `target`: host name, address, prefix, `*`, `*.domain`, `.`; `ipproto`: 6, 17, `*`. A missing variable means `*`. Default `/.well-known/masque/listen/{target}/{ipproto}/`. Other variables are refused. | `masque_uri_reverse` |
+| §4.2, §4.3 | `connect-listen` over `Upgrade` (h1) or Extended CONNECT (h2, h3), capsule protocol | Listener answers 101 or 200 with `capsule-protocol: ?1`; the client requires it. | listeners, `masque_listen_*_session` |
+| §4.4 | AVAILABLE_SERVICES, a full list that replaces the previous one | Decoded and handed to `handle_services/2`; a malformed record aborts the channel. | `masque_reverse_capsule`, `masque_listen_server_session` |
+| §5.1 | CONNECTION_REQUEST with a request id unique on the channel | Ids are random 62-bit values, registered before the capsule is sent. The client aborts the channel on a reused id or a malformed request. | `masque_reverse_registry`, `masque_listen_client_session` |
+| §5.1 | CONNECTION_REQUEST_DECLINED; one for no outstanding request is an error | The requester gets `{error, declined}`; an unknown id aborts the channel (`H3_MESSAGE_ERROR`, `PROTOCOL_ERROR`). | `masque_listen_server_session` |
+| §5.2 | Accept template with `request_id` | Default `/.well-known/masque/accept/{request_id}/`; a template without `request_id` is refused. | `masque_uri_reverse` |
+| §5.2.1, §5.2.2 | Malformed accept: 400; unknown id: 404 | `bad_request` (400) and `unknown_request` (404). An accept on another connection (h2, h3) or with another identity (h1) also gets 404. | `masque_reverse_listener` |
+| §5.2.2 | h2/h3 accepts run on the control channel's connection | The client opens the channel on a connection of its own and every accept stream on it; the proxy checks the connection. | `masque_upstream_owner`, `masque_reverse_listener` |
+| §5.3 | TCP in connect-tcp DATA and FINAL_DATA capsules | Accept streams run as CONNECT-TCP in capsule framing with the draft -18 codes (`0x08`, `0x09`), with its half-close, abort and flow control. No `100 Continue` is sent. | `masque_tcp_*_session`, `masque_reverse_accept_handler` |
+| §5.3 | UDP like CONNECT-UDP | Not supported yet: a request for a UDP service cannot be accepted. | |
+| §6 | Authenticated users only; on h1 authenticate the channel and each accept; random ids | `listen_handler`'s `authenticate/1` runs for every `connect-listen` and every h1 `connect-accept`; without a handler, channels get 403. | `masque_reverse_listener` |
+| §7.3 | Capsule types TBD | Provisional private values: AVAILABLE_SERVICES `0x5243a0`, CONNECTION_REQUEST `0x5243a1`, CONNECTION_REQUEST_DECLINED `0x5243a2`. None is a GREASE value. | `include/masque_reverse.hrl` |
+
+Deviations and open points:
+- The capsule codes are masque's own until the draft assigns them, so only masque peers interoperate. No other implementation of the draft is known.
+- UDP accept streams are not implemented yet.
+- The control channel has no idle timeout by default (`listen_idle_timeout_ms`); the draft does not set one.
