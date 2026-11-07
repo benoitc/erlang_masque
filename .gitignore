@@ -14,3 +14,7 @@ logs/
 .DS_Store
 *.crashdump
 erl_crash.dump
+
+# Local agent state; only the shared skills are part of the repository.
+.claude/*
+!.claude/skills/
