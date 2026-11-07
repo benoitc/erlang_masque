@@ -107,9 +107,9 @@ all() ->
         {group, h3_capsule},
         {group, h2_capsule},
         {group, h1_capsule},
-        {group, h3_token_final},
-        {group, h2_token_final},
-        {group, h1_token_final},
+        {group, h3_token_12},
+        {group, h2_token_12},
+        {group, h1_token_12},
         {group, h3_token_08},
         {group, h2_token_08},
         {group, h1_token_08}
@@ -191,16 +191,16 @@ groups() ->
         {h2, [], Tcp ++ HalfClose ++ Other ++ [h2_goaway_tells_client | GoAway]},
         {h1, [], Tcp ++ Other ++ [h1_udp_stalled_client | Fallback]},
         %% CONNECT-TCP in capsules (draft-ietf-httpbis-connect-tcp-18),
-        %% with the client's default token, `connect-tcp-12'.
+        %% with the client's default token, `connect-tcp'.
         {h3_capsule, [], Tcp ++ HalfClose ++ Capsule ++ Vectors},
         {h2_capsule, [], Tcp ++ HalfClose ++ Capsule ++ Vectors},
         %% Capsules carry FIN, so h1 can half-close in this mode.
         {h1_capsule, [], Tcp ++ HalfClose ++ [capsule_h1_without_header | Vectors]},
-        %% The client on the final token, and on draft -09's token and
-        %% provisional codes.
-        {h3_token_final, [], Core},
-        {h2_token_final, [], Core},
-        {h1_token_final, [], Core},
+        %% The client on the draft's interop token, and on draft -09's
+        %% token and provisional codes.
+        {h3_token_12, [], Core},
+        {h2_token_12, [], Core},
+        {h1_token_12, [], Core},
         {h3_token_08, [], Core},
         {h2_token_08, [], Core},
         {h1_token_08, [], Core}
@@ -243,7 +243,7 @@ init_per_group(Group, Config) ->
         "h3_capsule" -> [{transport, h3}, {tcp_framing, capsule} | Config];
         "h2_capsule" -> [{transport, h2}, {tcp_framing, capsule} | Config];
         "h1_capsule" -> [{transport, h1}, {tcp_framing, capsule} | Config];
-        [$h, N | "_token_final"] -> token_group([$h, N], <<"connect-tcp">>, Config);
+        [$h, N | "_token_12"] -> token_group([$h, N], <<"connect-tcp-12">>, Config);
         [$h, N | "_token_08"] -> token_group([$h, N], <<"connect-tcp-08">>, Config);
         _ -> [{transport, Group} | Config]
     end.
@@ -1175,7 +1175,7 @@ fake_serve(Sock, Refusal, Parent) ->
                 Sock,
                 <<
                     "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n"
-                    "Upgrade: connect-tcp-12\r\nCapsule-Protocol: ?1\r\n\r\n"
+                    "Upgrade: connect-tcp\r\nCapsule-Protocol: ?1\r\n\r\n"
                 >>
             ),
             fake_echo(Sock, Rest)

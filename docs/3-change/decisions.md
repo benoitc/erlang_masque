@@ -205,7 +205,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q7.** Settled: `masque.tunnels.*` covers every protocol and transport; each server session reports one open and one close.
 - **Q8.** How stable are internal message shapes (`masque_datagram_in`, `masque_finalized`, `dial_result`, `owner_capacity`)?
 - **Q9.** Versioning: the 0.6.0 CHANGELOG entry and the v0.5/v0.6 tags are missing; is hex publishing planned?
-- **Q10.** Settled: masque speaks draft-ietf-httpbis-connect-tcp-18 in capsule framing, the provisional codes of drafts -09 and -10 behind their tokens, and the earlier raw framing, raw by default on the client (see [connect-tcp](../2-use/connect-tcp.md#two-framings)). Switching the default framing, and the default token from `connect-tcp-12` to `connect-tcp` once the RFC is published, are later decisions.
+- **Q10.** Settled: masque speaks draft-ietf-httpbis-connect-tcp-18 in capsule framing, the provisional codes of drafts -09 and -10 behind their tokens, and the earlier raw framing, raw by default on the client (see [connect-tcp](../2-use/connect-tcp.md#two-framings)). In capsule framing the client sends `connect-tcp`, the registered name, rather than the draft's interop token `connect-tcp-12` (maintainer's decision, 2026-11-07); `tcp_protocol` picks another. Switching the default framing is a later decision.
 - **Q11.** Settled: udp-bind is never pooled; `upstream_pool` is ignored and no pooled connection is checked out.
 - **Q12.** Is `masque_capsule` meant to become the single capsule codec? Today `quic_h3_capsule` (through `masque_capsule`), `h2_capsule` and `h1_capsule` are all used.
 - **Q13.** Settled: [a handler crash ends the tunnel](#a-handler-crash-ends-the-tunnel).

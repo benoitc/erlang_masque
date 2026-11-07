@@ -60,15 +60,15 @@ token_version(_) -> unknown.
 
 %% What a client sends, from its `tcp_framing' and `tcp_protocol'
 %% options: the framing, the protocol token and the capsule codes. In
-%% capsule framing the token defaults to `connect-tcp-12', which section
-%% 8.1.1 of the draft asks for until it is an RFC.
+%% capsule framing the token defaults to `connect-tcp', the protocol's
+%% registered name; `connect-tcp-12' is the draft's interop token.
 -spec client_protocol(map()) -> {raw | capsule, binary(), version()}.
 client_protocol(Opts) ->
     case maps:get(tcp_framing, Opts, raw) of
         raw ->
             {raw, ?MASQUE_CONNECT_TCP_PROTOCOL, final};
         capsule ->
-            Token = maps:get(tcp_protocol, Opts, ?MASQUE_CONNECT_TCP_12_PROTOCOL),
+            Token = maps:get(tcp_protocol, Opts, ?MASQUE_CONNECT_TCP_PROTOCOL),
             case token_version(Token) of
                 {capsule, Version} -> {capsule, Token, Version};
                 _ -> {capsule, Token, final}

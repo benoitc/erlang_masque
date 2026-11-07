@@ -134,11 +134,11 @@ token_version_test() ->
 client_protocol_test() ->
     ?assertEqual({raw, <<"connect-tcp">>, final}, ?C:client_protocol(#{})),
     ?assertEqual(
-        {capsule, <<"connect-tcp-12">>, final}, ?C:client_protocol(#{tcp_framing => capsule})
+        {capsule, <<"connect-tcp">>, final}, ?C:client_protocol(#{tcp_framing => capsule})
     ),
     ?assertEqual(
-        {capsule, <<"connect-tcp">>, final},
-        ?C:client_protocol(#{tcp_framing => capsule, tcp_protocol => <<"connect-tcp">>})
+        {capsule, <<"connect-tcp-12">>, final},
+        ?C:client_protocol(#{tcp_framing => capsule, tcp_protocol => <<"connect-tcp-12">>})
     ),
     ?assertEqual(
         {capsule, <<"connect-tcp-08">>, provisional},

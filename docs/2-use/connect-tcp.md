@@ -22,9 +22,9 @@ masque speaks two framings of draft-ietf-httpbis-connect-tcp. Pick one with the 
 |---|---|---|
 | Draft | earlier revisions | draft-ietf-httpbis-connect-tcp-18 |
 | Bytes on the stream | as they are | in `DATA` capsules; `FINAL_DATA` carries the last bytes and the FIN |
-| Protocol token | `connect-tcp` | `connect-tcp-12`, the draft's interop token, unless `tcp_protocol` says otherwise |
+| Protocol token | `connect-tcp` | `connect-tcp`, unless `tcp_protocol` says otherwise |
 | `capsule-protocol: ?1` | absent | on the request and the response |
-| HTTP/1.1 request | classic `CONNECT host:port` | `GET` with `Upgrade: connect-tcp-12` on the TCP template, answered with 101 |
+| HTTP/1.1 request | classic `CONNECT host:port` | `GET` with `Upgrade: connect-tcp` on the TCP template, answered with 101 |
 | Interim `100 Continue` | only if the request expects it | always, before the target is dialed |
 | HTTP/1.1 half-close | no | yes |
 | A stream that ends without its FIN | a FIN | an abort: the target gets a reset |
@@ -40,8 +40,8 @@ The token picks the capsule codes. Set it with `tcp_protocol` when the proxy nee
 
 | `tcp_protocol` | Capsule codes | Peers |
 |---|---|---|
-| `<<"connect-tcp-12">>` (default) | `DATA` `0x08`, `FINAL_DATA` `0x09` | drafts -12 to -18 |
-| `<<"connect-tcp">>` | `0x08`, `0x09` | the final name, once the RFC is out |
+| `<<"connect-tcp">>` (default) | `DATA` `0x08`, `FINAL_DATA` `0x09` | draft -18 and the RFC |
+| `<<"connect-tcp-12">>` | `0x08`, `0x09` | drafts -12 to -18, by their interop token |
 | `<<"connect-tcp-08">>` | `0x2028d7f0`, `0x2028d7f1` | draft -09 |
 | `<<"connect-tcp-07">>` | `0x2028d7f0`, `0x2028d7f1` | draft -10 |
 

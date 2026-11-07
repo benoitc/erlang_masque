@@ -170,9 +170,9 @@ versions.
         %% `capsule' (draft-ietf-httpbis-connect-tcp-18).
         tcp_framing => raw | capsule,
         %% CONNECT-TCP in capsule framing: the protocol token, which also
-        %% picks the capsule codes. `<<"connect-tcp-12">>' (the default,
-        %% the draft's interop token), `<<"connect-tcp">>' (the final
-        %% name), or `<<"connect-tcp-08">>' / `<<"connect-tcp-07">>' for
+        %% picks the capsule codes. `<<"connect-tcp">>' (the default, the
+        %% registered name), `<<"connect-tcp-12">>' (the draft's interop
+        %% token), or `<<"connect-tcp-08">>' / `<<"connect-tcp-07">>' for
         %% peers of drafts -09 and -10.
         tcp_protocol => binary(),
         %% CONNECT-IP: local send-side MTU (1280..65535, default 1500).
