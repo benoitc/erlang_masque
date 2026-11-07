@@ -151,7 +151,10 @@ init({Target, Opts, Owner}) ->
 %% State: connecting
 %%====================================================================
 
-connecting(internal, {do_handshake, Opts}, Data) ->
+connecting(Type, Event, Data) ->
+    masque_quiet:stop(connecting_inner(Type, Event, Data)).
+
+connecting_inner(internal, {do_handshake, Opts}, Data) ->
     case masque_client_failed:guard(fun() -> do_connect(Data, Opts) end) of
         {ok, Socket, Buffer, RespHeaders} ->
             case validate_response(RespHeaders) of
@@ -189,19 +192,19 @@ connecting(internal, {do_handshake, Opts}, Data) ->
             %% The caller's `handshake_await' is not processed yet.
             {next_state, failed, Data#data{failure = Reason}, masque_client_failed:enter(Opts)}
     end;
-connecting({call, From}, handshake_await, Data) ->
+connecting_inner({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
-connecting({call, From}, {set_owner, NewOwner}, Data) ->
+connecting_inner({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
-connecting({call, From}, _Other, Data) ->
+connecting_inner({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
-connecting(
+connecting_inner(
     info,
     {'DOWN', Ref, process, _, _},
     #data{owner_ref = Ref}
 ) ->
     {stop, owner_gone};
-connecting(info, _Msg, Data) ->
+connecting_inner(info, _Msg, Data) ->
     {keep_state, Data}.
 
 %%====================================================================
@@ -212,41 +215,47 @@ connecting(info, _Msg, Data) ->
 %% State: failed (dial error parked for `handshake_await')
 %%====================================================================
 
-failed(Type, Event, #data{failure = Reason, owner_ref = Ref}) ->
+failed(Type, Event, Data) ->
+    masque_quiet:stop(failed_inner(Type, Event, Data)).
+
+failed_inner(Type, Event, #data{failure = Reason, owner_ref = Ref}) ->
     masque_client_failed:handle(Type, Event, Reason, Ref).
 
-open({call, From}, handshake_await, Data) ->
+open(Type, Event, Data) ->
+    masque_quiet:stop(open_inner(Type, Event, Data)).
+
+open_inner({call, From}, handshake_await, Data) ->
     {keep_state, Data, [{reply, From, ok}]};
-open({call, From}, {set_owner, NewOwner}, Data) ->
+open_inner({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
-open({call, From}, info, Data) ->
+open_inner({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, open)}]};
 %% `masque:send/2' on a scoped bind: context 0 to the scoped target.
-open({call, From}, {send, Bytes}, #data{bind_scope = scoped} = Data) ->
+open_inner({call, From}, {send, Bytes}, #data{bind_scope = scoped} = Data) ->
     Data1 = send_datagram(0, Bytes, Data),
     {keep_state, Data1, [{reply, From, ok}]};
-open({call, From}, {send_to, Peer, Bytes}, Data) ->
+open_inner({call, From}, {send_to, Peer, Bytes}, Data) ->
     {Reply, Data1} = handle_send_to(Peer, Bytes, Data),
     {keep_state, Data1, [{reply, From, Reply}]};
-open({call, From}, {recv, Timeout}, Data) ->
+open_inner({call, From}, {recv, Timeout}, Data) ->
     handle_recv_call(From, Timeout, Data);
-open({call, From}, {set_mode, Mode}, Data) ->
+open_inner({call, From}, {set_mode, Mode}, Data) ->
     {keep_state, Data#data{mode = Mode}, [{reply, From, ok}]};
-open({call, From}, {assign_compression, Peer}, Data) ->
+open_inner({call, From}, {assign_compression, Peer}, Data) ->
     handle_assign_compression(From, Peer, Data);
-open({call, From}, open_uncompressed_context, Data) ->
+open_inner({call, From}, open_uncompressed_context, Data) ->
     handle_open_uncompressed_context(From, Data);
-open({call, From}, {close_compression, Id}, Data) ->
+open_inner({call, From}, {close_compression, Id}, Data) ->
     handle_close_compression(From, Id, Data);
-open({call, From}, proxy_public_address, Data) ->
+open_inner({call, From}, proxy_public_address, Data) ->
     {keep_state, Data, [{reply, From, {ok, Data#data.public_addresses}}]};
-open({call, From}, {send_capsule, Type, Value}, Data) ->
+open_inner({call, From}, {send_capsule, Type, Value}, Data) ->
     Bytes = iolist_to_binary(masque_capsule:encode(Type, Value)),
     Reply = ssl_send(Data, Bytes),
     {keep_state, Data, [{reply, From, Reply}]};
-open({call, From}, stop, Data) ->
+open_inner({call, From}, stop, Data) ->
     {next_state, closing, Data, [{reply, From, ok}, {next_event, internal, do_close}]};
-open(
+open_inner(
     info,
     {ssl, Sock, Bytes},
     #data{socket = Sock, cap_buf = Buf, max_cap = Max} = Data
@@ -256,24 +265,27 @@ open(
         true -> {stop, capsule_buffer_overflow};
         false -> drain_capsules(New, Data)
     end;
-open(info, {ssl_closed, Sock}, #data{socket = Sock} = Data) ->
+open_inner(info, {ssl_closed, Sock}, #data{socket = Sock} = Data) ->
     end_tunnel({stop, peer_closed}, Data);
-open(info, {ssl_error, Sock, Reason}, #data{socket = Sock} = Data) ->
+open_inner(info, {ssl_error, Sock, Reason}, #data{socket = Sock} = Data) ->
     end_tunnel({stop, {ssl_error, Reason}}, Data);
-open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
+open_inner(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
-open(
+open_inner(
     info,
     {'DOWN', Ref, process, _, _},
     #data{owner_ref = Ref} = Data
 ) ->
     {next_state, closing, Data, [{next_event, internal, do_close}]};
-open(info, _Msg, Data) ->
+open_inner(info, _Msg, Data) ->
     {keep_state, Data};
-open({call, From}, _Other, Data) ->
+open_inner({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_supported}}]}.
 
-closing(internal, do_close, #data{socket = Socket} = Data) ->
+closing(Type, Event, Data) ->
+    masque_quiet:stop(closing_inner(Type, Event, Data)).
+
+closing_inner(internal, do_close, #data{socket = Socket} = Data) ->
     _ =
         case Socket of
             undefined ->
@@ -286,28 +298,34 @@ closing(internal, do_close, #data{socket = Socket} = Data) ->
                 end
         end,
     {stop, normal, Data};
-closing({call, From}, _Other, Data) ->
+closing_inner({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, closing}}]};
-closing(_, _, Data) ->
+closing_inner(_, _, Data) ->
     {keep_state, Data}.
 
 %%====================================================================
 %% State: closed (peer ended the tunnel, queue-mode data unread)
 %%====================================================================
 
-closed({call, From}, info, Data) ->
+closed(Type, Event, Data) ->
+    masque_quiet:stop(closed_inner(Type, Event, Data)).
+
+closed_inner({call, From}, info, Data) ->
     {keep_state_and_data, [{reply, From, session_info(Data, closed)}]};
-closed(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
+closed_inner(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
     masque_client_rx:closed(Type, Event, Buf, Ref, {bind, fun(B) -> Data#data{rx_buf = B} end}).
 
 %% A parked dial error was already returned to `handshake_await'.
-terminate(_Reason, failed, _Data) ->
+terminate(Reason, StateName, Data) ->
+    terminate_inner(masque_quiet:reason(Reason), StateName, Data).
+
+terminate_inner(_Reason, failed, _Data) ->
     ok;
 %% The handshake failed: the caller already has the error, and the
 %% session pid was never handed to it.
-terminate(Reason, connecting, #data{} = Data) ->
+terminate_inner(Reason, connecting, #data{} = Data) ->
     terminate(Reason, closed_before_open, Data#data{mode = queue});
-terminate(Reason, _State, #data{
+terminate_inner(Reason, _State, #data{
     owner = Owner,
     mode = message,
     socket = Socket
@@ -325,7 +343,7 @@ terminate(Reason, _State, #data{
         end,
     masque_client_owner:send(Owner, {masque_closed, self(), Reason}),
     ok;
-terminate(_Reason, _State, #data{socket = Socket}) ->
+terminate_inner(_Reason, _State, #data{socket = Socket}) ->
     _ =
         case Socket of
             undefined ->

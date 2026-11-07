@@ -28,6 +28,7 @@ This page lists every module in `src/`, grouped by role, with one line on what i
 | `masque_reverse_capsule` | Codec for AVAILABLE_SERVICES, CONNECTION_REQUEST, CONNECTION_REQUEST_DECLINED and the service record. | the draft changes a capsule. |
 | `masque_uri_reverse` | Listen and accept URI templates. | the draft changes a template or target form. |
 | `masque_listen_handler` | Behaviour for the proxy's `listen_handler`. | you add a callback. |
+| `masque_quiet` | Quiet session exits: wraps a session's stop reason in `{shutdown, {masque_quiet, R}}` so OTP does not log it, and unwraps it for `terminate` and callers. | you add a session module (wrap its callbacks) or read a session's exit reason. |
 | `masque_stream_send` | Blocking write on an h3 or h2 stream (h2 flow-control wait, h3 retry on `send_ready`, 30 s without progress). Used by CONNECT-TCP and the reverse connect control channel. | you change how stream writes wait for the transport. |
 | `masque_ip_proxy_handler` | Default CONNECT-IP handler: address allocation from `address_pool`, route advertisement, source filtering, TTL and MTU handling, `forward_fun` and `lifecycle_fun` hooks. | you change the CONNECT-IP forwarding plane or address policy. |
 | `masque_udp_bind_proxy_handler` | Default Connect-UDP-Bind handler: owns the bind `gen_udp` socket, builds `Proxy-Public-Address`, filters peers. Adds `handle_bind_packet/3`, which is not part of `masque_handler`. | you change bind socket policy or public address reporting. |

@@ -153,7 +153,10 @@ init({Target, Opts, Owner}) ->
 %% States
 %%====================================================================
 
-connecting(
+connecting(Type, Event, Data) ->
+    masque_quiet:stop(connecting_inner(Type, Event, Data)).
+
+connecting_inner(
     {call, From},
     handshake_await,
     #data{connect_opts = Opts} = Data
@@ -182,54 +185,57 @@ connecting(
         {error, Reason} ->
             {stop_and_reply, normal, [{reply, From, {error, Reason}}], Data}
     end;
-connecting({call, From}, {set_owner, NewOwner}, Data) ->
+connecting_inner({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
-connecting({call, From}, info, Data) ->
+connecting_inner({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, connecting)}]};
-connecting({call, From}, stop, Data) ->
+connecting_inner({call, From}, stop, Data) ->
     {stop_and_reply, normal, [{reply, From, ok}], Data};
-connecting({call, From}, _Other, Data) ->
+connecting_inner({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
-connecting(
+connecting_inner(
     info,
     {'DOWN', Ref, process, _, _},
     #data{owner_ref = Ref}
 ) ->
     {stop, owner_gone};
-connecting(info, _Msg, Data) ->
+connecting_inner(info, _Msg, Data) ->
     {keep_state, Data}.
 
-open({call, From}, handshake_await, Data) ->
+open(Type, Event, Data) ->
+    masque_quiet:stop(open_inner(Type, Event, Data)).
+
+open_inner({call, From}, handshake_await, Data) ->
     {keep_state, Data, [{reply, From, ok}]};
-open({call, From}, info, Data) ->
+open_inner({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, open)}]};
-open({call, From}, {send, _Data}, #data{write_closed = true} = Data) ->
+open_inner({call, From}, {send, _Data}, #data{write_closed = true} = Data) ->
     {keep_state, Data, [{reply, From, {error, write_closed}}]};
-open({call, From}, {send, Payload}, Data) ->
+open_inner({call, From}, {send, Payload}, Data) ->
     Data2 = ensure_writer(Data),
     Data2#data.writer ! {send, From, frame(Data2, Payload, false)},
     {keep_state, Data2};
-open({call, From}, {recv, Timeout}, Data) ->
+open_inner({call, From}, {recv, Timeout}, Data) ->
     handle_recv_call(From, Timeout, Data);
-open({call, From}, {send_capsule, _, _}, Data) ->
+open_inner({call, From}, {send_capsule, _, _}, Data) ->
     {keep_state, Data, [{reply, From, {error, not_supported}}]};
-open({call, From}, {set_mode, Mode}, Data) ->
+open_inner({call, From}, {set_mode, Mode}, Data) ->
     {keep_state, Data#data{mode = Mode}, [{reply, From, ok}]};
 %% Capsule mode ends the write side with FINAL_DATA, which TLS cannot
 %% do with a half-close.
-open({call, From}, shutdown_write, #data{framing = capsule} = Data) ->
+open_inner({call, From}, shutdown_write, #data{framing = capsule} = Data) ->
     Data2 = ensure_writer(Data),
     Data2#data.writer ! {send, From, frame(Data2, <<>>, true)},
     {keep_state, Data2#data{write_closed = true}};
-open({call, From}, shutdown_write, Data) ->
+open_inner({call, From}, shutdown_write, Data) ->
     Data2 = ensure_writer(Data),
     Data2#data.writer ! {shutdown_write, From},
     {keep_state, Data2#data{write_closed = true}};
-open({call, From}, {set_owner, NewOwner}, Data) ->
+open_inner({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
-open({call, From}, stop, Data) ->
+open_inner({call, From}, stop, Data) ->
     {next_state, closing, Data, [{reply, From, ok}, {next_event, internal, do_close}]};
-open(info, {ssl, Sock, Bytes}, #data{socket = Sock} = Data) ->
+open_inner(info, {ssl, Sock, Bytes}, #data{socket = Sock} = Data) ->
     case incoming(Bytes, Data) of
         {error, Reason} ->
             end_tunnel(Reason, {stop, Reason, Data}, Data);
@@ -248,7 +254,9 @@ open(info, {ssl, Sock, Bytes}, #data{socket = Sock} = Data) ->
     end;
 %% Capsule mode: the connection closing after FINAL_DATA is the end of
 %% a finished tunnel; without it the tunnel was aborted.
-open(info, {ssl_closed, Sock}, #data{socket = Sock, framing = capsule, final_in = true} = Data) ->
+open_inner(
+    info, {ssl_closed, Sock}, #data{socket = Sock, framing = capsule, final_in = true} = Data
+) ->
     case masque_tcp_capsule:end_of_stream(Data#data.dec) of
         ok ->
             {stop, normal, Data};
@@ -256,26 +264,29 @@ open(info, {ssl_closed, Sock}, #data{socket = Sock, framing = capsule, final_in 
             Reason = {bad_capsule, Why},
             end_tunnel(Reason, {stop, Reason, Data}, Data)
     end;
-open(info, {ssl_closed, Sock}, #data{socket = Sock, framing = capsule} = Data) ->
+open_inner(info, {ssl_closed, Sock}, #data{socket = Sock, framing = capsule} = Data) ->
     end_tunnel(peer_reset, {stop, peer_reset, Data}, Data);
-open(info, {ssl_closed, Sock}, #data{socket = Sock} = Data) ->
+open_inner(info, {ssl_closed, Sock}, #data{socket = Sock} = Data) ->
     end_tunnel(peer_closed, {stop, peer_closed, Data}, Data);
-open(info, {ssl_error, Sock, Reason}, #data{socket = Sock} = Data) ->
+open_inner(info, {ssl_error, Sock, Reason}, #data{socket = Sock} = Data) ->
     end_tunnel({ssl_error, Reason}, {stop, {ssl_error, Reason}, Data}, Data);
-open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
+open_inner(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
-open(
+open_inner(
     info,
     {'DOWN', Ref, process, _, _},
     #data{owner_ref = Ref} = Data
 ) ->
     {next_state, closing, Data, [{next_event, internal, do_close}]};
-open(info, _Msg, Data) ->
+open_inner(info, _Msg, Data) ->
     {keep_state, Data};
-open({call, From}, _Other, Data) ->
+open_inner({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_supported}}]}.
 
-closing(internal, do_close, #data{socket = Socket} = Data) ->
+closing(Type, Event, Data) ->
+    masque_quiet:stop(closing_inner(Type, Event, Data)).
+
+closing_inner(internal, do_close, #data{socket = Socket} = Data) ->
     _ =
         case Socket of
             undefined ->
@@ -288,9 +299,9 @@ closing(internal, do_close, #data{socket = Socket} = Data) ->
                 end
         end,
     {stop, normal, Data};
-closing({call, From}, _Other, Data) ->
+closing_inner({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, closing}}]};
-closing(_Event, _Msg, Data) ->
+closing_inner(_Event, _Msg, Data) ->
     {keep_state, Data}.
 
 %%====================================================================
@@ -336,15 +347,21 @@ report_failure({error, Reason}, Sock, Session) ->
 %% State: closed (peer ended the tunnel, queue-mode data unread)
 %%====================================================================
 
-closed({call, From}, info, Data) ->
+closed(Type, Event, Data) ->
+    masque_quiet:stop(closed_inner(Type, Event, Data)).
+
+closed_inner({call, From}, info, Data) ->
     {keep_state_and_data, [{reply, From, session_info(Data, closed)}]};
-closed(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
+closed_inner(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
     masque_client_rx:closed(Type, Event, Buf, Ref, fun(B) -> Data#data{rx_buf = B} end).
 
-terminate(_Reason, _State, #data{socket = undefined} = D) ->
+terminate(Reason, StateName, Data) ->
+    terminate_inner(masque_quiet:reason(Reason), StateName, Data).
+
+terminate_inner(_Reason, _State, #data{socket = undefined} = D) ->
     _ = erlang:demonitor(D#data.owner_ref, [flush]),
     cancel_all_waiters(D);
-terminate(_Reason, _State, #data{socket = Socket} = D) ->
+terminate_inner(_Reason, _State, #data{socket = Socket} = D) ->
     _ = erlang:demonitor(D#data.owner_ref, [flush]),
     cancel_all_waiters(D),
     _ =

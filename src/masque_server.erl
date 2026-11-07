@@ -387,10 +387,17 @@ add_peer_info(Conn, Req) ->
         _ -> Req1
     end.
 
-map_init_error(too_many_tunnels) -> overload;
-map_init_error({resolution_failed, _}) -> resolution_failed;
-map_init_error({reject, Err}) -> Err;
-map_init_error(_) -> resolution_failed.
+%% A session that stopped in `init/1' exits quietly (`masque_quiet').
+map_init_error({shutdown, {masque_quiet, _}} = Quiet) ->
+    map_init_error(masque_quiet:reason(Quiet));
+map_init_error(too_many_tunnels) ->
+    overload;
+map_init_error({resolution_failed, _}) ->
+    resolution_failed;
+map_init_error({reject, Err}) ->
+    Err;
+map_init_error(_) ->
+    resolution_failed.
 
 %% `AcceptBind' is the listener-level switch for Connect-UDP-Bind
 %% (draft-ietf-masque-connect-udp-listen-11). When true, the

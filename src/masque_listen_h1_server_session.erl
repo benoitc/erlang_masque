@@ -44,6 +44,9 @@ start_link(Args) ->
     gen_server:start_link(?MODULE, Args, []).
 
 init(Args) ->
+    masque_quiet:stop(init_inner(Args)).
+
+init_inner(Args) ->
     case masque_session_start:deferred(Args) of
         true ->
             {ok, {starting, Args}, {continue, start}};
@@ -55,7 +58,10 @@ init(Args) ->
             end
     end.
 
-handle_continue(start, {starting, Args}) ->
+handle_continue(Continue, State) ->
+    masque_quiet:stop(handle_continue_inner(Continue, State)).
+
+handle_continue_inner(start, {starting, Args}) ->
     case start(Args) of
         {ok, S} ->
             masque_session_start:report(Args, ok),
@@ -125,7 +131,10 @@ init_handler(Handler, Identity, Req) ->
 socket_transport(Socket) when is_tuple(Socket), element(1, Socket) =:= sslsocket -> ssl;
 socket_transport(_Socket) -> gen_tcp.
 
-handle_call({request_connection, Service, Timeout}, {Pid, _} = From, #state{} = S) ->
+handle_call(Request, From, State) ->
+    masque_quiet:stop(handle_call_inner(Request, From, State)).
+
+handle_call_inner({request_connection, Service, Timeout}, {Pid, _} = From, #state{} = S) ->
     #state{identity = I, requests = R} = S,
     Entry = #{
         control => self(), conn => undefined, identity => I, requester => Pid, service => Service
@@ -140,33 +149,39 @@ handle_call({request_connection, Service, Timeout}, {Pid, _} = From, #state{} = 
             ok = masque_reverse_registry:delete(Id),
             {stop, {control_send_failed, Reason}, {error, closed}, S}
     end;
-handle_call(info, _From, #state{identity = I, requests = R} = S) ->
+handle_call_inner(info, _From, #state{identity = I, requests = R} = S) ->
     {reply, #{protocol => listen, transport => h1, identity => I, pending => map_size(R)}, S};
-handle_call(_Request, _From, S) ->
+handle_call_inner(_Request, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
-handle_cast(_Msg, S) ->
+handle_cast(Msg, State) ->
+    masque_quiet:stop(handle_cast_inner(Msg, State)).
+
+handle_cast_inner(_Msg, S) ->
     {noreply, S}.
 
-handle_info({ssl, Sock, Bytes}, #state{socket = Sock} = S) ->
+handle_info(Msg, State) ->
+    masque_quiet:stop(handle_info_inner(Msg, State)).
+
+handle_info_inner({ssl, Sock, Bytes}, #state{socket = Sock} = S) ->
     rearm(bytes_in(Bytes, arm_idle(S)));
-handle_info({tcp, Sock, Bytes}, #state{socket = Sock} = S) ->
+handle_info_inner({tcp, Sock, Bytes}, #state{socket = Sock} = S) ->
     rearm(bytes_in(Bytes, arm_idle(S)));
-handle_info({Closed, Sock}, #state{socket = Sock, buf = <<>>} = S) when
+handle_info_inner({Closed, Sock}, #state{socket = Sock, buf = <<>>} = S) when
     Closed =:= ssl_closed; Closed =:= tcp_closed
 ->
     {stop, normal, S};
-handle_info({Closed, Sock}, #state{socket = Sock} = S) when
+handle_info_inner({Closed, Sock}, #state{socket = Sock} = S) when
     Closed =:= ssl_closed; Closed =:= tcp_closed
 ->
     {stop, truncated_capsule, S};
-handle_info({Error, Sock, Reason}, #state{socket = Sock} = S) when
+handle_info_inner({Error, Sock, Reason}, #state{socket = Sock} = S) when
     Error =:= ssl_error; Error =:= tcp_error
 ->
     {stop, {Error, Reason}, S};
-handle_info({timeout, Ref, idle}, #state{idle_ref = Ref} = S) ->
+handle_info_inner({timeout, Ref, idle}, #state{idle_ref = Ref} = S) ->
     {stop, idle_timeout, S};
-handle_info({timeout, _TRef, {request_timeout, Id}}, #state{requests = R} = S) ->
+handle_info_inner({timeout, _TRef, {request_timeout, Id}}, #state{requests = R} = S) ->
     case maps:take(Id, R) of
         {{From, _}, R2} ->
             ok = masque_reverse_registry:delete(Id),
@@ -175,7 +190,7 @@ handle_info({timeout, _TRef, {request_timeout, Id}}, #state{requests = R} = S) -
         error ->
             {noreply, S}
     end;
-handle_info({masque_reverse_accepted, Id, Stream}, #state{requests = R} = S) ->
+handle_info_inner({masque_reverse_accepted, Id, Stream}, #state{requests = R} = S) ->
     case maps:take(Id, R) of
         {{From, TRef}, R2} ->
             _ = erlang:cancel_timer(TRef),
@@ -185,9 +200,9 @@ handle_info({masque_reverse_accepted, Id, Stream}, #state{requests = R} = S) ->
             exit(Stream, kill),
             {noreply, S}
     end;
-handle_info({'EXIT', _Pid, _Reason}, S) ->
+handle_info_inner({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
-handle_info(Msg, S) ->
+handle_info_inner(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
 rearm({noreply, S}) ->
@@ -259,9 +274,12 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
 send(#state{transport = T, socket = Sock}, Bin) ->
     masque_tls:send_failed(T:send(Sock, Bin), T, Sock).
 
-terminate(_Reason, {starting, Args}) ->
+terminate(Reason, State) ->
+    terminate_inner(masque_quiet:reason(Reason), State).
+
+terminate_inner(_Reason, {starting, Args}) ->
     masque_session_start:abandon(Args);
-terminate(Reason, #state{handler = Handler, h_state = HS, requests = R} = S) ->
+terminate_inner(Reason, #state{handler = Handler, h_state = HS, requests = R} = S) ->
     maps:foreach(
         fun(_Id, {From, TRef}) ->
             _ = erlang:cancel_timer(TRef),

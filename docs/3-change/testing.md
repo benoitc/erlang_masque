@@ -87,7 +87,7 @@ End-to-end behaviour pinned to a spec. Add a case here when you implement or fix
 | `masque_two_hop_example_SUITE` | smoke test of `examples/two_hop_relay.erl` (the test profile compiles `examples/`) |
 | `masque_interop_SUITE` | quic-go's `masque-go` and `connect-ip-go` over h3, in both roles; skipped unless `MASQUE_GO_BIN` is set |
 | `masque_curl_SUITE` | real `curl` through the h1 CONNECT-TCP proxy; skipped if curl is missing |
-| `masque_load_SUITE` | busy UDP tunnels and many short tunnels; skipped unless `MASQUE_LOAD=1` |
+| `masque_load_SUITE` | busy UDP tunnels, many short tunnels, and many short reverse connect streams on one control channel; every case fails if anything logs an error report. Skipped unless `MASQUE_LOAD=1` |
 
 ### Property tests
 

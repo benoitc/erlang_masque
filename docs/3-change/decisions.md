@@ -119,6 +119,12 @@ This page records design decisions that are visible in the code, with the reason
 - **Why.** The draft leaves them TBD; one place to change when it assigns real ones.
 - **Where.** `include/masque_reverse.hrl`, recorded in conformance.
 
+### Sessions exit quietly when nothing crashed
+
+- **Decision.** Server and client sessions stop with `{shutdown, {masque_quiet, Reason}}` for every reason they choose themselves (target closed, peer reset, timeouts, bad data from the peer), so OTP logs no error report. Handler crashes stay loud. `reason/1` in `masque_quiet` gives the plain reason back to `terminate` and to the code that reads exit reasons.
+- **Why.** A load test of 2,000 short tunnels logged 2,000 error reports for tunnels whose target simply closed: on a busy proxy that is one report per finished connection.
+- **Where.** `masque_quiet`, wrapped around the callbacks of every session module.
+
 ### Proxy sockets read in `{active, N}`
 
 - **Decision.** Built-in handlers open target and bind sockets with `{active, N}` and re-arm on the passive message.

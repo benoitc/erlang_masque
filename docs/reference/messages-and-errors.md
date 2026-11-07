@@ -199,6 +199,8 @@ Each rejection increments `masque.tunnels.rejected` with the attribute `reason`.
 
 These are the reasons a server session process stops with. They are passed to the handler's `terminate/2` and decide what the session puts on the wire as it goes.
 
+None of them is a crash, so the process exits with `{shutdown, {masque_quiet, Reason}}`, which OTP does not log as an error, and a monitor sees that value. Only `normal`, `{handler_crash, R}` and `{bad_init, Other}` exit as they are; a crash in masque's own code still exits with its exception and is reported. Client sessions exit the same way. `terminate/2` always gets the plain reason.
+
 | Reason | Meaning |
 | --- | --- |
 | `normal` | the handler returned `{stop, normal, _}` or `close_session`, or the client sent a clean FIN |

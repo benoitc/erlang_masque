@@ -283,8 +283,13 @@ spawn_session(Conn, StreamId, Protocol, Handler, HOpts, Req) ->
             reject(Conn, StreamId, map_init_error(Reason))
     end.
 
-map_init_error({reject, Err}) -> Err;
-map_init_error(_) -> resolution_failed.
+%% A session that stopped in `init/1' exits quietly (`masque_quiet').
+map_init_error({shutdown, {masque_quiet, _}} = Quiet) ->
+    map_init_error(masque_quiet:reason(Quiet));
+map_init_error({reject, Err}) ->
+    Err;
+map_init_error(_) ->
+    resolution_failed.
 
 validate(<<"GET">>, Path, Headers, UdpTemplate, IpTemplate) ->
     validate_get(Path, Headers, UdpTemplate, IpTemplate, false);

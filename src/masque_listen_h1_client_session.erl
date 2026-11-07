@@ -142,7 +142,10 @@ headers(Lines) ->
      || L <- Lines, [K, V] <- [binary:split(L, <<":">>)]
     ].
 
-handle_call({accept_spec, Id}, _From, #state{open = Open} = S) ->
+handle_call(Request, From, State) ->
+    masque_quiet:stop(handle_call_inner(Request, From, State)).
+
+handle_call_inner({accept_spec, Id}, _From, #state{open = Open} = S) ->
     case maps:take(Id, Open) of
         {Service, Open2} ->
             Spec = #{
@@ -155,7 +158,7 @@ handle_call({accept_spec, Id}, _From, #state{open = Open} = S) ->
         error ->
             {reply, {error, unknown_request}, S}
     end;
-handle_call({decline, Id}, _From, #state{open = Open} = S) ->
+handle_call_inner({decline, Id}, _From, #state{open = Open} = S) ->
     case maps:take(Id, Open) of
         {_, Open2} ->
             reply_send(masque_reverse_capsule:encode({connection_request_declined, Id}), S#state{
@@ -164,15 +167,15 @@ handle_call({decline, Id}, _From, #state{open = Open} = S) ->
         error ->
             {reply, {error, unknown_request}, S}
     end;
-handle_call({advertise, Services}, _From, S) ->
+handle_call_inner({advertise, Services}, _From, S) ->
     reply_send(masque_reverse_capsule:encode({available_services, Services}), S);
-handle_call(migrate, _From, S) ->
+handle_call_inner(migrate, _From, S) ->
     {reply, {error, not_supported}, S};
-handle_call(info, _From, #state{open = Open} = S) ->
+handle_call_inner(info, _From, #state{open = Open} = S) ->
     {reply, #{protocol => listen, transport => h1, pending => map_size(Open)}, S};
-handle_call(stop, _From, S) ->
+handle_call_inner(stop, _From, S) ->
     {stop, normal, ok, S};
-handle_call(_Request, _From, S) ->
+handle_call_inner(_Request, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
 %% The socket's send timeout bounds the write; a failed one ends the
@@ -183,10 +186,16 @@ reply_send(Capsule, #state{socket = Sock} = S) ->
         {error, Reason} -> {stop, {control_send_failed, Reason}, {error, closed}, S}
     end.
 
-handle_cast(_Msg, S) ->
+handle_cast(Msg, State) ->
+    masque_quiet:stop(handle_cast_inner(Msg, State)).
+
+handle_cast_inner(_Msg, S) ->
     {noreply, S}.
 
-handle_info({ssl, Sock, Bytes}, #state{socket = Sock} = S) ->
+handle_info(Msg, State) ->
+    masque_quiet:stop(handle_info_inner(Msg, State)).
+
+handle_info_inner({ssl, Sock, Bytes}, #state{socket = Sock} = S) ->
     case bytes_in(Bytes, S) of
         {ok, S2} ->
             _ = ssl:setopts(Sock, [{active, once}]),
@@ -194,15 +203,15 @@ handle_info({ssl, Sock, Bytes}, #state{socket = Sock} = S) ->
         Stop ->
             Stop
     end;
-handle_info({ssl_closed, Sock}, #state{socket = Sock, buf = <<>>} = S) ->
+handle_info_inner({ssl_closed, Sock}, #state{socket = Sock, buf = <<>>} = S) ->
     {stop, peer_closed, S};
-handle_info({ssl_closed, Sock}, #state{socket = Sock} = S) ->
+handle_info_inner({ssl_closed, Sock}, #state{socket = Sock} = S) ->
     {stop, truncated_capsule, S};
-handle_info({ssl_error, Sock, Reason}, #state{socket = Sock} = S) ->
+handle_info_inner({ssl_error, Sock, Reason}, #state{socket = Sock} = S) ->
     {stop, {ssl_error, Reason}, S};
-handle_info({'DOWN', Ref, process, _, _}, #state{owner_mon = Ref} = S) ->
+handle_info_inner({'DOWN', Ref, process, _, _}, #state{owner_mon = Ref} = S) ->
     {stop, owner_gone, S};
-handle_info(_Msg, S) ->
+handle_info_inner(_Msg, S) ->
     {noreply, S}.
 
 bytes_in(<<>>, S) ->
@@ -239,7 +248,10 @@ capsule(connection_request, Value, #state{seen = Seen, open = Open, owner = Owne
 capsule(_Other, _Value, S) ->
     {ok, S}.
 
-terminate(Reason, #state{owner = Owner, socket = Sock}) ->
+terminate(Reason, State) ->
+    terminate_inner(masque_quiet:reason(Reason), State).
+
+terminate_inner(Reason, #state{owner = Owner, socket = Sock}) ->
     _ =
         (try
             ssl:close(Sock)
@@ -253,7 +265,7 @@ terminate(Reason, #state{owner = Owner, socket = Sock}) ->
             _ -> Owner ! {masque_closed, self(), Reason}
         end,
     ok;
-terminate(_Reason, _S) ->
+terminate_inner(_Reason, _S) ->
     ok.
 
 code_change(_OldVsn, S, _Extra) ->

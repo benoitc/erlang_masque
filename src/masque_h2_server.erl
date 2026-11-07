@@ -343,9 +343,15 @@ is_supervisor_error(noproc) -> true;
 is_supervisor_error({noproc, _}) -> true;
 is_supervisor_error(_) -> false.
 
-map_init_error({resolution_failed, _}) -> resolution_failed;
-map_init_error({reject, Err}) -> Err;
-map_init_error(_) -> resolution_failed.
+%% A session that stopped in `init/1' exits quietly (`masque_quiet').
+map_init_error({shutdown, {masque_quiet, _}} = Quiet) ->
+    map_init_error(masque_quiet:reason(Quiet));
+map_init_error({resolution_failed, _}) ->
+    resolution_failed;
+map_init_error({reject, Err}) ->
+    Err;
+map_init_error(_) ->
+    resolution_failed.
 
 validate(
     Method,

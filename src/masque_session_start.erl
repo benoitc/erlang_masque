@@ -66,7 +66,7 @@ await(StartFun, Args) ->
                     erlang:demonitor(MRef, [flush]),
                     Result;
                 {'DOWN', MRef, process, Pid, Reason} ->
-                    {error, {session_crash, Reason}}
+                    {error, {session_crash, masque_quiet:reason(Reason)}}
             after ?START_TIMEOUT ->
                 erlang:demonitor(MRef, [flush]),
                 exit(Pid, kill),

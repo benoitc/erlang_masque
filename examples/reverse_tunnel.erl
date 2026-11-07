@@ -175,7 +175,12 @@ terminate(_Reason, _Agent) ->
 %% The public port: each client gets a stream to the agent's service.
 start_public(LocalPort) ->
     {ok, Listen} = gen_tcp:listen(0, [
-        binary, {active, false}, {ip, {127, 0, 0, 1}}, {reuseaddr, true}, {exit_on_close, false}
+        binary,
+        {active, false},
+        {ip, {127, 0, 0, 1}},
+        {reuseaddr, true},
+        {exit_on_close, false},
+        {backlog, 128}
     ]),
     {ok, Port} = inet:port(Listen),
     Pid = spawn(fun() -> public_accept(Listen, LocalPort) end),
@@ -307,7 +312,7 @@ credit(agent, _Stream, _Bytes) -> ok.
 
 start_echo() ->
     {ok, Listen} = gen_tcp:listen(0, [
-        binary, {active, false}, {ip, {127, 0, 0, 1}}, {reuseaddr, true}
+        binary, {active, false}, {ip, {127, 0, 0, 1}}, {reuseaddr, true}, {backlog, 128}
     ]),
     {ok, Port} = inet:port(Listen),
     Pid = spawn(fun() -> echo_accept(Listen) end),

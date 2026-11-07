@@ -696,7 +696,9 @@ h3_idle_tunnel_ends(Config) ->
     Pid = await_session(),
     MRef = erlang:monitor(process, Pid),
     receive
-        {'DOWN', MRef, process, Pid, idle_timeout} -> ok
+        %% A quiet exit: no error report for an idle tunnel.
+        {'DOWN', MRef, process, Pid, Reason} ->
+            ?assertEqual(idle_timeout, masque_quiet:reason(Reason))
     after 3000 -> ct:fail(not_idled_out)
     end,
     await_closed(Sess).

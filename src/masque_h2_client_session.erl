@@ -151,7 +151,10 @@ init({Target, Opts, Owner}) ->
 %% States
 %%====================================================================
 
-connecting(internal, {do_handshake, Opts}, Data) ->
+connecting(Type, Event, Data) ->
+    masque_quiet:stop(connecting_inner(Type, Event, Data)).
+
+connecting_inner(internal, {do_handshake, Opts}, Data) ->
     case masque_client_failed:guard(fun() -> do_connect(Data, Opts) end) of
         {ok, Conn, StreamId} ->
             Timeout = maps:get(timeout, Opts, 5000),
@@ -165,23 +168,23 @@ connecting(internal, {do_handshake, Opts}, Data) ->
             %% The caller's `handshake_await' is not processed yet.
             {next_state, failed, Data#data{failure = Reason}, masque_client_failed:enter(Opts)}
     end;
-connecting({call, From}, handshake_await, Data) ->
+connecting_inner({call, From}, handshake_await, Data) ->
     {keep_state, Data#data{handshake_from = From}};
-connecting({call, From}, shutdown_write, Data) ->
+connecting_inner({call, From}, shutdown_write, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
-connecting({call, From}, {set_owner, NewOwner}, Data) ->
+connecting_inner({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
-connecting(info, {h2, _Conn, {closed, _Reason}}, Data) ->
+connecting_inner(info, {h2, _Conn, {closed, _Reason}}, Data) ->
     reply_handshake(Data, {error, peer_closed}),
     {stop, peer_closed};
-connecting(
+connecting_inner(
     info,
     {h2, _Conn, {goaway, LastId, _Code}},
     #data{stream_id = StreamId} = Data
 ) when is_integer(StreamId), StreamId > LastId ->
     reply_handshake(Data, {error, goaway}),
     {stop, goaway};
-connecting(
+connecting_inner(
     info,
     {h2, _Conn, {response, StreamId, Status, Headers}},
     #data{stream_id = StreamId} = Data
@@ -204,14 +207,14 @@ connecting(
             reply_handshake(Data, {error, {handshake_rejected, Status}}),
             {stop, {handshake_rejected, Status}}
     end;
-connecting(
+connecting_inner(
     info,
     {timeout, TRef, handshake_timeout},
     #data{timeout_ref = TRef} = Data
 ) ->
     reply_handshake(Data, {error, handshake_timeout}),
     {stop, handshake_timeout};
-connecting(
+connecting_inner(
     info,
     {'DOWN', Ref, process, _, _},
     #data{owner_ref = Ref}
@@ -220,43 +223,49 @@ connecting(
 %% Stream data that overtakes the 2xx (a pooled stream gets its data
 %% straight from the transport, the response through the pool owner)
 %% waits until the tunnel is open.
-connecting(info, {Tag, _Conn, {data, StreamId, _, _}}, #data{stream_id = StreamId}) when
+connecting_inner(info, {Tag, _Conn, {data, StreamId, _, _}}, #data{stream_id = StreamId}) when
     is_integer(StreamId), (Tag =:= quic_h3 orelse Tag =:= h2)
 ->
     {keep_state_and_data, [postpone]};
-connecting(info, _Msg, Data) ->
+connecting_inner(info, _Msg, Data) ->
     {keep_state, Data};
-connecting({call, From}, info, Data) ->
+connecting_inner({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, connecting)}]};
-connecting({call, From}, stop, Data) ->
+connecting_inner({call, From}, stop, Data) ->
     {stop_and_reply, normal, [{reply, From, ok}], Data};
-connecting({call, From}, _Other, Data) ->
+connecting_inner({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]}.
 
 %%====================================================================
 %% State: failed (dial error parked for `handshake_await')
 %%====================================================================
 
-failed(Type, Event, #data{failure = Reason, owner_ref = Ref}) ->
+failed(Type, Event, Data) ->
+    masque_quiet:stop(failed_inner(Type, Event, Data)).
+
+failed_inner(Type, Event, #data{failure = Reason, owner_ref = Ref}) ->
     masque_client_failed:handle(Type, Event, Reason, Ref).
 
-open({call, From}, info, Data) ->
+open(Type, Event, Data) ->
+    masque_quiet:stop(open_inner(Type, Event, Data)).
+
+open_inner({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, open)}]};
-open({call, From}, {send, Payload}, Data) ->
+open_inner({call, From}, {send, Payload}, Data) ->
     Reply = send_out(Data, ?MASQUE_CONTEXT_ID_UDP, Payload),
     {keep_state, Data, [{reply, From, Reply}]};
-open({call, From}, {send, Ctx, Payload}, Data) ->
+open_inner({call, From}, {send, Ctx, Payload}, Data) ->
     Reply = send_out(Data, Ctx, Payload),
     {keep_state, Data, [{reply, From, Reply}]};
-open({call, From}, {recv, Timeout}, Data) ->
+open_inner({call, From}, {recv, Timeout}, Data) ->
     handle_recv_call(From, Timeout, Data);
-open({call, From}, {set_mode, Mode}, Data) ->
+open_inner({call, From}, {set_mode, Mode}, Data) ->
     {keep_state, Data#data{mode = Mode}, [{reply, From, ok}]};
-open({call, From}, shutdown_write, Data) ->
+open_inner({call, From}, shutdown_write, Data) ->
     {keep_state, Data, [{reply, From, {error, not_supported}}]};
-open({call, From}, {set_owner, NewOwner}, Data) ->
+open_inner({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
-open({call, From}, {send_capsule, Type, Value}, Data) ->
+open_inner({call, From}, {send_capsule, Type, Value}, Data) ->
     %% Outbound extension capsules travel on the stream as-is.
     Enc = iolist_to_binary(masque_capsule:encode(Type, Value)),
     Reply = h2:send_data(
@@ -266,12 +275,12 @@ open({call, From}, {send_capsule, Type, Value}, Data) ->
         false
     ),
     {keep_state, Data, [{reply, From, Reply}]};
-open({call, From}, stop, Data) ->
+open_inner({call, From}, stop, Data) ->
     {next_state, closing, Data, [
         {reply, From, ok},
         {next_event, internal, do_close}
     ]};
-open(
+open_inner(
     info,
     {h2, _Conn, {data, StreamId, Bytes, Fin}},
     #data{stream_id = StreamId, cap_buf = Buf, max_cap = Max} = Data
@@ -281,39 +290,42 @@ open(
         true -> client_stream_abort(capsule_buffer_overflow, Data);
         false -> drain_capsules(New, Fin, Data)
     end;
-open(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
+open_inner(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
-open(
+open_inner(
     info,
     {h2, _Conn, {stream_reset, StreamId, _ErrorCode}},
     #data{stream_id = StreamId} = Data
 ) ->
     end_tunnel(peer_reset, {stop, peer_reset, Data}, Data);
-open(info, {h2, _Conn, {closed, _Reason}}, Data) ->
+open_inner(info, {h2, _Conn, {closed, _Reason}}, Data) ->
     end_tunnel(peer_closed, {stop, peer_closed, Data}, Data);
 %% RFC 9113 sec 6.8: streams above the GOAWAY last-stream-id were not
 %% processed; lower ids keep running.
-open(
+open_inner(
     info,
     {h2, _Conn, {goaway, LastId, _Code}},
     #data{stream_id = StreamId} = Data
 ) when StreamId > LastId ->
     end_tunnel(goaway, {stop, goaway, Data}, Data);
-open(
+open_inner(
     info,
     {'DOWN', Ref, process, _, _},
     #data{owner_ref = Ref} = Data
 ) ->
     {next_state, closing, Data, [{next_event, internal, do_close}]};
-open(info, _Msg, Data) ->
+open_inner(info, _Msg, Data) ->
     {keep_state, Data};
 %% A late `handshake_await' (the handshake already succeeded).
-open({call, From}, handshake_await, Data) ->
+open_inner({call, From}, handshake_await, Data) ->
     {keep_state, Data, [{reply, From, ok}]};
-open({call, From}, _Other, Data) ->
+open_inner({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_supported}}]}.
 
-closing(internal, do_close, #data{conn = Conn, stream_id = StreamId} = Data) ->
+closing(Type, Event, Data) ->
+    masque_quiet:stop(closing_inner(Type, Event, Data)).
+
+closing_inner(internal, do_close, #data{conn = Conn, stream_id = StreamId} = Data) ->
     _ =
         try h2:send_data(Conn, StreamId, <<>>, true) of
             ok ->
@@ -334,23 +346,29 @@ closing(internal, do_close, #data{conn = Conn, stream_id = StreamId} = Data) ->
         end,
     _ = session_teardown(Data, graceful),
     {stop, normal, Data};
-closing({call, From}, _Other, Data) ->
+closing_inner({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, closing}}]};
-closing(_Event, _Msg, Data) ->
+closing_inner(_Event, _Msg, Data) ->
     {keep_state, Data}.
 
 %%====================================================================
 %% State: closed (peer ended the tunnel, queue-mode data unread)
 %%====================================================================
 
-closed({call, From}, info, Data) ->
+closed(Type, Event, Data) ->
+    masque_quiet:stop(closed_inner(Type, Event, Data)).
+
+closed_inner({call, From}, info, Data) ->
     {keep_state_and_data, [{reply, From, session_info(Data, closed)}]};
-closed(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
+closed_inner(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
     masque_client_rx:closed(Type, Event, Buf, Ref, fun(B) -> Data#data{rx_buf = B} end).
 
-terminate(_Reason, _State, #data{conn = undefined} = D) ->
+terminate(Reason, StateName, Data) ->
+    terminate_inner(masque_quiet:reason(Reason), StateName, Data).
+
+terminate_inner(_Reason, _State, #data{conn = undefined} = D) ->
     cancel_all_waiters(D);
-terminate(_Reason, _State, #data{} = D) ->
+terminate_inner(_Reason, _State, #data{} = D) ->
     cancel_all_waiters(D),
     _ = session_teardown(D),
     ok.
