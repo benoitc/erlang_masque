@@ -50,6 +50,14 @@ module or function docs, `rebar3 ex_doc` must finish without warnings.
   what goes on the wire, update `docs/reference/conformance.md`. Session start
   or teardown changes need a case in `test/masque_lifecycle_SUITE.erl`.
 
+## Specs, Compliance and Safety
+
+Three skills keep the protocol work honest. They are plain Markdown in `.claude/skills/`; Claude Code loads them as skills, and any other agent reads and follows the file. Use them; do not skip them because a change looks small.
+
+- [`spec-watch`](.claude/skills/spec-watch/SKILL.md): before starting work on a protocol, before a release, and when an interop peer disagrees. Checks whether a draft has a newer revision, became an RFC or has errata.
+- [`compliance`](.claude/skills/compliance/SKILL.md): when a change alters what goes on the wire or implements a spec. Every requirement mapped to code, test and conformance row, with wire-vector cases on h3, h2 and h1.
+- [`safety`](.claude/skills/safety/SKILL.md): before every pull request touching sessions, listeners, handlers, transports or dependencies, and before a release. The review checklist plus the load (no error reports), netsim and repeated runs.
+
 ## Dependency Bumps
 
 Read the dependency's CHANGELOG before bumping, and look for behaviour the code
