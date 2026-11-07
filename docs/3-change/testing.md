@@ -83,6 +83,7 @@ End-to-end behaviour pinned to a spec. Add a case here when you implement or fix
 | `masque_chain_listener_SUITE` | `masque:start_chain_listener*/2` on h3, h2, h1 |
 | `masque_chain_ip_SUITE` | CONNECT-IP through a chain |
 | `masque_upstream_pool_SUITE` | pooled upstream shared by several chain tunnels |
+| `masque_reverse_tunnel_example_SUITE` | smoke test of `examples/reverse_tunnel.erl` on h3, h2 and h1 |
 | `masque_two_hop_example_SUITE` | smoke test of `examples/two_hop_relay.erl` (the test profile compiles `examples/`) |
 | `masque_interop_SUITE` | quic-go's `masque-go` and `connect-ip-go` over h3, in both roles; skipped unless `MASQUE_GO_BIN` is set |
 | `masque_curl_SUITE` | real `curl` through the h1 CONNECT-TCP proxy; skipped if curl is missing |

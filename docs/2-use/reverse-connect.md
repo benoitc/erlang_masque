@@ -17,6 +17,20 @@ sequenceDiagram
     E->>A: bytes in DATA capsules, both ways
 ```
 
+## Try it
+
+`examples/reverse_tunnel.erl` puts the pieces together on loopback: a local echo service, an agent that exposes it, and an edge that forwards a public TCP port to the agent.
+
+```erlang
+1> c("examples/reverse_tunnel").
+2> {ok, #{public := Public}} = reverse_tunnel:start(#{transport => h3}).
+3> reverse_tunnel:run(<<"hello through the tunnel">>).
+{ok,<<"hello through the tunnel">>}
+4> reverse_tunnel:stop().
+```
+
+While it runs, `nc 127.0.0.1 Public` reaches the local service from outside. The sections below take it apart.
+
 ## Proxy side
 
 Turn it on per listener and give it a listen handler. The draft requires authenticated clients, so without a handler every control channel is refused.
@@ -72,6 +86,36 @@ end.
 - Credit returns only through `consumed/2`, so an edge that stops reading stops the agent too.
 - `send/2` returns once the bytes are on the stream; `shutdown_write/1` half-closes; `close/1` ends it.
 
+### Forward a public port
+
+An edge exposes the agent's service by splicing each public connection onto a stream. This is the loop from the example; `consumed/2` goes after the bytes are written to the public client, so a slow client slows the agent.
+
+```erlang
+public_client(Client, Control, Service) ->
+    {ok, Stream} = masque:request_connection(Control, Service),
+    ok = inet:setopts(Client, [{active, once}]),
+    loop(Stream, Client).
+
+loop(Stream, Client) ->
+    receive
+        {tcp, Client, Bytes} ->
+            ok = masque:send(Stream, Bytes),
+            ok = inet:setopts(Client, [{active, once}]),
+            loop(Stream, Client);
+        {tcp_closed, Client} ->
+            masque:shutdown_write(Stream);
+        {masque_data, Stream, Bytes} ->
+            ok = gen_tcp:send(Client, Bytes),
+            ok = masque:consumed(Stream, byte_size(Bytes)),
+            loop(Stream, Client);
+        {masque_closed, Stream, peer_fin} ->
+            ok = gen_tcp:shutdown(Client, write),
+            loop(Stream, Client);
+        {masque_closed, Stream, _} ->
+            gen_tcp:close(Client)
+    end.
+```
+
 ## Agent side
 
 ```erlang
@@ -93,6 +137,17 @@ end.
 - For a TCP service the accept stream is a CONNECT-TCP tunnel: `masque:send/2`, `{masque_data, Stream, Bytes}`, `shutdown_write/1`, `close/1`. For a UDP service it is a CONNECT-UDP tunnel, one datagram per message. Connect it to the service the request named; if that fails, close the stream.
 - `masque:migrate(Listen)` moves the HTTP/3 connection to a new address; the accept streams on it move too.
 - `{masque_closed, Listen, Reason}` arrives if the proxy ends the channel; `masque:close(Listen)` ends it from your side.
+
+Accept first, then dial the service, and close the stream if the service is down; on the agent side no credit calls are needed:
+
+```erlang
+agent_stream(Listen, Id, Port) ->
+    {ok, Stream} = masque:reverse_accept(Listen, Id),
+    case gen_tcp:connect({127, 0, 0, 1}, Port, [binary, {active, false}]) of
+        {ok, Local} -> splice(Stream, Local);
+        {error, _} -> masque:close(Stream)
+    end.
+```
 
 ## Notes
 
