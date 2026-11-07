@@ -25,11 +25,6 @@
 
 %% RFC 9114 sec 8.1: H3_CONNECT_ERROR.
 -define(H3_CONNECT_ERROR, 16#10f).
-%% How long a tunnel write may wait for the transport to drain before
-%% the tunnel is reset.
--define(SEND_TIMEOUT, 30000).
-%% How often a blocked h3 write checks whether the send queue moves.
--define(PROGRESS_CHECK_MS, 2000).
 
 -define(DEFAULT_IDLE_MS, 300000).
 
@@ -183,10 +178,12 @@ framing(Req, HOpts) ->
 %% draft-ietf-httpbis-connect-tcp-18 section 4.3: the proxy confirms an
 %% accepted request with `100 Continue' before dialing the target, which
 %% can take long when the target does not answer. Raw framing keeps the
-%% older behaviour: a 100 only when the request expects one.
+%% older behaviour: a 100 only when the request expects one. A reverse
+%% connect accept stream (`tcp_continue => false') gets none: its draft
+%% answers with the 2xx alone.
 continue(Transport, Conn, StreamId, Framing, Req) ->
     case
-        Framing =:= capsule orelse
+        (Framing =:= capsule andalso maps:get(tcp_continue, Req, true)) orelse
             masque_tcp_capsule:expects_continue(maps:get(headers, Req, []))
     of
         true ->
@@ -366,6 +363,30 @@ handle_call(
         {stop, Reason, S2} -> {stop, Reason, ok, S2};
         {error, S2} -> {reply, {error, stream_dead}, S2}
     end;
+%% A call for the handler, such as the stream API of a reverse connect
+%% accept stream. The reply goes out once the actions ran, so a caller
+%% that sends data waits for the blocking write.
+handle_call(Req, From, #state{handler = Handler, h_state = HS} = S) ->
+    case exported(Handler, handle_call, 3) of
+        false ->
+            {reply, {error, unknown_call}, S};
+        true ->
+            case safe_apply(Handler, handle_call, [Req, From, HS]) of
+                {reply, Reply, HS2} ->
+                    {reply, Reply, S#state{h_state = HS2}};
+                {reply, Reply, HS2, Actions} ->
+                    case do_actions(Actions, S#state{h_state = HS2}) of
+                        {ok, S2} -> {reply, Reply, S2};
+                        %% The actions ended the stream cleanly.
+                        {stop, normal, S2} -> {stop, normal, Reply, S2};
+                        {stop, Reason, S2} -> {stop, Reason, {error, closed}, S2}
+                    end;
+                {stop, Reason, Reply, HS2} ->
+                    {stop, Reason, Reply, S#state{h_state = HS2}};
+                {stop, Reason} ->
+                    {stop, Reason, {error, closed}, S}
+            end
+    end;
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
@@ -450,7 +471,7 @@ handle_traffic(
     #state{stream_id = StreamId} = S
 ) ->
     {stop, peer_reset, S};
-%% A `send_ready' that arrives after `tunnel_send_h3/4' stopped
+%% A `send_ready' that arrives after `masque_stream_send' stopped
 %% waiting is not the handler's business.
 handle_traffic({quic_h3, _Conn, {send_ready, _}}, S) ->
     {noreply, S};
@@ -644,53 +665,10 @@ do_actions([close_session | _Rest], S) ->
 do_actions([_Unknown | Rest], S) ->
     do_actions(Rest, S).
 
-%% Blocking tunnel write. h2 waits for flow-control window; quic_h3
-%% reports a full send queue, so retry until it drains. Both give up
-%% after 30 s without progress.
-tunnel_send(#state{transport = h2, conn = C, stream_id = Sid}, Bytes, Fin) ->
-    h2:send_data(C, Sid, Bytes, Fin, #{block => ?SEND_TIMEOUT});
-tunnel_send(S, Bytes, Fin) ->
-    tunnel_send_h3(S, Bytes, Fin, no_progress_deadline(), undefined).
-
-%% A refused write (`send_queue_full', nothing written) is retried when
-%% quic_h3 says the queue drained to half (`send_ready'). On a slow path
-%% that can take far longer than the timeout while data still flows, so
-%% the deadline only runs while the queue is not shrinking.
-tunnel_send_h3(#state{conn = C, stream_id = Sid} = S, Bytes, Fin, Deadline, Queued) ->
-    case transport_send_data(S, Bytes, Fin) of
-        {error, send_queue_full} ->
-            Now = erlang:monotonic_time(millisecond),
-            Wait = max(0, min(?PROGRESS_CHECK_MS, Deadline - Now)),
-            receive
-                {quic_h3, C, {send_ready, Sid}} ->
-                    tunnel_send_h3(S, Bytes, Fin, no_progress_deadline(), undefined)
-            after Wait ->
-                case {queued_bytes(C), Queued} of
-                    {Q, Before} when is_integer(Q), is_integer(Before), Q < Before ->
-                        tunnel_send_h3(S, Bytes, Fin, no_progress_deadline(), Q);
-                    {Q, _} ->
-                        case erlang:monotonic_time(millisecond) >= Deadline of
-                            true -> {error, send_timeout};
-                            false -> tunnel_send_h3(S, Bytes, Fin, Deadline, Q)
-                        end
-                end
-            end;
-        Other ->
-            Other
-    end.
-
-no_progress_deadline() ->
-    erlang:monotonic_time(millisecond) + ?SEND_TIMEOUT.
-
-%% Bytes waiting in the QUIC connection's send queue, or `undefined'
-%% when the connection cannot tell.
-queued_bytes(Conn) ->
-    try quic:get_send_queue_info(quic_h3:get_quic_conn(Conn)) of
-        {ok, #{bytes := Bytes}} -> Bytes;
-        _ -> undefined
-    catch
-        exit:_ -> undefined
-    end.
+%% Blocking tunnel write (`masque_stream_send'): waits for the transport
+%% instead of dropping, and gives up after 30 s without progress.
+tunnel_send(#state{transport = T, conn = C, stream_id = Sid}, Bytes, Fin) ->
+    masque_stream_send:send(T, C, Sid, Bytes, Fin).
 
 transport_send_data(#state{transport = h3, conn = C, stream_id = Sid}, Bytes, Fin) ->
     quic_h3:send_data(C, Sid, Bytes, Fin);

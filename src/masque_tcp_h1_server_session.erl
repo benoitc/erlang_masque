@@ -192,7 +192,7 @@ accept(capsule, Conn, StreamId) ->
 %% CONNECT only gets one when it expects it.
 continue(Conn, StreamId, Framing, Req) ->
     case
-        Framing =:= capsule orelse
+        (Framing =:= capsule andalso maps:get(tcp_continue, Req, true)) orelse
             masque_tcp_capsule:expects_continue(maps:get(headers, Req, []))
     of
         true ->
@@ -205,6 +205,30 @@ continue(Conn, StreamId, Framing, Req) ->
 socket_transport(Socket) when is_tuple(Socket), element(1, Socket) =:= sslsocket -> ssl;
 socket_transport(_Socket) -> gen_tcp.
 
+%% A call for the handler, such as the stream API of a reverse connect
+%% accept stream. The reply goes out once the actions ran, so a caller
+%% that sends data waits for the blocking write.
+handle_call(Req, From, #state{handler = Handler, h_state = HS} = S) ->
+    case exported(Handler, handle_call, 3) of
+        false ->
+            {reply, {error, unknown_call}, S};
+        true ->
+            case safe_apply(Handler, handle_call, [Req, From, HS]) of
+                {reply, Reply, HS2} ->
+                    {reply, Reply, S#state{h_state = HS2}};
+                {reply, Reply, HS2, Actions} ->
+                    case do_actions(Actions, S#state{h_state = HS2}) of
+                        {ok, S2} -> {reply, Reply, S2};
+                        %% The actions ended the stream cleanly.
+                        {stop, normal, S2} -> {stop, normal, Reply, S2};
+                        {stop, Reason, S2} -> {stop, Reason, {error, closed}, S2}
+                    end;
+                {stop, Reason, Reply, HS2} ->
+                    {stop, Reason, Reply, S#state{h_state = HS2}};
+                {stop, Reason} ->
+                    {stop, Reason, {error, closed}, S}
+            end
+    end;
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 

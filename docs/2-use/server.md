@@ -12,7 +12,7 @@ A listener serves one transport. To accept every transport, start three with the
 | HTTP/2 (TCP+TLS) | `masque:start_listener_h2(Name, Opts)` | `masque:stop_listener_h2(Name \| Ref)` | `{ok, Ref}` |
 | HTTP/1.1 (TCP+TLS) | `masque:start_listener_h1(Name, Opts)` | `masque:stop_listener_h1(Name \| Ref)` | `{ok, Ref}` |
 
-Each listener dispatches every tunnel protocol it supports on its own: CONNECT-UDP, CONNECT-TCP and CONNECT-IP, plus Connect-UDP-Bind when `accept_bind => true`. On h3 and h2 the `:protocol` pseudo-header selects the protocol. On h1, UDP and IP arrive as `GET` + `Upgrade`, and TCP as classic `CONNECT host:port`.
+Each listener dispatches every tunnel protocol it supports on its own: CONNECT-UDP, CONNECT-TCP and CONNECT-IP, plus Connect-UDP-Bind when `accept_bind => true` and reverse connect when `accept_listen => true`. On h3 and h2 the `:protocol` pseudo-header selects the protocol. On h1, UDP and IP arrive as `GET` + `Upgrade`, and TCP as classic `CONNECT host:port`.
 
 The h1 listen socket belongs to the process that calls `start_listener_h1/2`. Start it from a long-lived process (a supervised worker in your application), not from a short-lived one. `examples/two_hop_relay.erl` shows a keeper process for the shell.
 
@@ -52,6 +52,10 @@ Opts = #{
 | `tcp_uri_template` | all | `/.well-known/masque/tcp/{target_host}/{target_port}/` | CONNECT-TCP path. On h1 it is used by the draft -18 upgrade; classic CONNECT has no template. |
 | `ip_uri_template` | all | `/.well-known/masque/ip/{target}/{ipproto}/` | CONNECT-IP path. |
 | `accept_bind` | all | `false` | Accept Connect-UDP-Bind on the UDP template. See [connect-udp-bind](connect-udp-bind.md). |
+| `accept_listen` | all | `false` | Accept reverse connect control channels and accept streams. See [reverse connect](reverse-connect.md). |
+| `listen_handler` | all | none | `masque_listen_handler` module that authenticates and follows control channels. Without it every control channel is refused (403). |
+| `listen_uri_template`, `accept_uri_template` | all | `/.well-known/masque/listen/{target}/{ipproto}/`, `/.well-known/masque/accept/{request_id}/` | Reverse connect paths. |
+| `listen_idle_timeout_ms` | all | `infinity` | Idle timeout of a control channel. |
 | `resolver` | all | A + AAAA lookup | Resolves CONNECT-IP host name targets before `accept/1`. Returns `{ok, [Address]}`. |
 | `max_tunnels_per_connection` | h3, h2 | `100` | Tunnels one client connection may hold; `0` means no limit. Extra requests get 503. |
 | `fallback` | all | none | `fun(Conn, StreamId, Method, Path, Headers)` for requests that are not MASQUE. Without it they are rejected. |
@@ -89,6 +93,8 @@ The reject reasons and their status codes:
 | `upstream_timeout` | 504 | `connection_timeout` |
 | `loop_detected` | 508 | `proxy_loop_detected` |
 | `overload` | 503 | `proxy_internal_error` |
+| `bad_request` | 400 | `http_protocol_error` |
+| `unknown_request` | 404 | `http_request_error` |
 | `{other, Status}` | `Status` (400..599) | `proxy_internal_error` |
 | anything else | 502 | `proxy_internal_error` |
 

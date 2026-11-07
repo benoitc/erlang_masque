@@ -23,6 +23,8 @@ init([]) ->
     %% CONNECT-IP address assignments: owned here so a registry
     %% restart does not lose them.
     ok = masque_ip_session_registry:new_table(),
+    %% Pending reverse connect requests.
+    ok = masque_reverse_registry:new_table(),
     %% Cache of the host's interface addresses (`masque_ip:is_self/2').
     _ = ets:new(masque_self_addrs, [set, public, named_table, {read_concurrency, true}]),
     %% Proxies an h1 CONNECT-TCP client upgrades to connect-tcp with.
@@ -76,6 +78,16 @@ init([]) ->
         #{
             id => masque_h1_tcp_session_sup,
             start => {masque_h1_session_sup, start_link_tcp, []},
+            type => supervisor
+        },
+        #{
+            id => masque_h2_listen_session_sup,
+            start => {masque_h2_session_sup, start_link_listen, []},
+            type => supervisor
+        },
+        #{
+            id => masque_h1_listen_session_sup,
+            start => {masque_h1_session_sup, start_link_listen, []},
             type => supervisor
         },
         #{

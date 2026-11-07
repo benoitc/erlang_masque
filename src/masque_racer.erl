@@ -33,7 +33,7 @@
 -module(masque_racer).
 -moduledoc false.
 
--export([race/4, checkout_pool/2]).
+-export([race/4, checkout_pool/2, pool_connect_opts/3]).
 
 -include("masque.hrl").
 

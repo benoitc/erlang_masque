@@ -37,7 +37,7 @@
 -behaviour(gen_server).
 
 -export([start_link/1, stop/1]).
--export([start_for_pool/3]).
+-export([start_for_pool/3, start_dedicated/2, migrate/1]).
 -export([acquire_stream/4, release_stream/2, release_stream/3]).
 -export([info/1]).
 
@@ -92,7 +92,10 @@
     pool :: pid() | undefined,
     full = false :: boolean(),
     %% The peer sent GOAWAY: no new streams on this connection.
-    draining = false :: boolean()
+    draining = false :: boolean(),
+    %% Dedicated owners: the process using the connection; the owner
+    %% stops when it goes.
+    user_mon :: reference() | undefined
 }).
 
 %%====================================================================
@@ -124,6 +127,35 @@ start_link(Args) ->
 -spec start_for_pool(pid(), term(), map()) -> pid().
 start_for_pool(RegistryPid, Tag, Opts) ->
     proc_lib:spawn(fun() -> init_for_pool(RegistryPid, Tag, Opts) end).
+
+%% An owner outside the pool, for one user: a reverse connect control
+%% channel and its accept streams, which must share one connection
+%% (draft-rosomakho-masque-reverse-connect-01 section 5.2.2). It never
+%% times out on idle, stops when `User' goes, and checks that the proxy
+%% enabled Extended CONNECT.
+-spec start_dedicated(pid(), map()) -> {ok, pid()} | {error, term()}.
+start_dedicated(User, Opts) ->
+    Tag = make_ref(),
+    Self = self(),
+    Pid = proc_lib:spawn(fun() -> init_dedicated(Self, User, Tag, Opts) end),
+    MRef = erlang:monitor(process, Pid),
+    Timeout = maps:get(timeout, maps:get(connect_opts, Opts, #{}), 5000) + 5000,
+    receive
+        {dial_result, Tag, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            Result;
+        {'DOWN', MRef, process, Pid, Reason} ->
+            {error, Reason}
+    after Timeout ->
+        erlang:demonitor(MRef, [flush]),
+        exit(Pid, kill),
+        {error, timeout}
+    end.
+
+%% Move the QUIC connection to a new local address (h3 only).
+-spec migrate(pid()) -> ok | {error, term()}.
+migrate(Owner) ->
+    gen_server:call(Owner, migrate, 10000).
 
 -spec stop(pid()) -> ok.
 stop(Owner) ->
@@ -239,6 +271,10 @@ handle_call(info, _From, S) ->
         S};
 handle_call(stop, _From, S) ->
     {stop, normal, ok, S};
+handle_call(migrate, _From, #state{transport = quic_h3, conn = Conn} = S) ->
+    {reply, quic:migrate(quic_h3:get_quic_conn(Conn)), S};
+handle_call(migrate, _From, S) ->
+    {reply, {error, not_supported}, S};
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
@@ -333,6 +369,9 @@ handle_info(
     #state{conn_mon = Ref} = S
 ) ->
     broadcast({tagged_closed(S), S#state.conn, {closed, Reason}}, S),
+    {stop, normal, S};
+%% A dedicated owner's user is gone: so is the connection.
+handle_info({'DOWN', Ref, process, _Pid, _Reason}, #state{user_mon = Ref} = S) ->
     {stop, normal, S};
 %% A registered session died. Release its slot.
 handle_info({'DOWN', Ref, process, Pid, _Reason}, S) ->
@@ -575,6 +614,38 @@ init_for_pool(RegistryPid, Tag, Opts) ->
         {error, Reason} ->
             RegistryPid ! {dial_result, Tag, {error, Reason}}
     end.
+
+init_dedicated(Caller, User, Tag, Opts) ->
+    process_flag(trap_exit, true),
+    UserMon = erlang:monitor(process, User),
+    case safe_dial(undefined, Tag, Opts#{idle_timeout_ms => infinity}) of
+        {ok, State} ->
+            case extended_connect(State) of
+                ok ->
+                    Caller ! {dial_result, Tag, {ok, self()}},
+                    gen_server:enter_loop(?MODULE, [], State#state{user_mon = UserMon});
+                {error, _} = Err ->
+                    _ = close_conn(State),
+                    Caller ! {dial_result, Tag, Err}
+            end;
+        {error, Reason} ->
+            Caller ! {dial_result, Tag, {error, Reason}}
+    end.
+
+extended_connect(#state{transport = quic_h3, conn = Conn}) ->
+    case quic_h3:get_peer_settings(Conn) of
+        #{enable_connect_protocol := 1} -> ok;
+        undefined -> ok;
+        _ -> {error, no_extended_connect}
+    end;
+extended_connect(#state{transport = h2, conn = Conn}) ->
+    case maps:get(enable_connect_protocol, h2:get_peer_settings(Conn), false) of
+        V when V =:= true; V =:= 1 -> ok;
+        _ -> {error, no_extended_connect}
+    end.
+
+close_conn(#state{transport = quic_h3, conn = Conn}) -> quic_h3:close(Conn);
+close_conn(#state{transport = h2, conn = Conn}) -> h2:close(Conn).
 
 %% Dial and build the initial state. Any exception becomes
 %% `{error, _}' so the registry always gets a `dial_result'.

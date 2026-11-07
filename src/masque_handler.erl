@@ -20,7 +20,7 @@ guide (`docs/2-use/handlers.md`). Connect-UDP-Bind sessions also call
 
 -type req() :: #{
     method := binary(),
-    protocol => udp | tcp | ip,
+    protocol => udp | tcp | ip | udp_bind | listen,
     path := binary(),
     authority := binary(),
     scheme := binary(),
@@ -36,6 +36,16 @@ guide (`docs/2-use/handlers.md`). Connect-UDP-Bind sessions also call
     resolved_addresses => [inet:ip_address()],
     headers := [{binary(), binary()}],
     handler_opts => term(),
+    %% CONNECT-TCP framing, set by the session before `init/2'.
+    tcp_framing => raw | capsule,
+    tcp_version => final | provisional,
+    tcp_continue => boolean(),
+    %% Reverse connect: the control channel's scope and identity, and an
+    %% accept stream's request id.
+    listen_target => masque:reverse_target(),
+    listen_ipproto => masque:reverse_ipproto(),
+    reverse_identity => term(),
+    reverse_id => non_neg_integer(),
     %% Connection-level info (H3 only; absent on H2)
     peer => {inet:ip_address(), inet:port_number()},
     peer_cert => binary()
@@ -74,6 +84,12 @@ guide (`docs/2-use/handlers.md`). Connect-UDP-Bind sessions also call
     {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
 -doc "The client finished sending (CONNECT-TCP half-close).".
 -callback handle_eof(term()) -> {ok, term()} | {ok, term(), [term()]} | {stop, term(), term()}.
+-doc """
+A call to the session (CONNECT-TCP), such as the stream API of a reverse
+connect accept stream. The reply goes out after the actions ran.
+""".
+-callback handle_call(term(), gen_server:from(), term()) ->
+    {reply, term(), term()} | {reply, term(), term(), [term()]} | {stop, term(), term(), term()}.
 -doc "The session is ending. Close what the handler opened here.".
 -callback terminate(term(), term()) -> term().
 
@@ -102,6 +118,7 @@ guide (`docs/2-use/handlers.md`). Connect-UDP-Bind sessions also call
     handle_capsule/3,
     handle_info/2,
     handle_eof/1,
+    handle_call/3,
     terminate/2,
     handle_ip_packet/2,
     handle_address_request/2,

@@ -114,11 +114,13 @@ masque_sup                              one_for_one, intensity 10, period 10
   masque_h1_session_sup                 masque_h1_server_session          (h1 UDP)
   masque_h1_ip_session_sup              masque_ip_h1_server_session       (h1 IP)
   masque_h1_tcp_session_sup             masque_tcp_h1_server_session      (h1 TCP)
+  masque_h2_listen_session_sup          masque_listen_server_session      (h2 reverse connect)
+  masque_h1_listen_session_sup          masque_listen_h1_server_session   (h1 reverse connect)
   masque_upstream_pool                  worker, gen_server
   masque_ip_session_registry            worker, gen_server
 ```
 
-Every session supervisor is `simple_one_for_one` (intensity 10, period 10) with `temporary` children and a 5000 ms shutdown: a crashed session is never restarted, because its request stream is gone with it. The four h2 supervisors are instances of `masque_h2_session_sup` and the four h1 ones of `masque_h1_session_sup`, selected by the `protocol` key of the start arguments.
+Every session supervisor is `simple_one_for_one` (intensity 10, period 10) with `temporary` children and a 5000 ms shutdown: a crashed session is never restarted, because its request stream is gone with it. The five h2 supervisors are instances of `masque_h2_session_sup` and the five h1 ones of `masque_h1_session_sup`, selected by the `protocol` key of the start arguments. Reverse connect accept streams run under the TCP supervisors.
 
 Not in the tree: listeners (owned by `quic_h3`, `h2`, `h1`), h3 routers and h3 sessions, all client sessions, racer workers, upstream owners, and the h2 tunnel-count watchers.
 
@@ -137,6 +139,7 @@ Records and `sys:get_state/1` do not show this state. Look here when behaviour d
 | `masque_ip_drop_counters`, `masque_ip_lifecycle_counters`, `masque_bind_drop_counters` | `persistent_term` holding `counters` refs | none | `masque_metrics` setup, created once | CONNECT-IP and udp-bind counters |
 | `{masque_chain_handler, node_token}` | `persistent_term` | none | `masque_chain_handler:init_node_token/0` at application start | Default `via` token for loop detection |
 | `masque_h2_tunnel_counts` | public named ETS `set` | `masque_sup` process | h2 dispatch processes, h2 sessions, per-connection watchers | Per-connection tunnel limit on h2 |
+| `masque_reverse_pending` | public named ETS `set` | `masque_sup` process | reverse connect control sessions (write), listeners (read), accept handlers (take) | Pending reverse connect requests, matched to accept streams |
 | `masque_tcp_upgrade_proxies` | public named ETS `set` | `masque_sup` process | h1 CONNECT-TCP client sessions | Proxies that refused classic CONNECT but took connect-tcp, so later tunnels upgrade at once |
 | `masque_ip_session_registry` | public named ETS `ordered_set` | `masque_sup` (survives a registry restart) | the registry gen_server (writes); anyone reads | Which CONNECT-IP session serves which address |
 | `{masque_client_owner, held}` | process dictionary of a client session | the session | `masque_client_owner` | Owner messages held until the racer calls `set_owner` |
@@ -146,6 +149,7 @@ Registered names: `masque_sup`, the eight session supervisors, `masque_upstream_
 Two consequences to keep in mind:
 
 - The drain flag is keyed by listener name. A dispatch fun from `masque:h3_handlers/1` or `h2_handlers/1` embedded in your own server has no name unless you pass `drain_key`, so draining does not apply to it.
+- `masque_reverse_pending` holds one row per outstanding CONNECTION_REQUEST; the control session removes its rows when it ends.
 - `masque_tcp_upgrade_proxies` holds one row per such proxy (host and port) and is never pruned; it empties when the application restarts.
 - `masque_h2_tunnel_counts` lives as long as `masque_sup`, that is as long as the application. Rows exist only for h2 connections on listeners with `max_tunnels_per_connection` set; `release_tunnel/1` tolerates a missing row.
 

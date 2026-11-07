@@ -170,6 +170,28 @@ maybe_flush_buf(#state{} = S) ->
     self() ! flush_cap_buf,
     S.
 
+%% A call for the handler, such as the stream API of a reverse connect
+%% accept stream. The reply goes out once the actions ran.
+handle_call(Req, From, #state{handler = Handler, h_state = HS} = S) ->
+    case exported(Handler, handle_call, 3) of
+        false ->
+            {reply, {error, unknown_call}, S};
+        true ->
+            case safe_apply(Handler, handle_call, [Req, From, HS]) of
+                {reply, Reply, HS2} ->
+                    {reply, Reply, S#state{h_state = HS2}};
+                {reply, Reply, HS2, Actions} ->
+                    %% UDP actions end a session only with `normal'.
+                    case do_actions(Actions, S#state{h_state = HS2}) of
+                        {ok, S2} -> {reply, Reply, S2};
+                        {stop, normal, S2} -> {stop, normal, Reply, S2}
+                    end;
+                {stop, Reason, Reply, HS2} ->
+                    {stop, Reason, Reply, S#state{h_state = HS2}};
+                {stop, Reason} ->
+                    {stop, Reason, {error, closed}, S}
+            end
+    end;
 handle_call(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
