@@ -70,6 +70,18 @@ This page records design decisions that are visible in the code, with the reason
 - **Why.** "OTP `ssl` drops the connection on the peer's close_notify, so a TLS tunnel cannot half-close" (comment in `masque_tcp_h1_server_session`, CHANGELOG).
 - **Where.** `masque_tcp_h1_server_session`, `masque_tcp_h1_client_session`.
 
+### CONNECT-TCP h1 aborts keep `close_notify`
+
+- **Decision.** An aborted -10 tunnel on h1 closes TLS with `close_notify`, where the draft asks for a close without it. Peers detect the abort by the missing `FINAL_DATA`.
+- **Why.** OTP `ssl` has no call that closes a connection without sending `close_notify`, and the missing `FINAL_DATA` already tells a -10 peer.
+- **Where.** `masque_tcp_h1_server_session`, `masque_tcp_h1_client_session`; listed as a deviation in [conformance](../reference/conformance.md).
+
+### CONNECT-TCP h1 clients fall back from classic CONNECT
+
+- **Decision.** An h1 client in raw framing that gets 501, or 426 with `Upgrade: connect-tcp`, retries once in capsule framing on the default template, and remembers the proxy by host and port in an ETS table owned by `masque_sup`.
+- **Why.** draft-ietf-httpbis-connect-tcp-10 section 5.2 makes both the retry and the remembered preference a SHOULD. The retry only follows a refusal, so a proxy that accepts classic CONNECT sees no change.
+- **Where.** `do_connect/2` in `masque_tcp_h1_client_session`, `masque_sup`.
+
 ### Tunnel writes block instead of dropping (CONNECT-TCP)
 
 - **Decision.** A CONNECT-TCP tunnel write waits for the transport (up to 30 s) and a failure stops the session.

@@ -122,6 +122,7 @@ init_session(#{
 }) ->
     process_flag(trap_exit, true),
     IdleMs = maps:get(idle_timeout_ms, HOpts, 300000),
+    ok = continue(Conn, StreamId, Req),
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, InitActions} ->
             Framing = maps:get(tcp_framing, Req, raw),
@@ -179,9 +180,21 @@ init_session(#{
 accept(raw, Conn, StreamId) ->
     h1:accept_connect(Conn, StreamId, []);
 accept(capsule, Conn, StreamId) ->
-    case h1:accept_upgrade(Conn, StreamId, [{<<"capsule-protocol">>, <<"?1">>}]) of
+    Headers = [{<<"capsule-protocol">>, <<"?1">>}, {<<"proxy-status">>, <<"masque">>}],
+    case h1:accept_upgrade(Conn, StreamId, Headers) of
         {ok, Socket, Buffer} -> {ok, socket_transport(Socket), Socket, Buffer};
         {error, _} = Err -> Err
+    end.
+
+%% draft-ietf-httpbis-connect-tcp-10 section 4.2: `100 Continue' goes
+%% out before the target is dialed.
+continue(Conn, StreamId, Req) ->
+    case masque_tcp_capsule:expects_continue(maps:get(headers, Req, [])) of
+        true ->
+            _ = h1:send_informational(Conn, StreamId, 100, []),
+            ok;
+        false ->
+            ok
     end.
 
 socket_transport(Socket) when is_tuple(Socket), element(1, Socket) =:= sslsocket -> ssl;

@@ -18,6 +18,15 @@
 %% The value of the `:protocol' pseudo-header for draft-ietf-httpbis-connect-tcp.
 -define(MASQUE_CONNECT_TCP_PROTOCOL, <<"connect-tcp">>).
 
+%% The token draft-ietf-httpbis-connect-tcp-10 section 8.1 asks
+%% implementations of that version to use for interop testing. It always
+%% means capsule framing.
+-define(MASQUE_CONNECT_TCP_07_PROTOCOL, <<"connect-tcp-07">>).
+
+%% Proxies that refused classic CONNECT but took connect-tcp
+%% (draft-ietf-httpbis-connect-tcp-10 section 5.2), keyed by host and port.
+-define(MASQUE_TCP_UPGRADE_PROXIES, masque_tcp_upgrade_proxies).
+
 %% Default request URI templates.
 %% Variables: `target_host' (IP literal, reg-name, or percent-encoded)
 %%            `target_port' (1..65535)

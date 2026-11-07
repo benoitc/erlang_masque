@@ -198,6 +198,16 @@ connecting(
 ) when is_integer(StreamId), StreamId > LastId ->
     reply_handshake(Data, {error, goaway}),
     {stop, goaway};
+%% Interim responses (a `100 Continue' the caller asked for with
+%% `Expect') come before the final one.
+connecting(
+    info,
+    {Tag, _Conn, {response, StreamId, Status, _Headers}},
+    #data{stream_id = StreamId}
+) when
+    (Tag =:= quic_h3 orelse Tag =:= h2), Status >= 100, Status < 200
+->
+    keep_state_and_data;
 connecting(
     info,
     {Tag, _Conn, {response, StreamId, Status, Headers}},
@@ -508,7 +518,7 @@ do_connect(#data{pool_owner = PoolOwner} = Data, _Opts) when
     ReqOpts =
         case Data#data.transport of
             h3 -> #{end_stream => false};
-            h2 -> #{protocol => ?MASQUE_CONNECT_TCP_PROTOCOL}
+            h2 -> #{protocol => protocol(Data#data.framing)}
         end,
     case
         masque_upstream_owner:acquire_stream(
@@ -581,10 +591,7 @@ do_connect(#data{transport = h2} = Data, Opts) ->
                         h2:request(
                             Conn,
                             ReqHeaders,
-                            #{
-                                protocol =>
-                                    ?MASQUE_CONNECT_TCP_PROTOCOL
-                            }
+                            #{protocol => protocol(Data#data.framing)}
                         )
                     of
                         {ok, StreamId} ->
@@ -673,11 +680,16 @@ request_headers(#data{
     Authority = build_authority(ProxyHost, ProxyPort),
     [
         {<<":method">>, <<"CONNECT">>},
-        {<<":protocol">>, ?MASQUE_CONNECT_TCP_PROTOCOL},
+        {<<":protocol">>, protocol(Framing)},
         {<<":scheme">>, <<"https">>},
         {<<":authority">>, Authority},
         {<<":path">>, Path}
     ] ++ framing_headers(Framing) ++ Extra.
+
+%% draft-ietf-httpbis-connect-tcp-10 section 8.1: implementations of
+%% that draft version use `connect-tcp-07'.
+protocol(capsule) -> ?MASQUE_CONNECT_TCP_07_PROTOCOL;
+protocol(raw) -> ?MASQUE_CONNECT_TCP_PROTOCOL.
 
 framing_headers(capsule) -> [{<<"capsule-protocol">>, <<"?1">>}];
 framing_headers(raw) -> [].

@@ -354,6 +354,8 @@ validate(
                     match_path(Path, Headers, UdpTemplate, udp);
                 ?MASQUE_CONNECT_TCP_PROTOCOL ->
                     match_path(Path, Headers, TcpTemplate, tcp);
+                ?MASQUE_CONNECT_TCP_07_PROTOCOL ->
+                    capsule_framed(match_path(Path, Headers, TcpTemplate, tcp));
                 ?MASQUE_CONNECT_IP_PROTOCOL ->
                     match_ip_path(Path, Headers, IpTemplate);
                 _ ->
@@ -405,6 +407,11 @@ match_udp_or_bind(Path, Headers, Template) ->
 %% `:scheme' and `:authority' presence is enforced by `h2' for
 %% Extended CONNECT; we surface whatever it delivers without silently
 %% substituting defaults.
+%% A `connect-tcp-07' request speaks draft-ietf-httpbis-connect-tcp-10,
+%% whatever its headers say.
+capsule_framed({ok, Req}) -> {ok, Req#{tcp_framing => capsule}};
+capsule_framed(Error) -> Error.
+
 match_path(Path, Headers, Template, Protocol) ->
     case masque_uri:match(Template, Path) of
         {ok, #{target_host := Host, target_port := Port}} ->

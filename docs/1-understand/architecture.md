@@ -137,6 +137,7 @@ Records and `sys:get_state/1` do not show this state. Look here when behaviour d
 | `masque_ip_drop_counters`, `masque_ip_lifecycle_counters`, `masque_bind_drop_counters` | `persistent_term` holding `counters` refs | none | `masque_metrics` setup, created once | CONNECT-IP and udp-bind counters |
 | `{masque_chain_handler, node_token}` | `persistent_term` | none | `masque_chain_handler:init_node_token/0` at application start | Default `via` token for loop detection |
 | `masque_h2_tunnel_counts` | public named ETS `set` | `masque_sup` process | h2 dispatch processes, h2 sessions, per-connection watchers | Per-connection tunnel limit on h2 |
+| `masque_tcp_upgrade_proxies` | public named ETS `set` | `masque_sup` process | h1 CONNECT-TCP client sessions | Proxies that refused classic CONNECT but took connect-tcp, so later tunnels upgrade at once |
 | `masque_ip_session_registry` | public named ETS `ordered_set` | `masque_sup` (survives a registry restart) | the registry gen_server (writes); anyone reads | Which CONNECT-IP session serves which address |
 | `{masque_client_owner, held}` | process dictionary of a client session | the session | `masque_client_owner` | Owner messages held until the racer calls `set_owner` |
 
@@ -145,6 +146,7 @@ Registered names: `masque_sup`, the eight session supervisors, `masque_upstream_
 Two consequences to keep in mind:
 
 - The drain flag is keyed by listener name. A dispatch fun from `masque:h3_handlers/1` or `h2_handlers/1` embedded in your own server has no name unless you pass `drain_key`, so draining does not apply to it.
+- `masque_tcp_upgrade_proxies` holds one row per such proxy (host and port) and is never pruned; it empties when the application restarts.
 - `masque_h2_tunnel_counts` lives as long as `masque_sup`, that is as long as the application. Rows exist only for h2 connections on listeners with `max_tunnels_per_connection` set; `release_tunnel/1` tolerates a missing row.
 
 ## Why it is shaped this way

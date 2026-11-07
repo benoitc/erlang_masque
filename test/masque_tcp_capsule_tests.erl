@@ -42,3 +42,9 @@ codes_test() ->
 request_framing_test() ->
     ?assertEqual(capsule, masque_tcp_capsule:request_framing([{<<"capsule-protocol">>, <<"?1">>}])),
     ?assertEqual(raw, masque_tcp_capsule:request_framing([])).
+
+expects_continue_test() ->
+    ?assert(masque_tcp_capsule:expects_continue([{<<"expect">>, <<"100-continue">>}])),
+    ?assert(masque_tcp_capsule:expects_continue([{<<"Expect">>, <<" 100-Continue ">>}])),
+    ?assertNot(masque_tcp_capsule:expects_continue([{<<"expect">>, <<"something">>}])),
+    ?assertNot(masque_tcp_capsule:expects_continue([])).

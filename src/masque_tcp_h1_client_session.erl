@@ -148,10 +148,10 @@ connecting(
     #data{connect_opts = Opts} = Data
 ) ->
     case do_connect(Data, Opts) of
-        {ok, Socket, InitialBuffer} ->
+        {ok, Socket, InitialBuffer, DataC} ->
             case setopts_active_once(Socket) of
                 ok ->
-                    Data1 = Data#data{socket = Socket},
+                    Data1 = DataC#data{socket = Socket},
                     Data2 =
                         case incoming(InitialBuffer, Data1) of
                             {error, _} -> Data1;
@@ -357,17 +357,41 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %% Transport
 %%====================================================================
 
-do_connect(Data, Opts) ->
-    %% One deadline covers connect, TLS and the CONNECT exchange.
+do_connect(Data0, Opts) ->
+    %% One deadline covers connect, TLS and the CONNECT exchange, the
+    %% fallback included.
     Timeout = maps:get(timeout, Opts, 5000),
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    Data = preferred(Data0),
+    case dial(Data, Opts, Deadline) of
+        {ok, Socket, Leftover} ->
+            {ok, Socket, Leftover, Data};
+        {fallback, Rejected} ->
+            %% draft-ietf-httpbis-connect-tcp-10 section 5.2: a proxy
+            %% that refuses classic CONNECT this way may only speak
+            %% connect-tcp, so retry on the default template.
+            Upgrade = upgrade(Data),
+            case dial(Upgrade, Opts, Deadline) of
+                {ok, Socket, Leftover} ->
+                    ok = remember(Upgrade),
+                    {ok, Socket, Leftover, Upgrade};
+                {fallback, _} ->
+                    {error, Rejected};
+                {error, _} = Err ->
+                    Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+dial(Data, Opts, Deadline) ->
     SSLOpts = masque_tls:client_opts(Data#data.proxy_host, Opts),
     case
         ssl:connect(
             binary_to_list(Data#data.proxy_host),
             Data#data.proxy_port,
             SSLOpts,
-            Timeout
+            remaining(Deadline)
         )
     of
         {ok, Socket} ->
@@ -376,11 +400,11 @@ do_connect(Data, Opts) ->
             case ssl:send(Socket, Req) of
                 ok ->
                     case read_status_line(Socket, remaining(Deadline)) of
-                        {ok, 101, _Phrase, Leftover} when
+                        {ok, 101, _Phrase, _Hdrs, Leftover} when
                             Data#data.framing =:= capsule
                         ->
                             {ok, Socket, Leftover};
-                        {ok, Code, _Phrase, Leftover} when
+                        {ok, Code, _Phrase, _Hdrs, Leftover} when
                             Data#data.framing =:= raw, Code >= 200, Code < 300
                         ->
                             %% RFC 9110 §9.3.6: any 2xx establishes
@@ -388,9 +412,13 @@ do_connect(Data, Opts) ->
                             %% "Connection Established" but 201 / 202
                             %% are conformant too.
                             {ok, Socket, Leftover};
-                        {ok, Code, Phrase, _Leftover} ->
+                        {ok, Code, Phrase, Hdrs, _Leftover} ->
                             _ = ssl:close(Socket),
-                            {error, {handshake_rejected, Code, Phrase}};
+                            Rejected = {handshake_rejected, Code, Phrase},
+                            case wants_upgrade(Data, Code, Hdrs) of
+                                true -> {fallback, Rejected};
+                                false -> {error, Rejected}
+                            end;
                         {error, Reason} ->
                             _ = ssl:close(Socket),
                             {error, Reason}
@@ -402,6 +430,37 @@ do_connect(Data, Opts) ->
         {error, Reason} ->
             {error, {connect, Reason}}
     end.
+
+%% A classic CONNECT refused with `501', or with `426' offering
+%% `Upgrade: connect-tcp'.
+wants_upgrade(#data{framing = raw}, 501, _Hdrs) ->
+    true;
+wants_upgrade(#data{framing = raw}, 426, Hdrs) ->
+    Offered = [
+        string:trim(T)
+     || {<<"upgrade">>, V} <- Hdrs, T <- binary:split(lowercase_bin(V), <<",">>, [global])
+    ],
+    lists:member(?MASQUE_CONNECT_TCP_PROTOCOL, Offered) orelse
+        lists:member(?MASQUE_CONNECT_TCP_07_PROTOCOL, Offered);
+wants_upgrade(_Data, _Code, _Hdrs) ->
+    false.
+
+upgrade(Data) ->
+    Data#data{framing = capsule, uri_template = ?MASQUE_DEFAULT_TCP_URI_TEMPLATE}.
+
+%% Section 5.2 also asks the client to remember a proxy that only
+%% speaks connect-tcp, so later tunnels skip the refused CONNECT.
+preferred(#data{framing = raw, proxy_host = Host, proxy_port = Port} = Data) ->
+    case ets:member(?MASQUE_TCP_UPGRADE_PROXIES, {Host, Port}) of
+        true -> upgrade(Data);
+        false -> Data
+    end;
+preferred(Data) ->
+    Data.
+
+remember(#data{proxy_host = Host, proxy_port = Port}) ->
+    true = ets:insert(?MASQUE_TCP_UPGRADE_PROXIES, {{Host, Port}}),
+    ok.
 
 %% Milliseconds left before the overall handshake deadline.
 remaining(Deadline) ->
@@ -433,7 +492,8 @@ connect_request(#data{
         AuthLine/binary, ExtraLines/binary, "\r\n">>.
 
 %% draft-ietf-httpbis-connect-tcp-10 section 3.2: the target goes in the
-%% path of a `GET' that upgrades to `connect-tcp'.
+%% path of a `GET' that upgrades to `connect-tcp', spelled
+%% `connect-tcp-07' as section 8.1 asks of this draft version.
 upgrade_request(#data{
     proxy_host = ProxyHost,
     proxy_port = ProxyPort,
@@ -453,7 +513,7 @@ upgrade_request(#data{
         end,
     ExtraLines = iolist_to_binary([[N, <<": ">>, Val, <<"\r\n">>] || {N, Val} <- Extra]),
     <<"GET ", Path/binary, " HTTP/1.1\r\n", "Host: ", ProxyAuthority/binary, "\r\n",
-        "Connection: Upgrade\r\n", "Upgrade: connect-tcp\r\n", "Capsule-Protocol: ?1\r\n",
+        "Connection: Upgrade\r\n", "Upgrade: connect-tcp-07\r\n", "Capsule-Protocol: ?1\r\n",
         AuthLine/binary, ExtraLines/binary, "\r\n">>.
 
 %% Bytes from the proxy: as they are in raw mode, the DATA and
@@ -514,23 +574,37 @@ read_headers_loop(Socket, Acc, Deadline) ->
             case ssl:recv(Socket, 0, Remaining) of
                 {ok, Bin} ->
                     New = <<Acc/binary, Bin/binary>>,
-                    case binary:split(New, <<"\r\n\r\n">>) of
-                        [HdrBlock, Rest] ->
-                            case parse_status(HdrBlock) of
-                                {ok, Code, Phrase} ->
-                                    {ok, Code, Phrase, Rest};
-                                Err ->
-                                    Err
-                            end;
-                        [_] ->
-                            read_headers_loop(Socket, New, Deadline)
-                    end;
+                    read_response(Socket, New, Deadline);
                 {error, timeout} ->
                     {error, handshake_timeout};
                 {error, Reason} ->
                     {error, {recv, Reason}}
             end
     end.
+
+%% Interim responses other than 101 (a `100 Continue' the caller asked
+%% for with `Expect') are skipped.
+read_response(Socket, Acc, Deadline) ->
+    case binary:split(Acc, <<"\r\n\r\n">>) of
+        [HdrBlock, Rest] ->
+            case parse_status(HdrBlock) of
+                {ok, Code, _Phrase} when Code >= 100, Code < 200, Code =/= 101 ->
+                    read_response(Socket, Rest, Deadline);
+                {ok, Code, Phrase} ->
+                    {ok, Code, Phrase, parse_headers(HdrBlock), Rest};
+                Err ->
+                    Err
+            end;
+        [_] ->
+            read_headers_loop(Socket, Acc, Deadline)
+    end.
+
+parse_headers(HdrBlock) ->
+    [_ | Lines] = binary:split(HdrBlock, <<"\r\n">>, [global]),
+    [
+        {lowercase_bin(string:trim(K)), string:trim(V)}
+     || Line <- Lines, [K, V] <- [binary:split(Line, <<":">>)]
+    ].
 
 parse_status(HdrBlock) ->
     case binary:split(HdrBlock, <<"\r\n">>) of

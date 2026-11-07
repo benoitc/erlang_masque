@@ -2,7 +2,8 @@
 %%%
 %%% Starts the h2 and h1 session supervisors (one per protocol), the
 %%% upstream pool and the CONNECT-IP address registry, and owns the
-%%% ETS table that counts h2 tunnels per connection. Listeners and
+%%% ETS tables that count h2 tunnels per connection and remember the
+%%% proxies that only speak connect-tcp. Listeners and
 %%% client sessions are not children. See
 %%% docs/1-understand/architecture.md.
 -module(masque_sup).
@@ -10,6 +11,8 @@
 -behaviour(supervisor).
 
 -export([start_link/0, init/1]).
+
+-include("masque.hrl").
 
 -spec start_link() -> supervisor:startlink_ret().
 start_link() ->
@@ -22,6 +25,8 @@ init([]) ->
     ok = masque_ip_session_registry:new_table(),
     %% Cache of the host's interface addresses (`masque_ip:is_self/2').
     _ = ets:new(masque_self_addrs, [set, public, named_table, {read_concurrency, true}]),
+    %% Proxies an h1 CONNECT-TCP client upgrades to connect-tcp with.
+    _ = ets:new(?MASQUE_TCP_UPGRADE_PROXIES, [set, public, named_table, {read_concurrency, true}]),
     %% ETS table for h2 per-connection tunnel counting.
     _ = ets:new(
         masque_h2_tunnel_counts,

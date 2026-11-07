@@ -22,8 +22,9 @@ masque speaks two revisions of draft-ietf-httpbis-connect-tcp. Pick one with the
 |---|---|---|
 | Draft | earlier revisions | draft-ietf-httpbis-connect-tcp-10 |
 | Bytes on the stream | as they are | in `DATA` capsules; `FINAL_DATA` carries the last bytes and the FIN |
+| Protocol token | `connect-tcp` | `connect-tcp-07`, as the draft asks of this version |
 | `capsule-protocol: ?1` | absent | on the request and the response |
-| HTTP/1.1 request | classic `CONNECT host:port` | `GET` with `Upgrade: connect-tcp` on the TCP template, answered with 101 |
+| HTTP/1.1 request | classic `CONNECT host:port` | `GET` with `Upgrade: connect-tcp-07` on the TCP template, answered with 101 |
 | HTTP/1.1 half-close | no | yes |
 | A stream that ends without its FIN | a FIN | an abort: the target gets a reset |
 
@@ -39,7 +40,24 @@ On h3 and h2 the request alone cannot always say which framing it uses: the draf
 | `capsule` | Always capsule: every -10 client, header or not. Older raw clients no longer work. |
 | `raw` | Always raw. |
 
-On h1 the request form tells them apart, so the option does not apply there. The capsule codes are the provisional ones the draft gives for testing, `0x2028d7f0` and `0x2028d7f1`.
+A request with the `connect-tcp-07` token is always capsule framing, whatever the option. On h1 the request form tells them apart, so the option does not apply there. The capsule codes are the provisional ones the draft gives for testing, `0x2028d7f0` and `0x2028d7f1`.
+
+## Proxies that only speak connect-tcp
+
+In raw framing on h1, a proxy may refuse classic `CONNECT` with 501, or with 426 and `Upgrade: connect-tcp`. The client then retries once in capsule framing on the default template, and remembers that proxy (by host and port) so later tunnels go straight to the upgrade. You get the tunnel either way; the refusal is only returned if the retry fails too.
+
+## Slow targets
+
+A target that does not answer can hold the handshake for long. To know the proxy took the request before that, ask for `100 Continue`:
+
+```erlang
+{ok, Sess} = masque:connect(Proxy, Target, #{
+    protocol => tcp,
+    request_headers => [{<<"expect">>, <<"100-continue">>}]
+}).
+```
+
+Listeners send the 100 before dialing the target, on all three transports. The client skips it and waits for the final response as usual.
 
 ## Half-close
 

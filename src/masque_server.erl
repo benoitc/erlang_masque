@@ -395,6 +395,8 @@ validate(
                     match_path(Path, Headers, UdpTemplate, udp);
                 ?MASQUE_CONNECT_TCP_PROTOCOL ->
                     match_path(Path, Headers, TcpTemplate, tcp);
+                ?MASQUE_CONNECT_TCP_07_PROTOCOL ->
+                    capsule_framed(match_path(Path, Headers, TcpTemplate, tcp));
                 ?MASQUE_CONNECT_IP_PROTOCOL ->
                     match_ip_path(Path, Headers, IpTemplate);
                 _ ->
@@ -446,6 +448,11 @@ match_udp_or_bind(Path, Headers, Template) ->
         _ ->
             match_path(Path, Headers, Template, udp)
     end.
+
+%% A `connect-tcp-07' request speaks draft-ietf-httpbis-connect-tcp-10,
+%% whatever its headers say.
+capsule_framed({ok, Req}) -> {ok, Req#{tcp_framing => capsule}};
+capsule_framed(Error) -> Error.
 
 match_path(Path, Headers, Template, Protocol) ->
     case masque_uri:match(Template, Path) of

@@ -23,6 +23,13 @@
     tcp_first_bytes_survive_handover/1,
     capsule_abort_resets_target/1,
     capsule_listener_without_header/1,
+    capsule_07_token/1,
+    capsule_h1_without_header/1,
+    capsule_expect_continue/1,
+    capsule_optimistic_data/1,
+    tcp_fallback_on_426/1,
+    tcp_fallback_on_501/1,
+    tcp_no_fallback_on_plain_426/1,
     tcp_half_close_client/1,
     tcp_half_close_target/1,
     tcp_target_reset/1,
@@ -122,6 +129,9 @@ groups() ->
         stop_listener_with_open_tunnels,
         owner_crash_cleans_up
     ],
+    Capsule1 = [capsule_07_token, capsule_expect_continue],
+    Capsule = [capsule_abort_resets_target, capsule_listener_without_header | Capsule1],
+    Fallback = [tcp_fallback_on_426, tcp_fallback_on_501, tcp_no_fallback_on_plain_426],
     [
         {h3, [],
             Tcp ++ HalfClose ++ Other ++
@@ -132,14 +142,12 @@ groups() ->
                     | GoAway
                 ]},
         {h2, [], Tcp ++ HalfClose ++ Other ++ [h2_goaway_tells_client | GoAway]},
-        {h1, [], Tcp ++ Other ++ [h1_udp_stalled_client]},
+        {h1, [], Tcp ++ Other ++ [h1_udp_stalled_client | Fallback]},
         %% CONNECT-TCP framed as in draft-ietf-httpbis-connect-tcp-10.
-        {h3_capsule, [],
-            Tcp ++ HalfClose ++ [capsule_abort_resets_target, capsule_listener_without_header]},
-        {h2_capsule, [],
-            Tcp ++ HalfClose ++ [capsule_abort_resets_target, capsule_listener_without_header]},
+        {h3_capsule, [], Tcp ++ HalfClose ++ Capsule ++ [capsule_optimistic_data]},
+        {h2_capsule, [], Tcp ++ HalfClose ++ Capsule ++ [capsule_optimistic_data]},
         %% Capsules carry FIN, so h1 can half-close in this mode.
-        {h1_capsule, [], Tcp ++ HalfClose}
+        {h1_capsule, [], Tcp ++ HalfClose ++ [capsule_h1_without_header | Capsule1]}
     ].
 
 init_per_suite(Config) ->
@@ -498,6 +506,318 @@ capsule_listener_without_header(Config) ->
             h2:close(Conn)
     end.
 
+%% A -10 client spells the protocol `connect-tcp-07' (section 8.1) and
+%% may leave `capsule-protocol' out: the tunnel is framed in capsules
+%% whatever the listener's `tcp_framing', and the 2xx carries
+%% `capsule-protocol' and `Proxy-Status'.
+capsule_07_token(Config) ->
+    capsule_echo(Config, <<"connect-tcp-07">>, []).
+
+%% On h1 the upgrade itself says -10, so `Capsule-Protocol' may be left
+%% out of the request.
+capsule_h1_without_header(Config) ->
+    capsule_echo(Config, <<"connect-tcp">>, []).
+
+%% A request that expects `100-continue' hears it before the final
+%% response (section 4.2), and a client that asked for it with
+%% `request_headers' still gets its tunnel.
+capsule_expect_continue(Config) ->
+    capsule_echo(Config, <<"connect-tcp-07">>, [{<<"expect">>, <<"100-continue">>}]),
+    Target = {<<"127.0.0.1">>, ?config(target_port, Config)},
+    Sess = connect(Config, Target, #{
+        protocol => tcp, request_headers => [{<<"expect">>, <<"100-continue">>}]
+    }),
+    ok = masque:send(Sess, <<"echo">>),
+    ok = masque:send(Sess, <<"z">>),
+    <<"z">> = recv_bytes(Sess, 1),
+    close(Sess).
+
+%% Bytes sent before the 2xx (section 4.1) reach the target once it is
+%% connected, and are dropped with the request when the target refuses.
+capsule_optimistic_data(Config) ->
+    Echo = masque_tcp_capsule:encode(<<"echo">>, false),
+    Ping = masque_tcp_capsule:encode(<<"ping">>, false),
+    Token = <<"connect-tcp-07">>,
+    {Tag, Conn, Sid} = raw_request(Config, tcp_request(Config, Token), Token),
+    ok = raw_send(Tag, Conn, Sid, <<Echo/binary, Ping/binary>>),
+    {200, _} = raw_response(Tag, Conn, Sid),
+    ?assertEqual(Ping, raw_recv(Tag, Conn, Sid, byte_size(Ping), <<>>)),
+    {ok, Closed} = gen_tcp:listen(0, [{ip, {127, 0, 0, 1}}]),
+    {ok, ClosedPort} = inet:port(Closed),
+    ok = gen_tcp:close(Closed),
+    Refused = tcp_request(Config, Token, ClosedPort),
+    {Tag, Conn, Sid2} = raw_request(Config, Conn, Refused, Token),
+    ok = raw_send(Tag, Conn, Sid2, Ping),
+    {Status, _} = raw_response(Tag, Conn, Sid2),
+    ?assert(Status >= 400),
+    raw_close(Tag, Conn).
+
+capsule_echo(Config, Token, Extra) ->
+    Echo = masque_tcp_capsule:encode(<<"echo">>, false),
+    Ping = masque_tcp_capsule:encode(<<"ping">>, false),
+    Expect = Extra =/= [],
+    case ?config(transport, Config) of
+        h1 ->
+            {Sock, Heads, Rest} = h1_upgrade(Config, Token, Extra),
+            Statuses = [St || {St, _} <- Heads],
+            ?assertEqual(
+                case Expect of
+                    true -> [100, 101];
+                    false -> [101]
+                end,
+                Statuses
+            ),
+            {101, Hdrs} = lists:last(Heads),
+            assert_capsule_response(Hdrs),
+            ?assertEqual(Token, proplists:get_value(<<"upgrade">>, Hdrs)),
+            ok = ssl:send(Sock, <<Echo/binary, Ping/binary>>),
+            ?assertEqual(Ping, h1_recv(Sock, byte_size(Ping), Rest)),
+            ssl:close(Sock);
+        _ ->
+            {Tag, Conn, Sid} = raw_request(Config, tcp_request(Config, Token) ++ Extra, Token),
+            case Expect of
+                true -> {100, _} = raw_response(Tag, Conn, Sid);
+                false -> ok
+            end,
+            {200, Hdrs} = raw_response(Tag, Conn, Sid),
+            assert_capsule_response(Hdrs),
+            ok = raw_send(Tag, Conn, Sid, <<Echo/binary, Ping/binary>>),
+            ?assertEqual(Ping, raw_recv(Tag, Conn, Sid, byte_size(Ping), <<>>)),
+            raw_close(Tag, Conn)
+    end.
+
+assert_capsule_response(Hdrs) ->
+    ?assertEqual(<<"?1">>, proplists:get_value(<<"capsule-protocol">>, Hdrs)),
+    ?assertEqual(<<"masque">>, proplists:get_value(<<"proxy-status">>, Hdrs)).
+
+raw_request(Config, Headers, Token) ->
+    Conn =
+        case ?config(transport, Config) of
+            h3 -> raw_h3_connect(Config);
+            h2 -> raw_h2_connect(Config)
+        end,
+    raw_request(Config, Conn, Headers, Token).
+
+raw_request(Config, Conn, Headers, Token) ->
+    case ?config(transport, Config) of
+        h3 ->
+            {ok, Sid} = quic_h3:request(Conn, Headers, #{end_stream => false}),
+            {quic_h3, Conn, Sid};
+        h2 ->
+            {ok, Sid} = h2:request(Conn, Headers, #{protocol => Token}),
+            {h2, Conn, Sid}
+    end.
+
+raw_send(quic_h3, Conn, Sid, Bin) -> quic_h3:send_data(Conn, Sid, Bin, false);
+raw_send(h2, Conn, Sid, Bin) -> h2:send_data(Conn, Sid, Bin, false).
+
+%% The next response on the stream, interim ones included (h2 tags
+%% those `informational').
+raw_response(Tag, Conn, Sid) ->
+    receive
+        {Tag, Conn, {response, Sid, Status, Hdrs}} -> {Status, Hdrs};
+        {Tag, Conn, {informational, Sid, Status, Hdrs}} -> {Status, Hdrs}
+    after 5000 -> ct:fail(no_response)
+    end.
+
+%% A raw -10 upgrade on h1. Returns the responses read (interim ones
+%% first) and the bytes past the last one.
+h1_upgrade(Config, Token, Extra) ->
+    #{port := Port} = ?config(server, Config),
+    {ok, Sock} = ssl:connect(
+        "127.0.0.1",
+        Port,
+        [
+            binary,
+            {active, false},
+            {verify, verify_none},
+            {alpn_advertised_protocols, [<<"http/1.1">>]}
+        ],
+        5000
+    ),
+    Host = iolist_to_binary(["127.0.0.1:", integer_to_list(Port)]),
+    Path = iolist_to_binary([
+        "/.well-known/masque/tcp/127.0.0.1/", integer_to_list(?config(target_port, Config)), "/"
+    ]),
+    ok = ssl:send(Sock, [
+        <<"GET ">>,
+        Path,
+        <<" HTTP/1.1\r\nHost: ">>,
+        Host,
+        <<"\r\nConnection: Upgrade\r\nUpgrade: ">>,
+        Token,
+        <<"\r\n">>,
+        [[K, <<": ">>, V, <<"\r\n">>] || {K, V} <- Extra],
+        <<"\r\n">>
+    ]),
+    {Heads, Rest} = h1_heads(Sock, <<>>, []),
+    {Sock, Heads, Rest}.
+
+h1_heads(Sock, Buf, Acc) ->
+    case binary:split(Buf, <<"\r\n\r\n">>) of
+        [Head, Rest] ->
+            [StatusLine | Lines] = binary:split(Head, <<"\r\n">>, [global]),
+            [_, Code | _] = binary:split(StatusLine, <<" ">>, [global]),
+            Hdrs = [
+                {string:lowercase(K), string:trim(V)}
+             || L <- Lines, [K, V] <- [binary:split(L, <<":">>)]
+            ],
+            Status = binary_to_integer(Code),
+            Acc1 = [{Status, Hdrs} | Acc],
+            case Status of
+                100 -> h1_heads(Sock, Rest, Acc1);
+                _ -> {lists:reverse(Acc1), Rest}
+            end;
+        [_] ->
+            {ok, More} = ssl:recv(Sock, 0, 5000),
+            h1_heads(Sock, <<Buf/binary, More/binary>>, Acc)
+    end.
+
+h1_recv(_Sock, Want, Acc) when byte_size(Acc) >= Want ->
+    Acc;
+h1_recv(Sock, Want, Acc) ->
+    {ok, More} = ssl:recv(Sock, 0, 5000),
+    h1_recv(Sock, Want, <<Acc/binary, More/binary>>).
+
+%% draft-ietf-httpbis-connect-tcp-10 section 5.2: a proxy that refuses
+%% classic CONNECT with 426 and `Upgrade: connect-tcp', or with 501, is
+%% retried on the default template, and remembered.
+tcp_fallback_on_426(Config) ->
+    fallback(Config, 426).
+
+tcp_fallback_on_501(Config) ->
+    fallback(Config, 501).
+
+%% A 426 that does not offer connect-tcp is a plain refusal.
+tcp_no_fallback_on_plain_426(Config) ->
+    {_Proxy, Port} = start_fake_proxy(Config, plain_426),
+    ?assertMatch({error, _}, fake_connect(Port)),
+    receive
+        {fake_proxy, <<"CONNECT">>, _} -> ok
+    after 5000 -> ct:fail(no_connect)
+    end,
+    receive
+        {fake_proxy, Method, Path} -> ct:fail({retried, Method, Path})
+    after 500 -> ok
+    end.
+
+fallback(Config, Refusal) ->
+    {_Proxy, Port} = start_fake_proxy(Config, Refusal),
+    {ok, First} = fake_connect(Port),
+    Path = <<"/.well-known/masque/tcp/127.0.0.1/9/">>,
+    receive
+        {fake_proxy, <<"CONNECT">>, _} -> ok
+    after 5000 -> ct:fail(no_connect)
+    end,
+    receive
+        {fake_proxy, <<"GET">>, P1} -> ?assertEqual(Path, P1)
+    after 5000 -> ct:fail(no_retry)
+    end,
+    ok = masque:send(First, <<"hello">>),
+    <<"hello">> = recv_bytes(First, 5),
+    close(First),
+    %% The proxy is remembered: no CONNECT the second time.
+    {ok, Second} = fake_connect(Port),
+    receive
+        {fake_proxy, M2, P2} -> ?assertEqual({<<"GET">>, Path}, {M2, P2})
+    after 5000 -> ct:fail(no_request)
+    end,
+    ok = masque:send(Second, <<"again">>),
+    <<"again">> = recv_bytes(Second, 5),
+    close(Second).
+
+fake_connect(Port) ->
+    Uri = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    masque:connect(Uri, {<<"127.0.0.1">>, 9}, #{
+        protocol => tcp, transports => [h1], verify => verify_none, timeout => 5000
+    }).
+
+%% A TLS proxy that refuses classic CONNECT, then echoes the capsules of
+%% an upgraded request back.
+start_fake_proxy(Config, Refusal) ->
+    #{cert_file := Cert, key_file := Key} = ?config(certs, Config),
+    {ok, Listen} = ssl:listen(0, [
+        binary,
+        {active, false},
+        {reuseaddr, true},
+        {ip, {127, 0, 0, 1}},
+        {certfile, Cert},
+        {keyfile, Key},
+        {alpn_preferred_protocols, [<<"http/1.1">>]}
+    ]),
+    {ok, {_, Port}} = ssl:sockname(Listen),
+    Parent = self(),
+    Proxy = spawn_link(fun() -> fake_accept(Listen, Refusal, Parent) end),
+    {Proxy, Port}.
+
+fake_accept(Listen, Refusal, Parent) ->
+    {ok, T} = ssl:transport_accept(Listen),
+    case ssl:handshake(T, 5000) of
+        {ok, Sock} ->
+            Pid = spawn(fun() ->
+                receive
+                    go -> fake_serve(Sock, Refusal, Parent)
+                end
+            end),
+            ok = ssl:controlling_process(Sock, Pid),
+            Pid ! go;
+        _ ->
+            ok
+    end,
+    fake_accept(Listen, Refusal, Parent).
+
+fake_serve(Sock, Refusal, Parent) ->
+    {[Head], Rest} = fake_head(Sock, <<>>),
+    [Line | _] = binary:split(Head, <<"\r\n">>),
+    [Method, Path | _] = binary:split(Line, <<" ">>, [global]),
+    Parent ! {fake_proxy, Method, Path},
+    case Method of
+        <<"CONNECT">> ->
+            _ = ssl:send(Sock, refusal(Refusal)),
+            ssl:close(Sock);
+        <<"GET">> ->
+            ok = ssl:send(
+                Sock,
+                <<
+                    "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n"
+                    "Upgrade: connect-tcp-07\r\nCapsule-Protocol: ?1\r\n\r\n"
+                >>
+            ),
+            fake_echo(Sock, Rest)
+    end.
+
+fake_head(Sock, Buf) ->
+    case binary:split(Buf, <<"\r\n\r\n">>) of
+        [Head, Rest] ->
+            {[Head], Rest};
+        [_] ->
+            {ok, More} = ssl:recv(Sock, 0, 5000),
+            fake_head(Sock, <<Buf/binary, More/binary>>)
+    end.
+
+%% Capsules are self-delimiting, so echoing the bytes echoes them.
+fake_echo(Sock, <<>>) ->
+    case ssl:recv(Sock, 0) of
+        {ok, Bin} -> fake_echo(Sock, Bin);
+        {error, _} -> ssl:close(Sock)
+    end;
+fake_echo(Sock, Bin) ->
+    _ = ssl:send(Sock, Bin),
+    fake_echo(Sock, <<>>).
+
+refusal(426) ->
+    <<
+        "HTTP/1.1 426 Upgrade Required\r\nUpgrade: connect-tcp\r\nConnection: Upgrade\r\n"
+        "Content-Length: 0\r\n\r\n"
+    >>;
+refusal(501) ->
+    <<"HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n">>;
+refusal(plain_426) ->
+    <<
+        "HTTP/1.1 426 Upgrade Required\r\nUpgrade: TLS/1.3\r\nConnection: Upgrade\r\n"
+        "Content-Length: 0\r\n\r\n"
+    >>.
+
 raw_recv(_Tag, _Conn, _Sid, Want, Acc) when byte_size(Acc) >= Want ->
     Acc;
 raw_recv(Tag, Conn, Sid, Want, Acc) ->
@@ -620,8 +940,14 @@ raw_h2_connect(Config) ->
     Conn.
 
 tcp_request(Config) ->
+    tcp_request(Config, <<"connect-tcp">>).
+
+tcp_request(Config, Token) ->
+    tcp_request(Config, Token, ?config(target_port, Config)).
+
+tcp_request(Config, Token, TargetPortInt) ->
     #{port := Port} = ?config(server, Config),
-    TargetPort = integer_to_binary(?config(target_port, Config)),
+    TargetPort = integer_to_binary(TargetPortInt),
     Base = [
         {<<":method">>, <<"CONNECT">>},
         {<<":scheme">>, <<"https">>},
@@ -629,12 +955,13 @@ tcp_request(Config) ->
         {<<":path">>, <<"/.well-known/masque/tcp/127.0.0.1/", TargetPort/binary, "/">>}
     ],
     case ?config(transport, Config) of
-        h3 -> Base ++ [{<<":protocol">>, <<"connect-tcp">>}];
+        h3 -> Base ++ [{<<":protocol">>, Token}];
         h2 -> Base
     end.
 
 raw_close(h1, Sock) -> ssl:close(Sock);
 raw_close(h3, Conn) -> quic_h3:close(Conn);
+raw_close(quic_h3, Conn) -> quic_h3:close(Conn);
 raw_close(h2, Conn) -> h2:close(Conn).
 
 %%====================================================================

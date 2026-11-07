@@ -337,9 +337,13 @@ validate_any(<<"GET">> = Method, Path, Headers, TcpTpl, UdpTpl, IpTpl, AcceptBin
 validate_any(Method, Path, Headers, _TcpTpl, UdpTpl, IpTpl, AcceptBind) ->
     validate(Method, Path, Headers, UdpTpl, IpTpl, AcceptBind).
 
+%% `connect-tcp-07' is the token section 8.1 of the draft asks for while
+%% it is a draft.
 is_tcp_upgrade(Headers) ->
     has_upgrade_token(header(<<"connection">>, Headers)) andalso
-        lowercase_bin(header(<<"upgrade">>, Headers)) =:= ?MASQUE_CONNECT_TCP_PROTOCOL.
+        lists:member(lowercase_bin(header(<<"upgrade">>, Headers)), [
+            ?MASQUE_CONNECT_TCP_PROTOCOL, ?MASQUE_CONNECT_TCP_07_PROTOCOL
+        ]).
 
 validate_tcp_upgrade(Path, Headers, Template) ->
     case header(<<"host">>, Headers) of

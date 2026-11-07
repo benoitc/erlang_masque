@@ -67,6 +67,8 @@
     h3_unknown_reject_reason_gets_response/1,
     h2_unknown_reject_reason_gets_response/1,
     h2_failed_session_releases_tunnel_slot/1,
+    h3_tcp_continue_then_refused_target/1,
+    h2_tcp_continue_then_refused_target/1,
     h3_tcp_target_reset_resets_tunnel/1,
     h2_tcp_target_reset_resets_tunnel/1,
     h3_tcp_client_fin_half_closes/1,
@@ -142,6 +144,8 @@ all() ->
         h3_unknown_reject_reason_gets_response,
         h2_unknown_reject_reason_gets_response,
         h2_failed_session_releases_tunnel_slot,
+        h3_tcp_continue_then_refused_target,
+        h2_tcp_continue_then_refused_target,
         h3_tcp_target_reset_resets_tunnel,
         h2_tcp_target_reset_resets_tunnel,
         h3_tcp_client_fin_half_closes,
@@ -1088,6 +1092,56 @@ h2_failed_session_releases_tunnel_slot(Config) ->
     ],
     ok = h2:close(Conn),
     ok = wait_until(fun() -> ets:info(masque_h2_tunnel_counts, size) =:= Rows end, 50).
+
+%% A -10 request that expects `100-continue' hears it before the target
+%% is dialed; a refused target then gets the final error response, and
+%% the session start leaves nothing behind.
+h3_tcp_continue_then_refused_target(Config) ->
+    {ok, Conn} = masque_test_helpers:h3_client_connect(
+        maps:get(port, ?config(h3, Config)), #{}
+    ),
+    Headers = [{<<":protocol">>, <<"connect-tcp-07">>} | continue_headers()],
+    {ok, Sid} = quic_h3:request(Conn, Headers, #{end_stream => false}),
+    receive
+        {quic_h3, Conn, {response, Sid, 100, _}} -> ok
+    after 5000 -> ct:fail(no_continue)
+    end,
+    receive
+        {quic_h3, Conn, {response, Sid, Status, _}} -> ?assert(Status >= 500)
+    after 5000 -> ct:fail(no_response)
+    end,
+    ok = quic_h3:close(Conn).
+
+h2_tcp_continue_then_refused_target(Config) ->
+    Rows = ets:info(masque_h2_tunnel_counts, size),
+    {ok, Conn} = h2_connect(Config),
+    {ok, Sid} = h2:request(Conn, continue_headers(), #{protocol => <<"connect-tcp-07">>}),
+    receive
+        {h2, Conn, {informational, Sid, 100, _}} -> ok
+    after 5000 -> ct:fail(no_continue)
+    end,
+    receive
+        {h2, Conn, {response, Sid, Status, _}} -> ?assert(Status >= 500)
+    after 5000 -> ct:fail(no_response)
+    end,
+    ok = h2:close(Conn),
+    ok = wait_until(fun() -> ets:info(masque_h2_tunnel_counts, size) =:= Rows end, 50).
+
+continue_headers() ->
+    {ok, Closed} = gen_tcp:listen(0, [{ip, {127, 0, 0, 1}}]),
+    {ok, Port} = inet:port(Closed),
+    ok = gen_tcp:close(Closed),
+    [
+        {<<":method">>, <<"CONNECT">>},
+        {<<":scheme">>, <<"https">>},
+        {<<":authority">>, <<"localhost">>},
+        {<<":path">>,
+            masque_uri:expand(
+                <<"/.well-known/masque/tcp/{target_host}/{target_port}/">>,
+                #{target_host => <<"127.0.0.1">>, target_port => Port}
+            )},
+        {<<"expect">>, <<"100-continue">>}
+    ].
 
 h3_tcp_target_reset_resets_tunnel(Config) ->
     tcp_target_reset_resets_tunnel(Config, h3).

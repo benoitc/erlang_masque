@@ -126,6 +126,7 @@ start(
             {ok, Router} -> erlang:monitor(process, Router);
             error -> undefined
         end,
+    ok = continue(Transport, Conn, StreamId, Req),
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, Actions} ->
             State = #state{
@@ -134,9 +135,7 @@ start(
                 transport = Transport,
                 handler = Handler,
                 idle_ms = maps:get(idle_timeout_ms, HOpts, ?DEFAULT_IDLE_MS),
-                framing = masque_tcp_capsule:request_framing(
-                    maps:get(tcp_framing, HOpts, auto), maps:get(headers, Req, [])
-                ),
+                framing = framing(Req, HOpts),
                 max_cap = maps:get(max_capsule_size, HOpts, ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE),
                 h_state = HState,
                 req = Req,
@@ -164,8 +163,35 @@ start(
             {stop, Reason}
     end.
 
-response_headers(#state{framing = capsule}) -> [{<<"capsule-protocol">>, <<"?1">>}];
-response_headers(_) -> [].
+%% A `connect-tcp-07' request is always framed in capsules; otherwise the
+%% listener's `tcp_framing' and the request's headers decide.
+framing(#{tcp_framing := capsule}, _HOpts) ->
+    capsule;
+framing(Req, HOpts) ->
+    masque_tcp_capsule:request_framing(
+        maps:get(tcp_framing, HOpts, auto), maps:get(headers, Req, [])
+    ).
+
+%% draft-ietf-httpbis-connect-tcp-10 section 4.2: a request that expects
+%% `100-continue' hears it before the proxy dials the target, which can
+%% take long when the target does not answer.
+continue(Transport, Conn, StreamId, Req) ->
+    case masque_tcp_capsule:expects_continue(maps:get(headers, Req, [])) of
+        true ->
+            _ = send_interim(Transport, Conn, StreamId),
+            ok;
+        false ->
+            ok
+    end.
+
+send_interim(h3, Conn, StreamId) -> quic_h3:send_response(Conn, StreamId, 100, []);
+send_interim(h2, Conn, StreamId) -> h2:send_response(Conn, StreamId, 100, []).
+
+%% Section 4.2 also asks for `Proxy-Status' on success.
+response_headers(#state{framing = capsule}) ->
+    [{<<"capsule-protocol">>, <<"?1">>}, {<<"proxy-status">>, <<"masque">>}];
+response_headers(_) ->
+    [].
 
 send_response(#state{transport = h3, conn = C, stream_id = S}, Status, Hdrs) ->
     quic_h3:send_response(C, S, Status, Hdrs);

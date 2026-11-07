@@ -20,6 +20,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   both forms; clients choose it with a new option and keep the earlier
   form by default. With it, HTTP/1.1 tunnels can half-close, and an
   aborted tunnel resets the target instead of closing it cleanly.
+  Listeners also accept the protocol name the draft asks for in testing,
+  take data sent before the tunnel is confirmed, confirm a request early
+  when the client asks for it, and report the proxy status on success. An
+  HTTP/1.1 client whose proxy refuses classic CONNECT now retries with the
+  current draft and remembers that proxy.
 
 ### Fixed
 

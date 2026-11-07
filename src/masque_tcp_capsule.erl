@@ -7,7 +7,7 @@
 
 -include("masque.hrl").
 
--export([request_framing/1, request_framing/2, encode/2, decode/3]).
+-export([request_framing/1, request_framing/2, expects_continue/1, encode/2, decode/3]).
 
 -type item() :: {data, binary()} | {final, binary()}.
 -export_type([item/0]).
@@ -28,6 +28,17 @@ request_framing(Headers) ->
         {_, <<"?1">>} -> capsule;
         _ -> raw
     end.
+
+%% Whether a request carries `Expect: 100-continue'.
+-spec expects_continue([{binary(), binary()}]) -> boolean().
+expects_continue(Headers) ->
+    lists:any(
+        fun({K, V}) ->
+            string:lowercase(K) =:= <<"expect">> andalso
+                string:lowercase(string:trim(V)) =:= <<"100-continue">>
+        end,
+        Headers
+    ).
 
 %% Bytes to send, as one DATA capsule, or FINAL_DATA when they end the
 %% sender's side.
