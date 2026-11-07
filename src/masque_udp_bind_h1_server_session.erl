@@ -1,5 +1,5 @@
 %%% Per-tunnel server session for Connect-UDP-Bind
-%%% (draft-ietf-masque-connect-udp-listen-11) over HTTP/1.1.
+%%% (draft-ietf-masque-connect-udp-listen-16) over HTTP/1.1.
 %%%
 %%% Sibling of `masque_udp_bind_server_session` (h2/h3); the wire
 %%% format above the transport is identical, so capsule and payload
@@ -323,8 +323,11 @@ handle_inbound_datagram(Payload, S) ->
 
 handle_context_zero(Inner, #state{bind_scope = scoped} = S) ->
     dispatch(handle_packet, [Inner], S);
+%% Unscoped: draft -16 section 3, the recipient MUST abort the request
+%% stream (on h1, the connection).
 handle_context_zero(_Inner, S) ->
-    drop(context_zero, S).
+    masque_metrics:bind_drop_inc(context_zero),
+    {stop, context_zero_datagram, S}.
 
 %% Contexts are two-way: a datagram may use one the client opened
 %% (peer table) or an installed one we opened (own table).
@@ -385,7 +388,35 @@ handle_bind_to_peer(Peer, Pkt, #state{handler = H, h_state = HS} = S) ->
             {noreply, S}
     end.
 
-handle_peer_assign(Assign, #state{own_table = OT} = S) ->
+handle_peer_assign(Assign, S0) ->
+    case allow_peer(Assign, S0) of
+        {true, S} -> install_peer_assign(Assign, S);
+        {false, S} -> reject_peer_assign(Assign, peer_refused, S)
+    end.
+
+%% Draft -16 section 9: a registration to a target the handler refuses
+%% is rejected.
+allow_peer(#compression_assign{ip_version = 0}, S) ->
+    {true, S};
+allow_peer(#compression_assign{address = IP, port = Port}, #state{handler = H, h_state = HS} = S) ->
+    case exported(H, allow_peer, 2) of
+        true ->
+            case safe_apply(H, allow_peer, [{IP, Port}, HS]) of
+                {Allowed, HS2} when is_boolean(Allowed) -> {Allowed, S#state{h_state = HS2}};
+                _ -> {false, S}
+            end;
+        false ->
+            {true, S}
+    end.
+
+%% Sections 3.1 and 9: reject with COMPRESSION_CLOSE; the id stays
+%% closed.
+reject_peer_assign(#compression_assign{context_id = Id}, _Why, #state{peer_table = PT} = S) ->
+    masque_metrics:bind_drop_inc(assign_rejected),
+    send_capsule(#compression_close{context_id = Id}, S),
+    {noreply, S#state{peer_table = masque_compression_table:reject(PT, Id)}}.
+
+install_peer_assign(Assign, #state{own_table = OT} = S) ->
     Id = Assign#compression_assign.context_id,
     case masque_compression_table:install(S#state.peer_table, Assign, OT) of
         {ok, T2} ->
@@ -400,8 +431,11 @@ handle_peer_assign(Assign, #state{own_table = OT} = S) ->
             send_capsule(#compression_ack{context_id = Id}, S),
             send_capsule(#compression_close{context_id = OwnId}, S),
             {noreply, S#state{peer_table = T2, own_table = OT2}};
-        {error, _} ->
-            {stop, malformed_capsule, S}
+        {error, Why} ->
+            case masque_compression_table:refusal(Why) of
+                reject -> reject_peer_assign(Assign, Why, S);
+                malformed -> {stop, malformed_capsule, S}
+            end
     end.
 
 handle_peer_ack(Ack, S) ->

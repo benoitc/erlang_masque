@@ -1,6 +1,6 @@
 # Connect-UDP-Bind
 
-This page shows how to use Connect-UDP-Bind (draft-ietf-masque-connect-udp-listen-11), the CONNECT-UDP extension where one tunnel exchanges UDP with many peers through a bind socket on the proxy. It covers the server and client quick start, the default peer filter, compression contexts as you see them from the API, the limits and drop counters, and the owner messages. Read it when you need multi-peer UDP (several QUIC servers, P2P media, STUN, a stable public address); for a single fixed target plain [CONNECT-UDP](connect-udp.md) is simpler. "Compression context" is defined in [concepts](../1-understand/concepts.md#compression-context); the table state machine is in [udp-bind internals](../3-change/udp-bind-internals.md).
+This page shows how to use Connect-UDP-Bind (draft-ietf-masque-connect-udp-listen-16), the CONNECT-UDP extension where one tunnel exchanges UDP with many peers through a bind socket on the proxy. It covers the server and client quick start, the default peer filter, compression contexts as you see them from the API, the limits and drop counters, and the owner messages. Read it when you need multi-peer UDP (several QUIC servers, P2P media, STUN, a stable public address); for a single fixed target plain [CONNECT-UDP](connect-udp.md) is simpler. "Compression context" is defined in [concepts](../1-understand/concepts.md#compression-context); the table state machine is in [udp-bind internals](../3-change/udp-bind-internals.md).
 
 ## Server
 
@@ -105,12 +105,13 @@ On h3 and h2 the proxy session counts every packet or assign it drops:
 
 | Reason | Cause |
 |---|---|
-| `context_zero` | Datagram on context 0 in an unscoped bind. |
+| `context_zero` | Datagram on context 0 in an unscoped bind; the request stream is aborted (draft -16). |
 | `unknown_context` | Datagram on a context the client never opened. |
 | `malformed` | Undecodable datagram or uncompressed payload. |
 | `peer_filter` | The peer filter refused the destination. |
 | `pending_limit` | A proxy compression assign past `max_pending_compression_responses`. |
 | `uncompressed_closed` | A proxy compression assign after the client closed its uncompressed context. |
+| `assign_rejected` | A client COMPRESSION_ASSIGN answered with COMPRESSION_CLOSE: past `max_compression_contexts`, a family the proxy did not advertise, or a peer the handler refuses. |
 | `other` | Any other reason, including drops returned by `scrub_fun` or a custom handler. |
 
 ## Owner messages

@@ -29,7 +29,7 @@ A proxy can itself be a client of another proxy. That is a relay chain, see [rel
 | CONNECT-UDP | RFC 9298 | UDP payloads to one target host and port | `masque:connect/3` (default) |
 | CONNECT-IP | RFC 9484 | Full IP packets, with address assignment and routes | `masque:connect/3` with `protocol => ip` |
 | CONNECT-TCP | draft-ietf-httpbis-connect-tcp, and classic `CONNECT` on HTTP/1.1 | A TCP byte stream | `masque:connect/3` with `protocol => tcp` |
-| Connect-UDP-Bind | draft-ietf-masque-connect-udp-listen-11 | UDP to and from many peers through one proxy socket | `masque:bind_connect/3` |
+| Connect-UDP-Bind | draft-ietf-masque-connect-udp-listen-16 | UDP to and from many peers through one proxy socket | `masque:bind_connect/3` |
 
 Each protocol has a usage page under [2-use](../2-use/connect-udp.md).
 

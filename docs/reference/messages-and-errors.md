@@ -232,6 +232,8 @@ Reasons used by the built-in handlers:
 | `masque_chain_handler` | `{resolution_failed, {upstream, R}}` or `{reject, loop_detected}` (from `init/2`); `upstream_closed` |
 | `masque_reverse_accept_handler`, `masque_reverse_accept_udp_handler` | `{reject, unknown_request}` (from `init/2`, 404); `requester_gone` (the process that requested the connection died) |
 
+Connect-UDP-Bind sessions also end with `context_zero_datagram` (a datagram on context 0 of an unscoped bind, which aborts the stream) and `{control_send_failed, R}` (a compression capsule that could not be written within 30 s). Client sessions report them in `{masque_closed, Sess, Reason}`.
+
 Reverse connect control sessions end with `normal` (the agent closed the channel), `malformed_capsule` (a bad capsule, or a DECLINED for no outstanding request), `truncated_capsule`, `capsule_buffer_overflow`, `idle_timeout`, `{control_send_failed, R}`, or the client and connection reasons above. A bad capsule resets the stream (`H3_MESSAGE_ERROR`, `PROTOCOL_ERROR`); other ends close it with FIN.
 
 ## Internal messages

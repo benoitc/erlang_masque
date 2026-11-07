@@ -287,6 +287,7 @@ bind_drop_reasons() ->
         peer_filter,
         pending_limit,
         uncompressed_closed,
+        assign_rejected,
         other
     ].
 

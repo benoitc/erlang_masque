@@ -46,7 +46,7 @@ uncompressed_v6_roundtrip_test() ->
     ).
 
 %%====================================================================
-%% Wire-format pinning (draft-11 sections 4 and 5)
+%% Wire-format pinning (draft-16 sections 4 and 5)
 %%====================================================================
 
 %% Uncompressed v4: 1 byte version + 4 bytes addr + 2 bytes port +

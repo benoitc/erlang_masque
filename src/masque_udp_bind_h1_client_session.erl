@@ -1,5 +1,5 @@
 %%% Connect-UDP-Bind client session over HTTP/1.1
-%%% (draft-ietf-masque-connect-udp-listen-11). Sibling of
+%%% (draft-ietf-masque-connect-udp-listen-16). Sibling of
 %%% `masque_udp_bind_client_session` for the h2/h3 paths.
 %%%
 %%% Public API and owner-message shape match the h2/h3 client; only
@@ -583,8 +583,10 @@ drain_capsules(Buf, Data) ->
     end.
 
 dispatch_capsule(datagram, Inner, Data) ->
-    Data1 = handle_inbound_datagram(Inner, Data),
-    {ok, Data1};
+    case handle_inbound_datagram(Inner, Data) of
+        {abort, Reason} -> {stop, Reason};
+        Data1 -> {ok, Data1}
+    end;
 dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_ASSIGN, Body, Data) ->
     case masque_compression_capsule:decode_assign(Body) of
         {ok, A} ->
@@ -620,8 +622,28 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_ASSIGN, Body, Data) ->
                     ]),
                     _ = ssl_send(Data, Bytes),
                     {ok, Data#data{peer_table = T3}};
-                {error, _} ->
-                    {stop, malformed_capsule}
+                {error, Why} ->
+                    case masque_compression_table:refusal(Why) of
+                        %% Sections 3.1 and 9: reject with
+                        %% COMPRESSION_CLOSE; the id stays closed.
+                        reject ->
+                            Id = A#compression_assign.context_id,
+                            _ = ssl_send(
+                                Data,
+                                iolist_to_binary(
+                                    masque_compression_capsule:encode(
+                                        #compression_close{context_id = Id}
+                                    )
+                                )
+                            ),
+                            {ok, Data#data{
+                                peer_table = masque_compression_table:reject(
+                                    Data#data.peer_table, Id
+                                )
+                            }};
+                        malformed ->
+                            {stop, malformed_capsule}
+                    end
             end;
         {error, _} ->
             {stop, malformed_capsule}
@@ -690,8 +712,10 @@ handle_inbound_datagram(Payload, Data) ->
 
 handle_context_zero(Inner, #data{bind_scope = scoped} = Data) ->
     deliver_bind_packet(Data#data.bind_target, Inner, Data);
-handle_context_zero(_Inner, Data) ->
-    Data.
+%% Unscoped: draft -16 section 3, the recipient MUST abort the request
+%% stream (on h1, the connection).
+handle_context_zero(_Inner, _Data) ->
+    {abort, context_zero_datagram}.
 
 handle_known_context(Ctx, Inner, Data) ->
     case lookup_context(Ctx, Data) of

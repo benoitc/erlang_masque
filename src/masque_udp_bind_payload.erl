@@ -2,7 +2,7 @@
 -moduledoc """
 Encode/decode the inner Bound UDP Proxying Payload, the
 bytes that follow the HTTP Datagram Context ID. Per
-draft-ietf-masque-connect-udp-listen-11 sections 4 (uncompressed)
+draft-ietf-masque-connect-udp-listen-16 sections 4 (uncompressed)
 and 5 (compressed):
 
 - **Compressed** form: the payload is the UDP payload bytes

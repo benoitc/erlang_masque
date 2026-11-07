@@ -1,7 +1,7 @@
 %%% -*- erlang -*-
 %%%
 %%% Connect-UDP-Bind protocol constants -
-%%% draft-ietf-masque-connect-udp-listen-11.
+%%% draft-ietf-masque-connect-udp-listen-16.
 %%%
 %%% Capsule type codes are IANA-provisional. The Connect-UDP-Bind /
 %%% Proxy-Public-Address HTTP fields are also provisional registrations
@@ -11,7 +11,7 @@
 -define(MASQUE_UDP_BIND_HRL, true).
 
 %%====================================================================
-%% HTTP fields (draft-11 sections 6 and 7)
+%% HTTP fields (draft-16 sections 6 and 7)
 %%====================================================================
 
 %% Boolean Structured Field per RFC 9651. Sent on both request and
@@ -23,7 +23,7 @@
 -define(MASQUE_HF_PROXY_PUBLIC_ADDRESS, <<"proxy-public-address">>).
 
 %%====================================================================
-%% Capsule types (draft-11 section 11.2)
+%% Capsule types (draft-16 section 11.2)
 %%====================================================================
 
 -define(MASQUE_CAPSULE_COMPRESSION_ASSIGN, 16#11).
@@ -31,7 +31,7 @@
 -define(MASQUE_CAPSULE_COMPRESSION_CLOSE, 16#13).
 
 %%====================================================================
-%% IP Version field (draft-11 sections 3.1 and 4)
+%% IP Version field (draft-16 sections 3.1 and 4)
 %%====================================================================
 
 %% IP Version 0 marks an "uncompressed" registration: the

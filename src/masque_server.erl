@@ -400,7 +400,7 @@ map_init_error(_) ->
     resolution_failed.
 
 %% `AcceptBind' is the listener-level switch for Connect-UDP-Bind
-%% (draft-ietf-masque-connect-udp-listen-11). When true, the
+%% (draft-ietf-masque-connect-udp-listen-16). When true, the
 %% `connect-udp' branch additionally inspects the
 %% `Connect-UDP-Bind' request header and routes to the bind matcher
 %% on `?1'. When false (the default), the header is ignored and
@@ -435,7 +435,7 @@ validate(
 
 %% Read `Connect-UDP-Bind' first; on `?1' use the bind matcher
 %% which accepts the percent-encoded `*' wildcard. Otherwise fall
-%% through to the existing CONNECT-UDP path. Per draft-11, an
+%% through to the existing CONNECT-UDP path. Per draft-16, an
 %% invalid value is treated as absent.
 match_udp_or_bind(Path, Headers, Template) ->
     case masque_uri_udp_bind:parse_bind_header(Headers) of

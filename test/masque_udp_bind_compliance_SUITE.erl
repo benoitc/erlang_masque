@@ -1,5 +1,5 @@
 %%% @doc Compliance tests for Connect-UDP-Bind
-%%% (draft-ietf-masque-connect-udp-listen-11). End-to-end coverage
+%%% (draft-ietf-masque-connect-udp-listen-16). End-to-end coverage
 %%% over h3: a real listener with `accept_bind => true', a real
 %%% `masque:bind_connect/3' client, an echo upstream peer.
 -module(masque_udp_bind_compliance_SUITE).

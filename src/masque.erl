@@ -41,7 +41,7 @@ versions.
     ip_info/1
 ]).
 
-%% Connect-UDP-Bind (draft-ietf-masque-connect-udp-listen-11) client API.
+%% Connect-UDP-Bind (draft-ietf-masque-connect-udp-listen-16) client API.
 -export([
     bind_connect/3,
     send_to/3,
@@ -879,7 +879,7 @@ ip_info(Sess) when is_pid(Sess) ->
 
 %%====================================================================
 %% Connect-UDP-Bind client API
-%% (draft-ietf-masque-connect-udp-listen-11)
+%% (draft-ietf-masque-connect-udp-listen-16)
 %%====================================================================
 
 -doc """
@@ -950,7 +950,7 @@ assign_compression(Sess, Peer) when is_pid(Sess) ->
 
 -doc """
 Open the singleton uncompressed (IP Version 0) context.
-Client-only per draft-11.
+Client-only per draft-16.
 """.
 -spec open_uncompressed_context(session()) ->
     {ok, pos_integer()} | {error, term()}.

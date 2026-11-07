@@ -1,5 +1,5 @@
 %%% Per-tunnel server session for Connect-UDP-Bind
-%%% (draft-ietf-masque-connect-udp-listen-11). Sibling of
+%%% (draft-ietf-masque-connect-udp-listen-16). Sibling of
 %%% `masque_server_session` / `masque_h2_server_session`; one module
 %%% serves both h2 and h3 by dispatching on a `transport` field, the
 %%% same shape used by `masque_ip_server_session`.
@@ -323,6 +323,9 @@ handle_cast_inner(_Msg, S) ->
 handle_info(Msg, State) ->
     masque_quiet:stop(handle_info_inner(Msg, State)).
 
+%% A capsule write that never drained (`control_send/4').
+handle_info_inner({masque_control_send_failed, Reason}, S) ->
+    {stop, {control_send_failed, Reason}, S};
 handle_info_inner({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
     case masque_idle:check(Ref, Idle) of
         expired -> {stop, idle_timeout, S};
@@ -458,9 +461,10 @@ handle_context_zero(Inner, #state{bind_scope = scoped} = S) ->
     %% defer to handle_packet/2 if exported (legacy UDP semantics).
     dispatch(handle_packet, [Inner], S);
 handle_context_zero(_Inner, S) ->
-    %% Unscoped: malformed; per draft-11 we drop.
+    %% Unscoped: draft -16 section 3, the recipient MUST abort the
+    %% request stream.
     masque_metrics:bind_drop_inc(context_zero),
-    {noreply, S}.
+    reset_and_stop(context_zero_datagram, S).
 
 %% Contexts are two-way: a datagram may use one the client opened
 %% (peer table) or an installed one we opened (own table).
@@ -489,7 +493,7 @@ handle_known_context(Ctx, Inner, #state{} = S) ->
             Peer = {A, P},
             handle_bind_to_peer(Peer, Inner, S);
         not_found ->
-            %% Unknown context ID. Per draft-11 sections 4 and 5
+            %% Unknown context ID. Per draft-16 sections 4 and 5
             %% these arrive on a context the peer never installed:
             %% drop.
             masque_metrics:bind_drop_inc(unknown_context),
@@ -604,7 +608,37 @@ dispatch_capsule(Type, Value, S) ->
     %% silently drop per RFC 9297.
     dispatch(handle_capsule, [Type, Value], S).
 
-handle_peer_assign(Assign, #state{own_table = OT} = S) ->
+handle_peer_assign(Assign, S0) ->
+    case allow_peer(Assign, S0) of
+        {true, S} -> install_peer_assign(Assign, S);
+        {false, S} -> reject_peer_assign(Assign, peer_refused, S)
+    end.
+
+%% Draft -16 section 9: a registration to a target the handler refuses
+%% is rejected, so a compressed context cannot reach it.
+allow_peer(#compression_assign{ip_version = 0}, S) ->
+    {true, S};
+allow_peer(#compression_assign{address = IP, port = Port}, #state{handler = H, h_state = HS} = S) ->
+    case exported(H, allow_peer, 2) of
+        true ->
+            case safe_apply(H, allow_peer, [{IP, Port}, HS]) of
+                {Allowed, HS2} when is_boolean(Allowed) -> {Allowed, S#state{h_state = HS2}};
+                _ -> {false, S}
+            end;
+        false ->
+            {true, S}
+    end.
+
+%% Sections 3.1 and 9: reject with COMPRESSION_CLOSE; the id stays
+%% closed.
+reject_peer_assign(#compression_assign{context_id = Id}, _Why, #state{peer_table = PT} = S) ->
+    masque_metrics:bind_drop_inc(assign_rejected),
+    send_capsule_bytes(
+        iolist_to_binary(masque_compression_capsule:encode(#compression_close{context_id = Id})),
+        S#state{peer_table = masque_compression_table:reject(PT, Id)}
+    ).
+
+install_peer_assign(Assign, #state{own_table = OT} = S) ->
     case masque_compression_table:install(S#state.peer_table, Assign, OT) of
         {ok, T2} ->
             ack_peer_assign(
@@ -625,8 +659,11 @@ handle_peer_assign(Assign, #state{own_table = OT} = S) ->
                 ),
                 S3
             );
-        {error, _} ->
-            reset_and_stop(malformed_capsule, S)
+        {error, Why} ->
+            case masque_compression_table:refusal(Why) of
+                reject -> reject_peer_assign(Assign, Why, S);
+                malformed -> reset_and_stop(malformed_capsule, S)
+            end
     end.
 
 ack_peer_assign(Id, S) ->
@@ -851,8 +888,9 @@ send_datagram(Ctx, Inner, #state{transport = h2} = S) ->
     %% session pattern).
     Inner1 = iolist_to_binary(masque_datagram:encode(Ctx, Inner)),
     Cap = h2_capsule:encode(datagram, Inner1),
-    {noreply, S2} = send_capsule_bytes(Cap, S),
-    S2.
+    _ = h2:send_data(S#state.conn, S#state.stream_id, Cap),
+    masque_metrics:bytes_out(iolist_size(Inner), #{protocol => udp_bind, transport => h2}),
+    S.
 
 %% Open an own-table mapping for a peer and announce it. Dropped when
 %% `max_pending' assigns already wait for a response, or after the
@@ -923,7 +961,7 @@ send_capsule_bytes(
         stream_id = Sid
     } = S
 ) ->
-    _ = quic_h3:send_data(C, Sid, Bytes, false),
+    _ = control_send(h3, C, Sid, Bytes),
     masque_metrics:bytes_out(
         byte_size(Bytes),
         #{protocol => udp_bind, transport => h3}
@@ -937,12 +975,26 @@ send_capsule_bytes(
         stream_id = Sid
     } = S
 ) ->
-    _ = h2:send_data(C, Sid, Bytes),
+    _ = control_send(h2, C, Sid, Bytes),
     masque_metrics:bytes_out(
         byte_size(Bytes),
         #{protocol => udp_bind, transport => h2}
     ),
     {noreply, S}.
+
+%% Capsules on the request stream (COMPRESSION_ACK, _CLOSE, _ASSIGN)
+%% wait for the transport instead of being dropped on a full send queue
+%% (`masque_stream_send'). Draft -16 section 9 bounds the responses an
+%% endpoint buffers and aborts the stream at the limit: a write that
+%% does not drain within its timeout ends the session.
+control_send(T, C, Sid, Bytes) ->
+    case masque_stream_send:send(T, C, Sid, Bytes, false) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            self() ! {masque_control_send_failed, Reason},
+            ok
+    end.
 
 %%====================================================================
 %% Transport-specific glue

@@ -437,7 +437,7 @@ validate_upgrade(Path, Headers, UdpTemplate, IpTemplate, AcceptBind) ->
     end.
 
 %% When the listener has bind enabled, the bind matcher is tried
-%% against the same UDP template (per draft-11 the URI is shared)
+%% against the same UDP template (per draft-16 the URI is shared)
 %% only when the Connect-UDP-Bind: ?1 header is present.
 match_udp_or_bind_path(Path, Headers, Template) ->
     case masque_uri_udp_bind:parse_bind_header(Headers) of

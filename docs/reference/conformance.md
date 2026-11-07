@@ -133,18 +133,27 @@ Deviations and open points:
 - The TLS early data options of §4.1 are all optional, and masque does nothing specific for them: whether early data is used is left to the transport options. `RESET_STREAM_AT` (§3.5) is not used.
 - Happy Eyeballs applies to the default resolver and to a `resolver` that returns a list; with `family` set, only that family is dialed.
 
-## draft-ietf-masque-connect-udp-listen-11 (Connect-UDP-Bind)
+## draft-ietf-masque-connect-udp-listen-16 (Connect-UDP-Bind)
+
+masque implements draft -16 (August 2026, submitted for publication). Codes, headers and payload formats are the same as in -11; -16 tightens the rules below.
 
 | Requirement | Behaviour in masque | Module |
 | --- | --- | --- |
-| `Connect-UDP-Bind: ?1` (RFC 9651 Boolean) on request and response enables the extension | Listeners only look at the header with `accept_bind => true`; an invalid value is treated as absent and the request stays plain CONNECT-UDP. The client refuses a 2xx without it (`missing_bind_response_header`). | `masque_uri_udp_bind`, listeners, udp-bind client sessions |
-| Same URI template as CONNECT-UDP; `*` for an unscoped bind | The bind matcher accepts `%2A` for both host and port (both or neither); the plain CONNECT-UDP matcher still refuses it. | `masque_uri_udp_bind` |
+| §6: `Connect-UDP-Bind: ?1` (RFC 9651 Boolean) on request and response enables the extension | Listeners only look at the header with `accept_bind => true`; an invalid value is treated as absent and the request stays plain CONNECT-UDP. Unknown parameters are ignored (`?1;x` enables it); a field sent more than once, or a list, is ignored. The client refuses a 2xx without it (`missing_bind_response_header`). | `masque_uri_udp_bind`, listeners, udp-bind client sessions |
+| §2: same URI template as CONNECT-UDP; `*` for an unscoped bind; only one `*` is malformed (4xx, SHOULD be 400) | The bind matcher accepts `%2A` for both host and port; one alone gets 400. The plain CONNECT-UDP matcher still refuses `*`. | `masque_uri_udp_bind` |
 | `Proxy-Public-Address` on the response (list of `"ip:port"` strings) | The default handler sets it from `public_addresses`, `public_address_fun` or the bound socket address, and refuses a wildcard bind without one. The client refuses a 2xx without it (`missing_proxy_public_address`). | `masque_udp_bind_proxy_handler`, `masque_uri_udp_bind` |
 | Payload formats (sections 4 and 5): compressed = UDP payload only; uncompressed = family, address, port, payload | As stated. | `masque_udp_bind_payload` |
-| Context id 0 | Scoped bind: raw UDP to the scoped peer, as in RFC 9298. Unscoped bind: dropped (`context_zero`). | `masque_udp_bind_server_session` |
+| §3: context id 0 | Scoped bind: raw UDP to the scoped peer, as in RFC 9298. Unscoped bind: the request stream is aborted (`context_zero_datagram`), on the proxy and on the client. | udp-bind sessions |
 | COMPRESSION_ASSIGN / ACK / CLOSE capsules | Codes `0x11`, `0x12`, `0x13` (provisional). Context id 0 is malformed; IP version 0 omits address and port. | `masque_compression_capsule` |
-| Context id parity, duplicates, tuple conflicts, uncompressed context rules | Client ids even, proxy ids odd; wrong parity or a duplicate id is malformed; a tuple the other side already opened makes the proxy close its own context; a repeated tuple from the same side is malformed; only the client opens the single uncompressed context; after it closes, the proxy opens no new compressed contexts. | `masque_compression_table` |
+| §3.1, §4: context id parity, duplicates, tuple conflicts, uncompressed context rules | Client ids even, proxy ids odd; wrong parity or a duplicate id is malformed; when both sides opened a tuple, the proxy-opened context is closed (by either side); a repeated tuple from the same side is malformed; only the client opens the single uncompressed context; after it closes, the proxy opens no new compressed contexts, and the ones opened before stay. A malformed capsule aborts the stream. | `masque_compression_table`, udp-bind sessions |
+| §3.1, §9: accept or reject each COMPRESSION_ASSIGN | Accepted: COMPRESSION_ACK. Rejected with COMPRESSION_CLOSE, the stream staying open: beyond the context limit (`max_compression_contexts`, default 1024), a family the proxy did not advertise, or a peer the handler refuses (`allow_peer/2`; the default handler applies its scope, peer filter and `allow`). | udp-bind sessions, `masque_udp_bind_proxy_handler` |
+| §3.3: a closed id is never reused; datagrams on a closed context are discarded | A COMPRESSION_ASSIGN for a closed or rejected id is malformed; late datagrams are dropped. | `masque_compression_table`, udp-bind sessions |
+| §9: bound buffering of compression responses; abort at the limit | Compression capsules wait for the transport (h3 retry on `send_ready`, h2 flow control, h1 send timeout) instead of being dropped; one that does not drain in 30 s ends the session (`control_send_failed`). | udp-bind sessions, `masque_stream_send` |
 | Datagram on an unknown context | Dropped (`unknown_context`). | udp-bind sessions |
+
+Deviations and policy:
+- Reuse of a closed id is detected for the last 64 closed or rejected ids of each table, so memory stays bounded; an older id reused is accepted as new.
+- The client side of the -16 rules (context 0 abort, reject vs malformed) is covered by unit tests and code review; the wire vectors (`masque_udp_bind_vectors_SUITE`) drive the proxy, since masque's own proxy never sends the invalid input.
 
 Library policy, not required by the draft:
 - An outbound context is only used after its COMPRESSION_ACK (wait-for-ACK). The draft allows sending earlier at the risk of drops.

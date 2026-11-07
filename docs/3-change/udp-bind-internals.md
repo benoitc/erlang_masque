@@ -1,6 +1,6 @@
 # Connect-UDP-Bind internals
 
-This page explains the proxy-side state of Connect-UDP-Bind (draft-ietf-masque-connect-udp-listen-11): the two compression tables, the bind socket, and the peer filter. Read it before you change `masque_compression_table`, the udp-bind sessions or `masque_udp_bind_proxy_handler`. For the user view see [connect-udp-bind](../2-use/connect-udp-bind.md); for the term "compression context" see [concepts](../1-understand/concepts.md#compression-context).
+This page explains the proxy-side state of Connect-UDP-Bind (draft-ietf-masque-connect-udp-listen-16): the two compression tables, the bind socket, and the peer filter. Read it before you change `masque_compression_table`, the udp-bind sessions or `masque_udp_bind_proxy_handler`. For the user view see [connect-udp-bind](../2-use/connect-udp-bind.md); for the term "compression context" see [concepts](../1-understand/concepts.md#compression-context).
 
 ## Pieces
 
