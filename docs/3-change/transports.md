@@ -81,6 +81,7 @@ Assumptions:
 - `settings` must carry `enable_connect_protocol => 1` and `h3_datagram => 1` (`merged_settings/1` in `masque_server`).
 - In server role, body bytes of a stream nobody claimed are buffered by `quic_h3` (bounded by `max_buffered_body`; overflow resets that stream with `H3_EXCESSIVE_LOAD`). `set_stream_handler/4` with `drain_buffer => false` replays them to the new handler as messages. The default, `drain_buffer => true`, returns them in the reply instead.
 - `send_data/4` returns `{error, send_queue_full}` when the stream's queue is full.
+- `send_response/4` with a 1xx status sends it at once as an interim response, and the final response can follow (CONNECT-TCP `100 Continue`). In client role, interim responses arrive as `{response, Sid, Status, Headers}` with `Status` below 200, followed by the final one.
 - QUIC closes a connection after 30 s without received packets (`idle_timeout`). Every masque client and listener sets `keep_alive_interval => auto`, so a tunnel lasts until the session idle timer ends it. Only received packets restart the QUIC timer, so a vanished peer still times out.
 
 Messages to the connection owner (router, pooled upstream owner, or client session):
@@ -111,13 +112,14 @@ Assumptions:
 - `set_stream_handler/3` replays events that arrived before the claim as messages and returns `ok` (`drain_buffer` defaults to `false`, the opposite of `quic_h3`). The h2 udp and ip sessions still also accept the `{ok, Chunks}` reply of `drain_buffer => true`; the tcp and udp-bind sessions ignore any chunks, which is safe only while the default stays `false`.
 - On connection teardown and on GOAWAY, `h2` sends the event to every registered stream handler as well as the owner.
 - `h2_capsule:decode/1` returns the DATAGRAM type as the atom `datagram`.
+- `send_response/4` with 100 sends an interim HEADERS frame and the stream accepts the final response after it; h2 0.12.5 has no separate call for interim responses. In client role they arrive as `{informational, Sid, Status, Headers}`.
 - `get_peer_settings/1` exposes `enable_connect_protocol` and `max_concurrent_streams` (which may be `unlimited`).
 
 Messages to a stream handler or owner: `{h2, C, {data, Sid, Data, Fin}}`, `{h2, C, {stream_reset, Sid, Code}}`, `{h2, C, {response, Sid, Status, Headers}}` (client), `{h2, C, {closed, Reason}}`, `{h2, C, {goaway, LastId, Code}}`.
 
 ### h1 (package `erlang_h1`)
 
-Server calls: `h1:start_server/3` (`transport => ssl`, `cert`, `key`, `handler`, `acceptors`), `stop_server/1`, `send_response/4`, `send_data/4`, `close/1` for rejects, `h1:accept_upgrade/3` returning `{ok, Socket, Buffer}` and `h1:accept_connect/3` returning `{ok, Transport, Socket, Buffer}`, then `h1_upgrade:send_capsule/4` and `h1_capsule:decode/1` on the raw socket.
+Server calls: `h1:start_server/3` (`transport => ssl`, `cert`, `key`, `handler`, `acceptors`), `stop_server/1`, `send_response/4`, `send_data/4`, `close/1` for rejects, `h1:send_informational/4` for `100 Continue` (`h1:continue/2` does not apply, since h1 does not record `Expect` on upgrade and CONNECT requests), `h1:accept_upgrade/3` returning `{ok, Socket, Buffer}` and echoing the request's `Upgrade` token in the 101, and `h1:accept_connect/3` returning `{ok, Transport, Socket, Buffer}`, then `h1_upgrade:send_capsule/4` and `h1_capsule:decode/1` on the raw socket.
 
 Client calls: `h1_client:connect/3`, `h1:wait_connected/2`, `h1:upgrade/4` returning `{ok, Sid, Socket, Buffer, RespHeaders}`.
 

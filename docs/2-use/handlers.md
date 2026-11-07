@@ -97,6 +97,7 @@ Actions run in list order. Unknown actions are ignored. A closing action ends th
 | `headers` | always | All request headers, `[{binary(), binary()}]`. |
 | `handler_opts` | always | The listener's merged `handler_opts` (also the second argument of `init/2`). |
 | `target_host`, `target_port` | UDP, TCP, udp-bind | Decoded from the path. `'*'` for both on an unscoped bind. |
+| `tcp_framing`, `tcp_version` | TCP | `raw` or `capsule`, and the capsule codes in use: `final` (`0x08`, `0x09`) or `provisional` (drafts -09 and -10). In capsule framing a handler should treat its own timeouts as aborts. |
 | `bind` | udp-bind | `scoped` or `unscoped`. |
 | `ip_target`, `ip_ipproto` | IP | `'*'`, an address, `{Version, Address, PrefixLen}` or a host name binary; `'*'` or `0..255`. |
 | `resolved_addresses` | IP | The listener resolver's answer for a host name target, the address itself for an address target, `[]` otherwise. |
@@ -115,7 +116,7 @@ On h3 the router asks the session to finalize once `init/2` returned. Messages t
 
 The tunnel ends when a callback returns `{stop, Reason, S}`, an action closes it, the client ends or resets the stream, or the connection goes away. `terminate/2` is then called with the reason. Reasons you will see: `normal`, `peer_reset`, `peer_closed` (h2 and h1), `connection_closed` and `router_gone` (h3), `idle_timeout` (h1), `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow`, `{tunnel_send_failed, _}` (TCP), and whatever your own callbacks returned.
 
-What the client sees depends on the reason. `normal` (and, for CONNECT-TCP, `target_closed` and `eof_timeout`) ends the stream with FIN. A reason that comes from the client or the connection (`peer_reset`, `peer_closed`, `connection_closed`, `router_gone`) sends nothing. Any other reason resets the stream with an error code, so the client can tell a clean close from a failure; CONNECT-IP sessions are the exception and end the stream with FIN for every reason except a handler crash. On h1 the socket is closed.
+What the client sees depends on the reason. `normal` (and, for CONNECT-TCP, `target_closed` and `eof_timeout`) ends the stream with FIN; in CONNECT-TCP capsule framing the FIN follows `FINAL_DATA`, and `eof_timeout` resets the stream instead, since the draft treats a local timeout as an abort. A reason that comes from the client or the connection (`peer_reset`, `peer_closed`, `connection_closed`, `router_gone`) sends nothing. Any other reason resets the stream with an error code, so the client can tell a clean close from a failure; CONNECT-IP sessions are the exception and end the stream with FIN for every reason except a handler crash. On h1 the socket is closed.
 
 ## What a crash does
 

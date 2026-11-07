@@ -66,9 +66,27 @@ This page records design decisions that are visible in the code, with the reason
 
 ### CONNECT-TCP over h1 cannot half-close
 
-- **Decision.** A FIN in either direction ends an h1 CONNECT-TCP tunnel.
+- **Decision.** In raw framing, a FIN in either direction ends an h1 CONNECT-TCP tunnel. Capsule framing (draft -18) carries the FIN in `FINAL_DATA` and can half-close.
 - **Why.** "OTP `ssl` drops the connection on the peer's close_notify, so a TLS tunnel cannot half-close" (comment in `masque_tcp_h1_server_session`, CHANGELOG).
 - **Where.** `masque_tcp_h1_server_session`, `masque_tcp_h1_client_session`.
+
+### CONNECT-TCP h1 aborts keep `close_notify`
+
+- **Decision.** An aborted capsule tunnel on h1 closes TLS with `close_notify`, where the draft asks for a close without it. Peers detect the abort by the missing `FINAL_DATA`.
+- **Why.** OTP `ssl` has no call that closes a connection without sending `close_notify`, and the missing `FINAL_DATA` already tells a capsule peer.
+- **Where.** `masque_tcp_h1_server_session`, `masque_tcp_h1_client_session`; listed as a deviation in [conformance](../reference/conformance.md).
+
+### CONNECT-TCP h1 clients fall back from classic CONNECT
+
+- **Decision.** An h1 client in raw framing that gets 501, or 426 with `Upgrade: connect-tcp`, retries once in capsule framing on the default template, and remembers the proxy by host and port in an ETS table owned by `masque_sup`.
+- **Why.** draft-ietf-httpbis-connect-tcp-18 section 5.2 makes both the retry and the remembered preference a SHOULD. The retry only follows a refusal, so a proxy that accepts classic CONNECT sees no change.
+- **Where.** `do_connect/2` in `masque_tcp_h1_client_session`, `masque_sup`.
+
+### CONNECT-TCP capsule behaviour stays with capsule framing
+
+- **Decision.** What draft -18 changes beyond the framing (the automatic `100 Continue`, Happy Eyeballs, 403 and 504 for refusals and timeouts, aborts on local timeouts) applies to capsule-framed tunnels only. Raw tunnels behave as before.
+- **Why.** New behaviour is additive: raw clients of the earlier revisions keep the responses and dialing they were built against.
+- **Where.** `masque_tcp_server_session`, `masque_tcp_h1_server_session`, `masque_tcp_proxy_handler`, which reads `tcp_framing` from the request.
 
 ### Tunnel writes block instead of dropping (CONNECT-TCP)
 
@@ -187,7 +205,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q7.** Settled: `masque.tunnels.*` covers every protocol and transport; each server session reports one open and one close.
 - **Q8.** How stable are internal message shapes (`masque_datagram_in`, `masque_finalized`, `dial_result`, `owner_capacity`)?
 - **Q9.** Versioning: the 0.6.0 CHANGELOG entry and the v0.5/v0.6 tags are missing; is hex publishing planned?
-- **Q10.** Which connect-tcp draft revision is targeted?
+- **Q10.** Settled: masque speaks draft-ietf-httpbis-connect-tcp-18 in capsule framing, the provisional codes of drafts -09 and -10 behind their tokens, and the earlier raw framing, raw by default on the client (see [connect-tcp](../2-use/connect-tcp.md#two-framings)). In capsule framing the client sends `connect-tcp`, the registered name, rather than the draft's interop token `connect-tcp-12` (maintainer's decision, 2026-11-07); `tcp_protocol` picks another. Switching the default framing is a later decision.
 - **Q11.** Settled: udp-bind is never pooled; `upstream_pool` is ignored and no pooled connection is checked out.
 - **Q12.** Is `masque_capsule` meant to become the single capsule codec? Today `quic_h3_capsule` (through `masque_capsule`), `h2_capsule` and `h1_capsule` are all used.
 - **Q13.** Settled: [a handler crash ends the tunnel](#a-handler-crash-ends-the-tunnel).

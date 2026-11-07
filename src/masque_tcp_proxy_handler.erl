@@ -57,7 +57,10 @@ Accepts the same policy hooks as the UDP proxy (`allow`, `resolver`,
     %% The client sent FIN (we shut down our write side).
     write_closed = false :: boolean(),
     %% The target sent FIN.
-    read_closed = false :: boolean()
+    read_closed = false :: boolean(),
+    %% Capsule framing (draft-ietf-httpbis-connect-tcp-18): a local
+    %% timeout aborts the target instead of closing it (section 3.5).
+    capsule = false :: boolean()
 }).
 
 %%====================================================================
@@ -74,46 +77,53 @@ accept(#{target_host := Host, target_port := Port} = Req) ->
     end.
 
 -spec init(masque_handler:req(), term()) -> {ok, #state{}} | {stop, term()}.
-init(#{target_host := Host, target_port := Port}, Opts) ->
-    ResolverFun = maps:get(resolver, Opts, fun default_resolver/1),
+init(#{target_host := Host, target_port := Port} = Req, Opts) ->
     FamilyOpt = maps:get(family, Opts, auto),
+    Capsule = maps:get(tcp_framing, Req, raw) =:= capsule,
+    %% Capsule framing races the target's address families (section
+    %% 4.1); raw framing dials the first address, as before.
+    Race = Capsule andalso FamilyOpt =:= auto,
+    ResolverFun = maps:get(resolver, Opts, resolver_for(Race)),
     ConnTimeout = maps:get(connect_timeout, Opts, 5000),
     AllowPrivate = maps:get(allow_private, Opts, false),
     ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
-    case resolve(ResolverFun, Host) of
-        {ok, IP} ->
-            case target_allowed(IP, AllowPrivate, Opts) of
+    case resolve(ResolverFun, Host, Race) of
+        {ok, IPs} ->
+            case allowed(IPs, AllowPrivate, Opts) of
                 {error, Why} ->
-                    {stop, {resolution_failed, Why}};
-                ok ->
-                    TcpOpts = [
-                        binary,
-                        {active, ActiveN},
-                        %% Report a target RST as `{tcp_error, _,
-                        %% econnreset}' so the tunnel is reset rather
-                        %% than closed cleanly.
-                        {show_econnreset, true},
-                        %% Keep the socket writable after the target's
-                        %% FIN so the tunnel can half-close.
-                        {exit_on_close, false},
-                        %% A target that stops reading ends the tunnel
-                        %% after 30 s instead of blocking it forever.
-                        {send_timeout, ?TARGET_SEND_TIMEOUT},
-                        {send_timeout_close, true},
-                        family(FamilyOpt, IP)
-                        | maps:get(socket_opts, Opts, [])
-                    ],
-                    case gen_tcp:connect(IP, Port, TcpOpts, ConnTimeout) of
+                    {stop, refused(Capsule, Why)};
+                {ok, Allowed} ->
+                    OptsFun = fun(IP) ->
+                        [
+                            binary,
+                            {active, ActiveN},
+                            %% Report a target RST as `{tcp_error, _,
+                            %% econnreset}' so the tunnel is reset rather
+                            %% than closed cleanly.
+                            {show_econnreset, true},
+                            %% Keep the socket writable after the target's
+                            %% FIN so the tunnel can half-close.
+                            {exit_on_close, false},
+                            %% A target that stops reading ends the tunnel
+                            %% after 30 s instead of blocking it forever.
+                            {send_timeout, ?TARGET_SEND_TIMEOUT},
+                            {send_timeout_close, true},
+                            family(FamilyOpt, IP)
+                            | maps:get(socket_opts, Opts, [])
+                        ]
+                    end,
+                    case dial(Allowed, Port, OptsFun, ConnTimeout, ActiveN) of
                         {ok, Socket} ->
                             {Writer, WriterRef} = start_writer(Socket),
                             {ok, #state{
                                 socket = Socket,
                                 writer = Writer,
                                 writer_ref = WriterRef,
-                                active_n = ActiveN
+                                active_n = ActiveN,
+                                capsule = Capsule
                             }};
                         {error, Reason} ->
-                            {stop, {resolution_failed, {tcp_connect, Reason}}}
+                            {stop, connect_failed(Capsule, Reason)}
                     end
             end;
         {error, Reason} ->
@@ -167,9 +177,9 @@ handle_info(_Other, State) ->
 %% reset or went away, a handler crash) aborts it with RST, so the
 %% target can tell an aborted tunnel from a finished one (RFC 9113
 %% sec 8.5, RFC 9114 sec 4.4).
-terminate(Reason, #state{socket = S, writer = Writer, writer_ref = Ref}) ->
+terminate(Reason, #state{socket = S, writer = Writer, writer_ref = Ref} = State) ->
     _ =
-        case clean_end(Reason) of
+        case clean_end(Reason, State) of
             true -> flush_writer(Writer, Ref);
             false -> inet:setopts(S, [{linger, {true, 0}}])
         end,
@@ -177,6 +187,9 @@ terminate(Reason, #state{socket = S, writer = Writer, writer_ref = Ref}) ->
     exit(Writer, kill),
     _ = gen_tcp:close(S),
     ok.
+
+clean_end(eof_timeout, #state{capsule = true}) -> false;
+clean_end(Reason, _State) -> clean_end(Reason).
 
 clean_end(normal) -> true;
 clean_end(target_closed) -> true;
@@ -279,11 +292,76 @@ target_allowed(IP, AllowPrivate, Opts) ->
 
 %% A listener-level `resolver' returns an address list (it is shared
 %% with CONNECT-IP); a handler-level one may return a single address.
-resolve(ResolverFun, Host) ->
+%% draft-ietf-httpbis-connect-tcp-18 section 4.2: a target the policy
+%% refuses is a 4xx (403), a connection that times out is commonly a
+%% 504. Raw framing keeps the earlier 502 for both.
+refused(true, _Why) -> {reject, forbidden};
+refused(false, Why) -> {resolution_failed, Why}.
+
+connect_failed(true, timeout) -> {reject, upstream_timeout};
+connect_failed(_Capsule, Reason) -> {resolution_failed, {tcp_connect, Reason}}.
+
+%% Every address when racing, the first one otherwise.
+resolve(ResolverFun, Host, Race) ->
     case ResolverFun(Host) of
-        {ok, [IP | _]} -> {ok, IP};
+        {ok, [_ | _] = IPs} when Race -> {ok, masque_tcp_dial:order(IPs)};
+        {ok, [IP | _]} -> {ok, [IP]};
         {ok, []} -> {error, nxdomain};
-        {ok, IP} when is_tuple(IP) -> {ok, IP};
+        {ok, IP} when is_tuple(IP) -> {ok, [IP]};
         {error, _} = Err -> Err;
         Other -> {error, {bad_resolver_result, Other}}
+    end.
+
+%% The addresses policy allows; the first refusal when none is.
+allowed(IPs, AllowPrivate, Opts) ->
+    Checked = [{IP, target_allowed(IP, AllowPrivate, Opts)} || IP <- IPs],
+    case [IP || {IP, ok} <- Checked] of
+        [] ->
+            [{_, Refused} | _] = Checked,
+            Refused;
+        Allowed ->
+            {ok, Allowed}
+    end.
+
+dial([IP], Port, OptsFun, Timeout, _ActiveN) ->
+    gen_tcp:connect(IP, Port, OptsFun(IP), Timeout);
+dial(IPs, Port, OptsFun, Timeout, ActiveN) ->
+    case masque_tcp_dial:connect(IPs, Port, OptsFun, Timeout) of
+        {ok, Socket} ->
+            case inet:setopts(Socket, [{active, ActiveN}]) of
+                ok ->
+                    {ok, Socket};
+                {error, _} = Err ->
+                    _ = gen_tcp:close(Socket),
+                    Err
+            end;
+        Error ->
+            Error
+    end.
+
+resolver_for(false) ->
+    fun default_resolver/1;
+resolver_for(true) ->
+    fun all_addresses/1.
+
+%% Both families, for Happy Eyeballs.
+all_addresses(Host) when is_binary(Host) ->
+    all_addresses(binary_to_list(Host));
+all_addresses(Host) ->
+    case inet_parse:address(Host) of
+        {ok, IP} ->
+            {ok, [IP]};
+        _ ->
+            V6 = getaddrs(Host, inet6),
+            V4 = getaddrs(Host, inet),
+            case V6 ++ V4 of
+                [] -> {error, nxdomain};
+                IPs -> {ok, IPs}
+            end
+    end.
+
+getaddrs(Host, Family) ->
+    case inet:getaddrs(Host, Family) of
+        {ok, IPs} -> IPs;
+        {error, _} -> []
     end.

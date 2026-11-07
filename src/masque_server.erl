@@ -398,7 +398,7 @@ validate(
                 ?MASQUE_CONNECT_IP_PROTOCOL ->
                     match_ip_path(Path, Headers, IpTemplate);
                 _ ->
-                    {error, bad_protocol}
+                    match_tcp_draft(Protocol, Path, Headers, TcpTemplate)
             end;
         _ ->
             {error, bad_method}
@@ -445,6 +445,19 @@ match_udp_or_bind(Path, Headers, Template) ->
             end;
         _ ->
             match_path(Path, Headers, Template, udp)
+    end.
+
+%% A CONNECT-TCP draft interop token (`connect-tcp-12', `-08', `-07')
+%% always means capsule framing, with the capsule codes of that draft.
+match_tcp_draft(Protocol, Path, Headers, TcpTemplate) ->
+    case masque_tcp_capsule:token_version(Protocol) of
+        {capsule, Version} ->
+            case match_path(Path, Headers, TcpTemplate, tcp) of
+                {ok, Req} -> {ok, Req#{tcp_framing => capsule, tcp_version => Version}};
+                Error -> Error
+            end;
+        _ ->
+            {error, bad_protocol}
     end.
 
 match_path(Path, Headers, Template, Protocol) ->
@@ -612,7 +625,9 @@ handler_opt_keys() ->
         max_compression_contexts,
         max_compression_contexts_in,
         max_compression_contexts_out,
-        max_pending_compression_responses
+        max_pending_compression_responses,
+        %% CONNECT-TCP framing on h3 and h2: auto, raw or capsule
+        tcp_framing
     ].
 
 %% Listener names are shared by the drain flags of every transport, so

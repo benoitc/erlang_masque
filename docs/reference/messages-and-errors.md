@@ -56,6 +56,7 @@ When `transports` lists more than one transport, the session first belongs to a 
 | `goaway` | The proxy sent GOAWAY and this stream was not going to be processed (h3: stream id at or above the GOAWAY id; h2: above the last stream id). Lower streams keep running. | h2/h3 |
 | `{ssl_error, Reason}` | TLS socket error on the upgraded h1 connection. | h1 |
 | `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` | The proxy sent a bad capsule, ended the stream mid-capsule, or a capsule larger than `max_capsule_size` (default 65536). The session resets the stream. | UDP and IP on h2/h3 |
+| `{bad_capsule, data_after_final}`, `{bad_capsule, truncated_capsule}` | CONNECT-TCP in capsule framing: the proxy sent `DATA` or `FINAL_DATA` after `FINAL_DATA`, or ended the stream inside a capsule. The tunnel is aborted. | TCP, all |
 
 udp-bind sessions report differently: they send `{masque_closed, Sess, Reason}` from `terminate/3` whenever they stop in `message` mode, with the process exit reason. A clean end (the proxy's FIN, or your own `masque:close/1`) arrives as `normal`; other values include `peer_reset`, `peer_closed`, `goaway`, `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` and `{ssl_error, _}`. A failed handshake is only reported as the `{error, _}` returned by `bind_connect/3`; no `masque_closed` follows it.
 
@@ -187,6 +188,7 @@ These are the reasons a server session process stops with. They are passed to th
 | `router_gone` | the h3 router died |
 | `peer_reset`, `peer_closed` | the client reset the stream or closed the connection |
 | `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` | bad capsule from the client; the stream was reset (`H3_MESSAGE_ERROR` on h3, `PROTOCOL_ERROR` on h2) before stopping |
+| `{bad_capsule, data_after_final}`, `{bad_capsule, truncated_capsule}` | CONNECT-TCP in capsule framing: the client sent `DATA` or `FINAL_DATA` after `FINAL_DATA`, or ended the stream inside a capsule. The stream is reset (`H3_CONNECT_ERROR`, `CONNECT_ERROR`, or on h1 the connection closed without `FINAL_DATA`) and the target gets an RST |
 | `stream_dead` | h3: the 2xx or the stream claim failed during finalize |
 | `idle_timeout` | no traffic in either direction for `idle_timeout_ms` in `handler_opts` (default 300000), every transport |
 | `{tunnel_send_failed, R}` | CONNECT-TCP: a write to the client failed or stayed blocked for 30 s |
@@ -198,14 +200,14 @@ What goes on the wire:
 
 - `normal`: FIN on every protocol.
 - `peer_reset`, `peer_closed`, `connection_closed`, `router_gone`: nothing more; the stream or connection is already gone.
-- Any other reason depends on the session: CONNECT-UDP resets the stream (`H3_MESSAGE_ERROR` on h3, `PROTOCOL_ERROR` on h2); CONNECT-TCP sends FIN for `target_closed` and `eof_timeout` and resets with `H3_CONNECT_ERROR` / `CONNECT_ERROR` otherwise; CONNECT-IP sends FIN; udp-bind resets with `H3_INTERNAL_ERROR` / `INTERNAL_ERROR`. On h1 the session closes the TLS connection.
+- Any other reason depends on the session: CONNECT-UDP resets the stream (`H3_MESSAGE_ERROR` on h3, `PROTOCOL_ERROR` on h2); CONNECT-TCP sends FIN (preceded by `FINAL_DATA` in capsule framing) for `target_closed` and `eof_timeout` and resets with `H3_CONNECT_ERROR` / `CONNECT_ERROR` otherwise, except that in capsule framing `eof_timeout` resets too; CONNECT-IP sends FIN; udp-bind resets with `H3_INTERNAL_ERROR` / `INTERNAL_ERROR`. On h1 the session closes the TLS connection.
 
 Reasons used by the built-in handlers:
 
 | Handler | Reasons |
 | --- | --- |
 | `masque_udp_proxy_handler` | `{resolution_failed, private_address}`, `{resolution_failed, {resolve, R}}`, `{resolution_failed, {connect, R}}`, `{resolution_failed, {udp_open, R}}` (from `init/2`); `{target_socket_lost, R}`, `{target_socket_error, R}`, `target_socket_closed` |
-| `masque_tcp_proxy_handler` | `{resolution_failed, private_address}`, `{resolution_failed, {resolve, R}}`, `{resolution_failed, {tcp_connect, R}}` (from `init/2`); `target_closed`, `{target_error, R}`, `eof_timeout` (a half-closed tunnel idle for 30 s) |
+| `masque_tcp_proxy_handler` | `{resolution_failed, private_address}`, `{resolution_failed, {resolve, R}}`, `{resolution_failed, {tcp_connect, R}}` (from `init/2`, all 502); in capsule framing a policy refusal is `{reject, forbidden}` (403) and a connect timeout `{reject, upstream_timeout}` (504) instead; `target_closed`, `{target_error, R}`, `eof_timeout` (a half-closed tunnel idle for 30 s) |
 | `masque_udp_bind_proxy_handler` | `{udp_open, R}` (from `init/2`); `{bind_socket_error, R}`, `bind_socket_closed` |
 | `masque_chain_handler` | `{resolution_failed, {upstream, R}}` or `{reject, loop_detected}` (from `init/2`); `upstream_closed` |
 

@@ -56,7 +56,16 @@
     %% The handler kept the last chunk's credit (`hold_credit').
     hold = false :: boolean(),
     %% Bytes whose credit the handler has yet to release.
-    held = 0 :: non_neg_integer()
+    held = 0 :: non_neg_integer(),
+    %% `raw' bytes (older connect-tcp drafts) or `capsule' framing
+    %% (draft-ietf-httpbis-connect-tcp-18), chosen by the request.
+    framing = raw :: raw | capsule,
+    %% Capsule mode: which capsule codes, and the decoder of the
+    %% client's capsules.
+    version = final :: masque_tcp_capsule:version(),
+    dec :: masque_tcp_capsule:decoder() | undefined,
+    %% Capsule mode: the client sent FINAL_DATA.
+    final_in = false :: boolean()
 }).
 
 %%====================================================================
@@ -108,7 +117,7 @@ start(
         transport := Transport,
         handler := Handler,
         handler_opts := HOpts,
-        req := Req
+        req := Req0
     } = Args
 ) ->
     process_flag(trap_exit, true),
@@ -118,6 +127,11 @@ start(
             {ok, Router} -> erlang:monitor(process, Router);
             error -> undefined
         end,
+    {Framing, Version} = framing(Req0, HOpts),
+    %% The handler learns the framing: in capsule mode a local timeout
+    %% must abort the target (section 3.5).
+    Req = Req0#{tcp_framing => Framing, tcp_version => Version},
+    ok = continue(Transport, Conn, StreamId, Framing, Req),
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, Actions} ->
             State = #state{
@@ -126,6 +140,9 @@ start(
                 transport = Transport,
                 handler = Handler,
                 idle_ms = maps:get(idle_timeout_ms, HOpts, ?DEFAULT_IDLE_MS),
+                framing = Framing,
+                version = Version,
+                dec = masque_tcp_capsule:decoder(Version),
                 h_state = HState,
                 req = Req,
                 router_ref = RouterRef
@@ -136,7 +153,7 @@ start(
                     {ok, State#state{pending_actions = Actions}};
                 false ->
                     %% H2 path: immediate finalize
-                    case send_response(State, 200, []) of
+                    case send_response(State, 200, response_headers(State)) of
                         ok ->
                             case claim_stream(State) of
                                 {error, _} ->
@@ -152,6 +169,42 @@ start(
             {stop, Reason}
     end.
 
+%% A draft interop token fixed the framing and codes in the listener;
+%% for plain `connect-tcp' the listener's `tcp_framing' and the
+%% request's headers decide, and capsules use the permanent codes.
+framing(#{tcp_framing := capsule, tcp_version := Version}, _HOpts) ->
+    {capsule, Version};
+framing(Req, HOpts) ->
+    Framing = masque_tcp_capsule:request_framing(
+        maps:get(tcp_framing, HOpts, auto), maps:get(headers, Req, [])
+    ),
+    {Framing, final}.
+
+%% draft-ietf-httpbis-connect-tcp-18 section 4.3: the proxy confirms an
+%% accepted request with `100 Continue' before dialing the target, which
+%% can take long when the target does not answer. Raw framing keeps the
+%% older behaviour: a 100 only when the request expects one.
+continue(Transport, Conn, StreamId, Framing, Req) ->
+    case
+        Framing =:= capsule orelse
+            masque_tcp_capsule:expects_continue(maps:get(headers, Req, []))
+    of
+        true ->
+            _ = send_interim(Transport, Conn, StreamId),
+            ok;
+        false ->
+            ok
+    end.
+
+send_interim(h3, Conn, StreamId) -> quic_h3:send_response(Conn, StreamId, 100, []);
+send_interim(h2, Conn, StreamId) -> h2:send_response(Conn, StreamId, 100, []).
+
+%% Section 4.3 also asks for `Proxy-Status' on success.
+response_headers(#state{framing = capsule}) ->
+    [{<<"capsule-protocol">>, <<"?1">>}, {<<"proxy-status">>, <<"masque">>}];
+response_headers(_) ->
+    [].
+
 send_response(#state{transport = h3, conn = C, stream_id = S}, Status, Hdrs) ->
     quic_h3:send_response(C, S, Status, Hdrs);
 send_response(#state{transport = h2, conn = C, stream_id = S}, Status, Hdrs) ->
@@ -162,7 +215,7 @@ send_response(#state{transport = h2, conn = C, stream_id = S}, Status, Hdrs) ->
 %% H3 path: send the 2xx, claim the stream, run the handler's init
 %% actions, then replay the handler messages that arrived meanwhile.
 finalize(#state{pending_actions = Actions} = S) ->
-    case send_response(S, 200, []) of
+    case send_response(S, 200, response_headers(S)) of
         ok ->
             case claim_stream(S) of
                 {error, _} ->
@@ -218,6 +271,70 @@ consume_bytes(quic_h3, N, #state{conn = C, stream_id = Sid}) ->
     catch
         exit:_ -> ok
     end.
+
+%%====================================================================
+%% Capsule framing (draft-ietf-httpbis-connect-tcp-18)
+%%====================================================================
+
+%% Bytes for the stream: as they are in raw mode, as DATA or FINAL_DATA
+%% in capsule mode.
+frame(#state{framing = capsule, version = V}, Bytes, Fin) ->
+    masque_tcp_capsule:encode(V, Bytes, Fin);
+frame(_S, Bytes, _Fin) ->
+    Bytes.
+
+%% Stream bytes in capsule mode. The capsule headers are consumed at
+%% once; the payloads follow the handler's credit, as raw bytes do. A
+%% stream that ends without FINAL_DATA, or inside a capsule, is an
+%% abort, not a FIN (section 3.5); so is invalid data (section 3.5.1).
+capsule_in(Tag, Bytes, Fin, #state{dec = Dec} = S) ->
+    case masque_tcp_capsule:decode(Dec, Bytes) of
+        {error, Reason} ->
+            {stop, {bad_capsule, Reason}, S};
+        {ok, Items, Dec2} ->
+            Payload = lists:sum([byte_size(P) || {_, P} <- Items]),
+            _ = consume_tag(Tag, byte_size(Bytes) - Payload, S),
+            case capsule_items(Tag, Items, S#state{dec = Dec2}) of
+                {noreply, #state{final_in = false} = S2} when Fin ->
+                    {stop, peer_reset, S2};
+                {noreply, S2} when Fin ->
+                    case masque_tcp_capsule:end_of_stream(Dec2) of
+                        ok -> {noreply, S2};
+                        {error, Reason} -> {stop, {bad_capsule, Reason}, S2}
+                    end;
+                Other ->
+                    Other
+            end
+    end.
+
+capsule_items(_Tag, [], S) ->
+    {noreply, S};
+capsule_items(Tag, [{Kind, Payload} | Rest], S) ->
+    case capsule_payload(Tag, Payload, S) of
+        {noreply, S2} when Kind =:= final ->
+            case dispatch_eof(S2#state{final_in = true}) of
+                {noreply, S3} -> capsule_items(Tag, Rest, S3);
+                Stop -> Stop
+            end;
+        {noreply, S2} ->
+            capsule_items(Tag, Rest, S2);
+        Stop ->
+            Stop
+    end.
+
+capsule_payload(_Tag, <<>>, S) ->
+    {noreply, S};
+capsule_payload(none, Payload, S) ->
+    case dispatch(handle_data, [Payload], count_in(Payload, S)) of
+        {noreply, S2} -> {noreply, S2#state{hold = false}};
+        Stop -> Stop
+    end;
+capsule_payload(Tag, Payload, S) ->
+    Result = dispatch(handle_data, [Payload], count_in(Payload, S)),
+    settle_credit(Tag, Payload, Result, S).
+
+consume_tag(none, _N, _S) -> ok;
+consume_tag(Tag, N, S) -> consume_bytes(Tag, N, S).
 
 %% Credit goes back now, unless the handler keeps it until it has
 %% finished with the bytes.
@@ -288,6 +405,18 @@ handle_info(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
 handle_info(Msg, S) ->
     handle_traffic(Msg, S).
 
+handle_traffic(
+    {Tag, _Conn, {data, StreamId, Bytes, Fin}},
+    #state{stream_id = StreamId, framing = capsule} = S
+) when
+    Tag =:= quic_h3; Tag =:= h2
+->
+    capsule_in(Tag, Bytes, Fin, S);
+handle_traffic(
+    {masque_stream_data, StreamId, Bytes, Fin},
+    #state{stream_id = StreamId, framing = capsule} = S
+) ->
+    capsule_in(none, Bytes, Fin, S);
 handle_traffic(
     {Tag, _Conn, {data, StreamId, Bytes, Fin}},
     #state{stream_id = StreamId} = S
@@ -407,6 +536,9 @@ maybe_release_h2_tunnel(_, _) -> ok.
 %% error, handler crash) resets it with CONNECT_ERROR so the client
 %% does not mistake it for a clean close (RFC 9114 sec 4.4, RFC 9113
 %% sec 8.5).
+%% Section 3.5: a local timeout is an abrupt close in capsule mode.
+end_stream(eof_timeout, #state{framing = capsule} = S) ->
+    abort_stream(S);
 end_stream(Reason, #state{fin_sent = true}) when
     Reason =:= normal;
     Reason =:= target_closed;
@@ -418,10 +550,13 @@ end_stream(Reason, S) when
     Reason =:= target_closed;
     Reason =:= eof_timeout
 ->
-    transport_send_data(S, <<>>, true);
-end_stream(_Reason, #state{transport = h3, conn = C, stream_id = Sid}) ->
+    transport_send_data(S, frame(S, <<>>, true), true);
+end_stream(_Reason, S) ->
+    abort_stream(S).
+
+abort_stream(#state{transport = h3, conn = C, stream_id = Sid}) ->
     quic_h3:cancel(C, Sid, ?H3_CONNECT_ERROR);
-end_stream(_Reason, #state{transport = h2, conn = C, stream_id = Sid}) ->
+abort_stream(#state{transport = h2, conn = C, stream_id = Sid}) ->
     h2:cancel(C, Sid, connect_error).
 
 code_change(_OldVsn, S, _Extra) ->
@@ -493,7 +628,7 @@ do_actions([{send_data, Bytes, Fin} | Rest], S) ->
     %% A tunnel write either lands or stops the session: handlers
     %% (e.g. the TCP proxy's `{active, N}' re-arm) rely on every
     %% earlier write having succeeded.
-    case tunnel_send(S, Bytes, Fin) of
+    case tunnel_send(S, frame(S, Bytes, Fin), Fin) of
         ok -> do_actions(Rest, S#state{fin_sent = Fin orelse S#state.fin_sent});
         {error, Reason} -> {stop, {tunnel_send_failed, Reason}, S}
     end;
@@ -504,7 +639,7 @@ do_actions([{release_credit, N} | Rest], S) ->
 do_actions([close_session | _Rest], #state{fin_sent = true} = S) ->
     {stop, normal, S};
 do_actions([close_session | _Rest], S) ->
-    _ = transport_send_data(S, <<>>, true),
+    _ = transport_send_data(S, frame(S, <<>>, true), true),
     {stop, normal, S#state{fin_sent = true}};
 do_actions([_Unknown | Rest], S) ->
     do_actions(Rest, S).

@@ -15,6 +15,8 @@ This page lists every module in `src/`, grouped by role, with one line on what i
 | `masque_handler` | The handler behaviour: callback specs, the `req()` map type, `default_accept/1`. It defines the contract only; the code that calls handlers is in each server session. | you add a callback or a field to the request map. |
 | `masque_udp_proxy_handler` | Default CONNECT-UDP handler: opens a `gen_udp` socket to the target, relays both ways, applies `allow`, `resolver`, `family`, `active_n`. | you change how the proxy reaches UDP targets or its policy options. |
 | `masque_tcp_proxy_handler` | Default CONNECT-TCP handler: opens a `gen_tcp` connection, relays bytes, maps FIN both ways, `eof_timeout` for half-closed tunnels. | you change TCP dialing, half-close or target policy. |
+| `masque_tcp_dial` | Happy Eyeballs (RFC 8305) for the CONNECT-TCP handler: races a target's addresses and hands over the first connection. | you change how capsule-framed tunnels dial their target. |
+| `masque_tcp_capsule` | CONNECT-TCP capsule framing: tokens and versions, `DATA`/`FINAL_DATA` encoding, the streaming decoder and its invalid-data checks. | the CONNECT-TCP draft changes its tokens, codes or framing rules. |
 | `masque_ip_proxy_handler` | Default CONNECT-IP handler: address allocation from `address_pool`, route advertisement, source filtering, TTL and MTU handling, `forward_fun` and `lifecycle_fun` hooks. | you change the CONNECT-IP forwarding plane or address policy. |
 | `masque_udp_bind_proxy_handler` | Default Connect-UDP-Bind handler: owns the bind `gen_udp` socket, builds `Proxy-Public-Address`, filters peers. Adds `handle_bind_packet/3`, which is not part of `masque_handler`. | you change bind socket policy or public address reporting. |
 | `masque_chain_handler` | Relay handler: opens a MASQUE client tunnel to `upstream_proxy` and relays UDP, TCP and IP; `via` loop detection and the node token. | you change relay behaviour or loop detection. |
@@ -93,7 +95,7 @@ Change a session module when you change the wire behaviour of that cell: framing
 | Module | Role | Change this when... |
 |---|---|---|
 | `masque_app` | Application callback: starts `masque_sup`, sets up metrics, creates the node `via` token. | you add application start-up work. |
-| `masque_sup` | Top supervisor: the eight session supervisors, the pool, the IP registry, and the `masque_h2_tunnel_counts` ETS table. | you add a supervised process or a global table. |
+| `masque_sup` | Top supervisor: the eight session supervisors, the pool, the IP registry, and the `masque_h2_tunnel_counts` and `masque_tcp_upgrade_proxies` ETS tables. | you add a supervised process or a global table. |
 | `masque_h2_session_sup` | One module, four `simple_one_for_one` instances (UDP, TCP, IP, bind) for h2 server sessions. | you add an h2 protocol. |
 | `masque_session_start` | Deferred start of h2 and h1 sessions: `init/1` returns at once, the real start runs in `handle_continue/2` and is reported to the waiting listener. | you change how an h2 or h1 session start is reported or timed out. |
 | `masque_h1_session_sup` | Same for h1 server sessions. | you add an h1 protocol. |

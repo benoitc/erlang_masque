@@ -50,7 +50,19 @@
     extra_headers = [] :: [{binary(), binary()}],
     %% Writes run here so a full TLS send buffer never stops this
     %% process reading: the peer may be blocked writing to us.
-    writer :: pid() | undefined
+    writer :: pid() | undefined,
+    %% `raw': classic CONNECT. `capsule': GET with `Upgrade: connect-tcp'
+    %% and DATA / FINAL_DATA capsules (draft-ietf-httpbis-connect-tcp-18),
+    %% from the `tcp_framing' option.
+    framing = raw :: raw | capsule,
+    %% The `Upgrade' token and capsule codes (`tcp_protocol' option),
+    %% and the decoder of the proxy's capsules.
+    token = ?MASQUE_CONNECT_TCP_PROTOCOL :: binary(),
+    version = final :: masque_tcp_capsule:version(),
+    dec :: masque_tcp_capsule:decoder() | undefined,
+    uri_template = ?MASQUE_DEFAULT_TCP_URI_TEMPLATE :: binary(),
+    %% Capsule mode: the proxy sent FINAL_DATA.
+    final_in = false :: boolean()
 }).
 
 %%====================================================================
@@ -106,6 +118,7 @@ init({Target, Opts, Owner}) ->
     ok = masque_client_owner:init(Opts),
     Mode = maps:get(mode, Opts, message),
     ProxyAuth = maps:get(proxy_authorization, Opts, undefined),
+    {Framing, Token, Version} = masque_tcp_capsule:client_protocol(Opts),
     ok = validate_proxy_auth(ProxyAuth),
     Data = #data{
         owner = Owner,
@@ -120,7 +133,12 @@ init({Target, Opts, Owner}) ->
         mode = Mode,
         extra_headers = sanitise_extra_headers(
             maps:get(request_headers, Opts, [])
-        )
+        ),
+        framing = Framing,
+        token = Token,
+        version = Version,
+        dec = masque_tcp_capsule:decoder(Version),
+        uri_template = maps:get(uri_template, Opts, ?MASQUE_DEFAULT_TCP_URI_TEMPLATE)
     },
     %% Defer `do_handshake' until `handshake_await' arrives so the
     %% reply can be delivered synchronously (classic CONNECT is a
@@ -138,11 +156,16 @@ connecting(
     #data{connect_opts = Opts} = Data
 ) ->
     case do_connect(Data, Opts) of
-        {ok, Socket, InitialBuffer} ->
+        {ok, Socket, InitialBuffer, DataC} ->
             case setopts_active_once(Socket) of
                 ok ->
-                    Data1 = Data#data{socket = Socket},
-                    Data2 = deliver_bytes(InitialBuffer, Data1),
+                    Data1 = DataC#data{socket = Socket},
+                    Data2 =
+                        case incoming(InitialBuffer, Data1) of
+                            {error, _} -> Data1;
+                            {{overflow, D}, _} -> D;
+                            {D, _} -> D
+                        end,
                     {next_state, open, Data2, [{reply, From, ok}]};
                 {error, Reason} ->
                     _ =
@@ -181,7 +204,7 @@ open({call, From}, {send, _Data}, #data{write_closed = true} = Data) ->
     {keep_state, Data, [{reply, From, {error, write_closed}}]};
 open({call, From}, {send, Payload}, Data) ->
     Data2 = ensure_writer(Data),
-    Data2#data.writer ! {send, From, Payload},
+    Data2#data.writer ! {send, From, frame(Data2, Payload, false)},
     {keep_state, Data2};
 open({call, From}, {recv, Timeout}, Data) ->
     handle_recv_call(From, Timeout, Data);
@@ -189,6 +212,12 @@ open({call, From}, {send_capsule, _, _}, Data) ->
     {keep_state, Data, [{reply, From, {error, not_supported}}]};
 open({call, From}, {set_mode, Mode}, Data) ->
     {keep_state, Data#data{mode = Mode}, [{reply, From, ok}]};
+%% Capsule mode ends the write side with FINAL_DATA, which TLS cannot
+%% do with a half-close.
+open({call, From}, shutdown_write, #data{framing = capsule} = Data) ->
+    Data2 = ensure_writer(Data),
+    Data2#data.writer ! {send, From, frame(Data2, <<>>, true)},
+    {keep_state, Data2#data{write_closed = true}};
 open({call, From}, shutdown_write, Data) ->
     Data2 = ensure_writer(Data),
     Data2#data.writer ! {shutdown_write, From},
@@ -198,13 +227,34 @@ open({call, From}, {set_owner, NewOwner}, Data) ->
 open({call, From}, stop, Data) ->
     {next_state, closing, Data, [{reply, From, ok}, {next_event, internal, do_close}]};
 open(info, {ssl, Sock, Bytes}, #data{socket = Sock} = Data) ->
-    case deliver_bytes(Bytes, Data) of
-        {overflow, Data1} ->
+    case incoming(Bytes, Data) of
+        {error, Reason} ->
+            end_tunnel(Reason, {stop, Reason, Data}, Data);
+        {{overflow, Data1}, _} ->
             park_unread(rx_overflow, Data1);
-        Data1 ->
+        {#data{write_closed = true} = Data1, true} ->
+            end_tunnel(peer_fin, {stop, normal, Data1}, Data1);
+        {Data1, true} ->
+            %% Half-close: the proxy is done sending, our side stays open.
+            _ = notify_owner_closed(peer_fin, Data1),
+            _ = setopts_active_once(Sock),
+            {keep_state, Data1};
+        {Data1, false} ->
             _ = setopts_active_once(Sock),
             {keep_state, Data1}
     end;
+%% Capsule mode: the connection closing after FINAL_DATA is the end of
+%% a finished tunnel; without it the tunnel was aborted.
+open(info, {ssl_closed, Sock}, #data{socket = Sock, framing = capsule, final_in = true} = Data) ->
+    case masque_tcp_capsule:end_of_stream(Data#data.dec) of
+        ok ->
+            {stop, normal, Data};
+        {error, Why} ->
+            Reason = {bad_capsule, Why},
+            end_tunnel(Reason, {stop, Reason, Data}, Data)
+    end;
+open(info, {ssl_closed, Sock}, #data{socket = Sock, framing = capsule} = Data) ->
+    end_tunnel(peer_reset, {stop, peer_reset, Data}, Data);
 open(info, {ssl_closed, Sock}, #data{socket = Sock} = Data) ->
     end_tunnel(peer_closed, {stop, peer_closed, Data}, Data);
 open(info, {ssl_error, Sock, Reason}, #data{socket = Sock} = Data) ->
@@ -321,17 +371,41 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %% Transport
 %%====================================================================
 
-do_connect(Data, Opts) ->
-    %% One deadline covers connect, TLS and the CONNECT exchange.
+do_connect(Data0, Opts) ->
+    %% One deadline covers connect, TLS and the CONNECT exchange, the
+    %% fallback included.
     Timeout = maps:get(timeout, Opts, 5000),
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    Data = preferred(Data0),
+    case dial(Data, Opts, Deadline) of
+        {ok, Socket, Leftover} ->
+            {ok, Socket, Leftover, Data};
+        {fallback, Rejected} ->
+            %% draft-ietf-httpbis-connect-tcp-18 section 5.2: a proxy
+            %% that refuses classic CONNECT this way may only speak
+            %% connect-tcp, so retry on the default template.
+            Upgrade = upgrade(Data),
+            case dial(Upgrade, Opts, Deadline) of
+                {ok, Socket, Leftover} ->
+                    ok = remember(Upgrade),
+                    {ok, Socket, Leftover, Upgrade};
+                {fallback, _} ->
+                    {error, Rejected};
+                {error, _} = Err ->
+                    Err
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+dial(Data, Opts, Deadline) ->
     SSLOpts = masque_tls:client_opts(Data#data.proxy_host, Opts),
     case
         ssl:connect(
             binary_to_list(Data#data.proxy_host),
             Data#data.proxy_port,
             SSLOpts,
-            Timeout
+            remaining(Deadline)
         )
     of
         {ok, Socket} ->
@@ -340,17 +414,25 @@ do_connect(Data, Opts) ->
             case ssl:send(Socket, Req) of
                 ok ->
                     case read_status_line(Socket, remaining(Deadline)) of
-                        {ok, Code, _Phrase, Leftover} when
-                            Code >= 200, Code < 300
+                        {ok, 101, _Phrase, _Hdrs, Leftover} when
+                            Data#data.framing =:= capsule
+                        ->
+                            {ok, Socket, Leftover};
+                        {ok, Code, _Phrase, _Hdrs, Leftover} when
+                            Data#data.framing =:= raw, Code >= 200, Code < 300
                         ->
                             %% RFC 9110 §9.3.6: any 2xx establishes
                             %% the tunnel. Most proxies send 200
                             %% "Connection Established" but 201 / 202
                             %% are conformant too.
                             {ok, Socket, Leftover};
-                        {ok, Code, Phrase, _Leftover} ->
+                        {ok, Code, Phrase, Hdrs, _Leftover} ->
                             _ = ssl:close(Socket),
-                            {error, {handshake_rejected, Code, Phrase}};
+                            Rejected = {handshake_rejected, Code, Phrase},
+                            case wants_upgrade(Data, Code, Hdrs) of
+                                true -> {fallback, Rejected};
+                                false -> {error, Rejected}
+                            end;
                         {error, Reason} ->
                             _ = ssl:close(Socket),
                             {error, Reason}
@@ -363,10 +445,50 @@ do_connect(Data, Opts) ->
             {error, {connect, Reason}}
     end.
 
+%% A classic CONNECT refused with `501', or with `426' offering
+%% `Upgrade: connect-tcp'.
+wants_upgrade(#data{framing = raw}, 501, _Hdrs) ->
+    true;
+wants_upgrade(#data{framing = raw}, 426, Hdrs) ->
+    Offered = [
+        string:trim(T)
+     || {<<"upgrade">>, V} <- Hdrs, T <- binary:split(lowercase_bin(V), <<",">>, [global])
+    ],
+    lists:member(?MASQUE_CONNECT_TCP_PROTOCOL, Offered) orelse
+        lists:member(?MASQUE_CONNECT_TCP_07_PROTOCOL, Offered);
+wants_upgrade(_Data, _Code, _Hdrs) ->
+    false.
+
+upgrade(Data) ->
+    {capsule, Token, Version} = masque_tcp_capsule:client_protocol(#{tcp_framing => capsule}),
+    Data#data{
+        framing = capsule,
+        token = Token,
+        version = Version,
+        dec = masque_tcp_capsule:decoder(Version),
+        uri_template = ?MASQUE_DEFAULT_TCP_URI_TEMPLATE
+    }.
+
+%% Section 5.2 also asks the client to remember a proxy that only
+%% speaks connect-tcp, so later tunnels skip the refused CONNECT.
+preferred(#data{framing = raw, proxy_host = Host, proxy_port = Port} = Data) ->
+    case ets:member(?MASQUE_TCP_UPGRADE_PROXIES, {Host, Port}) of
+        true -> upgrade(Data);
+        false -> Data
+    end;
+preferred(Data) ->
+    Data.
+
+remember(#data{proxy_host = Host, proxy_port = Port}) ->
+    true = ets:insert(?MASQUE_TCP_UPGRADE_PROXIES, {{Host, Port}}),
+    ok.
+
 %% Milliseconds left before the overall handshake deadline.
 remaining(Deadline) ->
     max(0, Deadline - erlang:monotonic_time(millisecond)).
 
+connect_request(#data{framing = capsule} = Data) ->
+    upgrade_request(Data);
 connect_request(#data{
     target_host = Host,
     target_port = Port,
@@ -389,6 +511,53 @@ connect_request(#data{
     ),
     <<"CONNECT ", Authority/binary, " HTTP/1.1\r\n", "Host: ", Authority/binary, "\r\n",
         AuthLine/binary, ExtraLines/binary, "\r\n">>.
+
+%% draft-ietf-httpbis-connect-tcp-18 section 3.2: the target goes in the
+%% path of a `GET' that upgrades to `connect-tcp', or the draft's
+%% interop token.
+upgrade_request(#data{
+    token = Token,
+    proxy_host = ProxyHost,
+    proxy_port = ProxyPort,
+    target_host = Host,
+    target_port = Port,
+    uri_template = Template,
+    proxy_auth = Auth,
+    extra_headers = Extra
+}) ->
+    Path = masque_uri:expand(Template, #{target_host => Host, target_port => Port}),
+    ProxyAuthority = masque_uri:build_authority(ProxyHost, ProxyPort),
+    nomatch = binary:match(Path, [<<"\r">>, <<"\n">>, <<" ">>]),
+    AuthLine =
+        case Auth of
+            undefined -> <<>>;
+            V when is_binary(V) -> <<"Proxy-Authorization: ", V/binary, "\r\n">>
+        end,
+    ExtraLines = iolist_to_binary([[N, <<": ">>, Val, <<"\r\n">>] || {N, Val} <- Extra]),
+    <<"GET ", Path/binary, " HTTP/1.1\r\n", "Host: ", ProxyAuthority/binary, "\r\n",
+        "Connection: Upgrade\r\n", "Upgrade: ", Token/binary, "\r\n", "Capsule-Protocol: ?1\r\n",
+        AuthLine/binary, ExtraLines/binary, "\r\n">>.
+
+%% Bytes from the proxy: as they are in raw mode, the DATA and
+%% FINAL_DATA payloads in capsule mode. Also says whether they end the
+%% proxy's side.
+incoming(Bytes, #data{framing = raw} = Data) ->
+    {deliver_bytes(Bytes, Data), false};
+incoming(Bytes, #data{dec = Dec} = Data) ->
+    case masque_tcp_capsule:decode(Dec, Bytes) of
+        {ok, Items, Dec2} ->
+            Payload = iolist_to_binary([P || {_, P} <- Items]),
+            Final = lists:keymember(final, 1, Items),
+            Data1 = Data#data{dec = Dec2, final_in = Data#data.final_in orelse Final},
+            {deliver_bytes(Payload, Data1), Final};
+        {error, Why} ->
+            {error, {bad_capsule, Why}}
+    end.
+
+frame(#data{framing = capsule, version = V}, Bytes, Fin) ->
+    masque_tcp_capsule:encode(V, Bytes, Fin);
+frame(_Data, Bytes, _Fin) ->
+    Bytes.
 
 sanitise_extra_headers(List) when is_list(List) ->
     %% Strip CR/LF to prevent header injection on the raw CONNECT
@@ -429,23 +598,37 @@ read_headers_loop(Socket, Acc, Deadline) ->
             case ssl:recv(Socket, 0, Remaining) of
                 {ok, Bin} ->
                     New = <<Acc/binary, Bin/binary>>,
-                    case binary:split(New, <<"\r\n\r\n">>) of
-                        [HdrBlock, Rest] ->
-                            case parse_status(HdrBlock) of
-                                {ok, Code, Phrase} ->
-                                    {ok, Code, Phrase, Rest};
-                                Err ->
-                                    Err
-                            end;
-                        [_] ->
-                            read_headers_loop(Socket, New, Deadline)
-                    end;
+                    read_response(Socket, New, Deadline);
                 {error, timeout} ->
                     {error, handshake_timeout};
                 {error, Reason} ->
                     {error, {recv, Reason}}
             end
     end.
+
+%% Interim responses other than 101 (a `100 Continue' the caller asked
+%% for with `Expect') are skipped.
+read_response(Socket, Acc, Deadline) ->
+    case binary:split(Acc, <<"\r\n\r\n">>) of
+        [HdrBlock, Rest] ->
+            case parse_status(HdrBlock) of
+                {ok, Code, _Phrase} when Code >= 100, Code < 200, Code =/= 101 ->
+                    read_response(Socket, Rest, Deadline);
+                {ok, Code, Phrase} ->
+                    {ok, Code, Phrase, parse_headers(HdrBlock), Rest};
+                Err ->
+                    Err
+            end;
+        [_] ->
+            read_headers_loop(Socket, Acc, Deadline)
+    end.
+
+parse_headers(HdrBlock) ->
+    [_ | Lines] = binary:split(HdrBlock, <<"\r\n">>, [global]),
+    [
+        {lowercase_bin(string:trim(K)), string:trim(V)}
+     || Line <- Lines, [K, V] <- [binary:split(Line, <<":">>)]
+    ].
 
 parse_status(HdrBlock) ->
     case binary:split(HdrBlock, <<"\r\n">>) of

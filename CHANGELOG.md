@@ -15,6 +15,18 @@ and the project uses [Semantic Versioning](https://semver.org/).
   it now hands to you after each handshake.
 - HTTP/2 and HTTP/1.1 listeners take TLS options, for example to pick the
   certificate per server name.
+- CONNECT-TCP now also speaks the latest draft (connect-tcp-18, about to
+  become an RFC), where bytes travel in capsules and HTTP/1.1 uses an
+  upgrade. Listeners answer both forms; clients choose it with a new
+  option and keep the earlier form by default. In this form HTTP/1.1
+  tunnels can half-close, an aborted tunnel resets the target instead of
+  closing it cleanly, the proxy confirms a request before reaching the
+  target, tries a target's IPv6 and IPv4 addresses in parallel, reports
+  refused targets as forbidden, and accepts data of any size without
+  holding it in memory. Clients can also speak the protocol names of two
+  earlier drafts, for peers that still use them. An HTTP/1.1 client whose
+  proxy refuses classic CONNECT now retries with the new form and
+  remembers that proxy.
 
 ### Fixed
 
