@@ -29,7 +29,8 @@
     nat_flush_mid_transfer/1,
     small_mtu_mobile/1,
     reordering_mobile/1,
-    migrate_without_network/1
+    migrate_without_network/1,
+    reverse_connect_switch/1
 ]).
 
 -define(PROXY, "203.0.113.1").
@@ -58,7 +59,8 @@ all() ->
         nat_flush_mid_transfer,
         small_mtu_mobile,
         reordering_mobile,
-        migrate_without_network
+        migrate_without_network,
+        reverse_connect_switch
     ].
 
 init_per_suite(Config) ->
@@ -365,6 +367,57 @@ sh(Cmd) ->
     case string:split(string:trim(Out), "exit:", trailing) of
         [_, "0"] -> ok;
         _ -> ct:fail({command_failed, Cmd, Out})
+    end.
+
+%% An agent's control channel and an accept stream carrying data from
+%% the edge survive a Wi-Fi to mobile change: the watcher migrates the
+%% control channel's connection, which carries the stream too.
+reverse_connect_switch(Config) ->
+    Test = self(),
+    Agent = spawn_link(fun() ->
+        {ok, Listen} = masque:reverse_listen(uri(Config), {local, tcp}, #{
+            transports => [h3], verify => verify_none, timeout => 10000
+        }),
+        Test ! {listening, Listen},
+        reverse_agent(Listen)
+    end),
+    Listen =
+        receive
+            {listening, L} -> L
+        after 15000 -> ct:fail(no_control_channel)
+        end,
+    watch([Listen]),
+    Peer = ?config(peer, Config),
+    {Edge, MRef} = spawn_monitor(fun() ->
+        exit({echo, peer:call(Peer, masque_netsim_server, reverse_echo, [?BYTES], 120000)})
+    end),
+    timer:sleep(1000),
+    to_mobile(),
+    receive
+        {'DOWN', MRef, process, Edge, {echo, Result}} -> ?assertEqual(true, Result);
+        {'DOWN', MRef, process, Edge, Other} -> ct:fail({edge, Other})
+    after 120000 -> ct:fail(edge_stuck)
+    end,
+    assert_proxy_sees(Config, ?MOBILE_NAT),
+    unlink(Agent),
+    exit(Agent, kill),
+    _ = masque:close(Listen),
+    ok.
+
+%% Accept every request and echo each stream.
+reverse_agent(Listen) ->
+    receive
+        {masque_connection_request, Listen, Id, _Service} ->
+            {ok, _S} = masque:reverse_accept(Listen, Id),
+            reverse_agent(Listen);
+        {masque_data, S, Bytes} ->
+            ok = send_all(S, Bytes),
+            reverse_agent(Listen);
+        {masque_closed, S, peer_fin} ->
+            _ = masque:shutdown_write(S),
+            reverse_agent(Listen);
+        _ ->
+            reverse_agent(Listen)
     end.
 
 %% The watcher plays the agent: it sees the interfaces change and moves

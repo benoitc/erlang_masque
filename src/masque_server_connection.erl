@@ -99,6 +99,7 @@ lookup_session(RouterPid, StreamId) ->
 session_module(#{protocol := tcp}) -> masque_tcp_server_session;
 session_module(#{protocol := ip}) -> masque_ip_server_session;
 session_module(#{protocol := udp_bind}) -> masque_udp_bind_server_session;
+session_module(#{protocol := listen}) -> masque_listen_server_session;
 session_module(_) -> masque_server_session.
 
 %%====================================================================

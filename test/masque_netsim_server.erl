@@ -5,6 +5,9 @@
 -include_lib("masque/include/masque_ip.hrl").
 
 -export([start/1, peers/0, diagnose/0, ip_gateway/2]).
+-export([reverse_echo/1]).
+%% listen_handler callbacks
+-export([authenticate/1, init/2]).
 
 -define(PORT, 4433).
 -define(H2_PORT, 4434).
@@ -20,6 +23,8 @@ start(#{cert := Cert, key := Key, log := Log} = Opts) ->
         cert => Cert,
         key => Key,
         accept_bind => true,
+        accept_listen => true,
+        listen_handler => ?MODULE,
         address_pool => {4, {10, 203, 0, 0}, 24},
         routes => [
             #ip_route{
@@ -101,6 +106,58 @@ diagnose() ->
      || P <- processes(), Init(P) =:= {quic_connection, init, 1}
     ],
     #{sessions => Sessions, connections => Conns}.
+
+%% Reverse connect: the agent's control channel registers itself, and
+%% `reverse_echo/1' plays the edge.
+authenticate(_Req) -> {ok, agent}.
+
+init(Identity, _Req) ->
+    try
+        unregister(netsim_control)
+    catch
+        error:badarg -> ok
+    end,
+    register(netsim_control, self()),
+    {ok, Identity}.
+
+%% Ask the agent for a connection, send `Bytes' through it and check the
+%% echo, returning credit as it reads.
+reverse_echo(Bytes) ->
+    {ok, Stream} = masque:request_connection(whereis(netsim_control), #{
+        destination => local, protocol => tcp, port => 7
+    }),
+    Payload = binary:part(payload(), 0, Bytes),
+    Self = self(),
+    _ = spawn_link(fun() -> Self ! {sent, send_all(Stream, Payload)} end),
+    Got = reverse_recv(Stream, Bytes, []),
+    receive
+        {sent, ok} -> ok
+    after 60000 -> error(send_stuck)
+    end,
+    _ = masque:close(Stream),
+    crypto:hash(sha256, Got) =:= crypto:hash(sha256, Payload).
+
+send_all(_Stream, <<>>) ->
+    ok;
+send_all(Stream, Bin) ->
+    Size = min(16384, byte_size(Bin)),
+    <<Chunk:Size/binary, Rest/binary>> = Bin,
+    case masque:send(Stream, Chunk) of
+        ok -> send_all(Stream, Rest);
+        Err -> Err
+    end.
+
+reverse_recv(_Stream, Want, Acc) when Want =< 0 ->
+    iolist_to_binary(lists:reverse(Acc));
+reverse_recv(Stream, Want, Acc) ->
+    receive
+        {masque_data, Stream, Bytes} ->
+            ok = masque:consumed(Stream, byte_size(Bytes)),
+            reverse_recv(Stream, Want - byte_size(Bytes), [Bytes | Acc]);
+        {masque_closed, Stream, Reason} ->
+            error({closed, Reason})
+    after 60000 -> error({stalled, iolist_size(Acc)})
+    end.
 
 ip_gateway(Packet, State) ->
     {reply, Packet, State}.

@@ -104,7 +104,7 @@ exit(Echo, kill).
 
 ## Examples
 
-The `examples/` directory has four standalone modules. Load them from `rebar3 shell` with `c("examples/NAME").`. Each generates its own throwaway certificate with `openssl`.
+The `examples/` directory has five standalone modules. Load them from `rebar3 shell` with `c("examples/NAME").`. Each generates its own throwaway certificate with `openssl`.
 
 | File | What it shows | Try it |
 |---|---|---|
@@ -112,6 +112,7 @@ The `examples/` directory has four standalone modules. Load them from `rebar3 sh
 | `examples/udp_dig_client.erl` | A client that resolves a DNS name through a proxy (sends one A query to 1.1.1.1:53). | `udp_dig_client:resolve(<<"https://127.0.0.1:4433">>, <<"example.com">>).` |
 | `examples/ip_echo.erl` | A CONNECT-IP proxy with an address pool and an echo `forward_fun`, plus a client that requests an address and pings. | `ip_echo:start(4443), ip_echo:ping().` |
 | `examples/two_hop_relay.erl` | An ingress chain listener and an egress proxy on h3, h2 and h1, with UDP and TCP round trips through both hops. | `two_hop_relay:start(), two_hop_relay:run_udp().` |
+| `examples/reverse_tunnel.erl` | Reverse connect: an agent exposes a local service through an edge, which forwards a public TCP port to it, on h3, h2 or h1. | `reverse_tunnel:start(), reverse_tunnel:run(<<"hi">>).` |
 
 `udp_dig_client` needs outbound UDP to 1.1.1.1; point it at `udp_echo_proxy` running on the same node.
 

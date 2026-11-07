@@ -74,6 +74,8 @@
     %% The `:protocol' token and, in capsule mode, the capsule codes
     %% (`tcp_protocol' option) and the decoder of the proxy's capsules.
     token = ?MASQUE_CONNECT_TCP_PROTOCOL :: binary(),
+    %% Template variables other than the target (`uri_vars' option).
+    uri_vars :: map() | undefined,
     version = final :: masque_tcp_capsule:version(),
     dec :: masque_tcp_capsule:decoder() | undefined,
     %% Capsule mode: the proxy sent FINAL_DATA.
@@ -151,7 +153,8 @@ init({Target, Opts, Owner}) ->
         framing = Framing,
         token = Token,
         version = Version,
-        dec = masque_tcp_capsule:decoder(Version)
+        dec = masque_tcp_capsule:decoder(Version),
+        uri_vars = maps:get(uri_vars, Opts, undefined)
     },
     {ok, connecting, Data, [{next_event, internal, {do_handshake, Opts}}]}.
 
@@ -688,12 +691,10 @@ request_headers(#data{
     target_host = TargetHost,
     target_port = TargetPort,
     uri_template = Template,
+    uri_vars = UriVars,
     extra_headers = Extra
 }) ->
-    Path = masque_uri:expand(Template, #{
-        target_host => TargetHost,
-        target_port => TargetPort
-    }),
+    Path = request_path(Template, UriVars, TargetHost, TargetPort),
     Authority = build_authority(ProxyHost, ProxyPort),
     [
         {<<":method">>, <<"CONNECT">>},
@@ -702,6 +703,15 @@ request_headers(#data{
         {<<":authority">>, Authority},
         {<<":path">>, Path}
     ] ++ framing_headers(Framing) ++ Extra.
+
+%% The request path. `uri_vars' replaces the target variables for a
+%% template that has others, such as a reverse connect accept's
+%% `request_id'.
+request_path(Template, undefined, Host, Port) ->
+    masque_uri:expand(Template, #{target_host => Host, target_port => Port});
+request_path(Template, Vars, _Host, _Port) ->
+    {ok, T} = masque_uri_template:parse_pattern(masque_uri:to_path(Template)),
+    masque_uri_template:expand(T, Vars).
 
 framing_headers(capsule) -> [{<<"capsule-protocol">>, <<"?1">>}];
 framing_headers(raw) -> [].

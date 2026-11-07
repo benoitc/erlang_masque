@@ -32,6 +32,7 @@ All callbacks are optional. An event whose callback is not exported is ignored, 
 | `handle_eof(S)` | The client sent FIN on a CONNECT-TCP tunnel. | see below |
 | `handle_capsule(Type, Value, S)` | A capsule type the session does not handle itself. | see below |
 | `handle_info(Msg, S)` | Any other message to the session process. | see below |
+| `handle_call(Request, From, S)` | A call to a CONNECT-TCP or CONNECT-UDP session, such as the API of a reverse connect accept stream. | `{reply, Reply, S}`, `{reply, Reply, S, Actions}` (the reply goes out after the actions), `{stop, Reason, Reply, S}`. Without it calls get `{error, unknown_call}`. |
 | `handle_ip_packet(Packet, S)` | IP packet from the client (context id 0). | see below |
 | `handle_address_request(Requests, S)` | Client ADDRESS_REQUEST (`[#ip_prefix_request{}]`). | see below |
 | `handle_address_assign(Entries, S)` | Client ADDRESS_ASSIGN (`[#ip_assignment{}]`). | see below |
@@ -99,6 +100,8 @@ Actions run in list order. Unknown actions are ignored. A closing action ends th
 | `target_host`, `target_port` | UDP, TCP, udp-bind | Decoded from the path. `'*'` for both on an unscoped bind. |
 | `tcp_framing`, `tcp_version` | TCP | `raw` or `capsule`, and the capsule codes in use: `final` (`0x08`, `0x09`) or `provisional` (drafts -09 and -10). In capsule framing a handler should treat its own timeouts as aborts. |
 | `bind` | udp-bind | `scoped` or `unscoped`. |
+| `listen_target`, `listen_ipproto`, `reverse_identity` | reverse connect control channel | The scope from the listen template and the identity `authenticate/1` returned. See [reverse connect](reverse-connect.md). |
+| `reverse_id` | reverse connect accept stream | The request id. |
 | `ip_target`, `ip_ipproto` | IP | `'*'`, an address, `{Version, Address, PrefixLen}` or a host name binary; `'*'` or `0..255`. |
 | `resolved_addresses` | IP | The listener resolver's answer for a host name target, the address itself for an address target, `[]` otherwise. |
 | `peer` | all | `{Address, Port}` of the client. |

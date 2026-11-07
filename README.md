@@ -79,8 +79,9 @@ The same pages are published with the module docs by `rebar3 ex_doc`.
 
 ## Examples
 
-`examples/` holds four runnable modules: a UDP echo proxy, a DNS
-client, a CONNECT-IP echo proxy, and a two-hop relay. See
+`examples/` holds five runnable modules: a UDP echo proxy, a DNS
+client, a CONNECT-IP echo proxy, a two-hop relay, and a reverse connect
+tunnel that exposes a local service through a proxy. See
 [Getting started](docs/2-use/getting-started.md#examples).
 
 ## Contributing
