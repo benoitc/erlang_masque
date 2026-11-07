@@ -1,7 +1,7 @@
 -module(masque_compression_capsule).
 -moduledoc """
 Encode/decode the three Compression Context capsules used by
-Connect-UDP-Bind (draft-ietf-masque-connect-udp-listen-11
+Connect-UDP-Bind (draft-ietf-masque-connect-udp-listen-16
 sections 3.1 - 3.3):
 
 - `COMPRESSION_ASSIGN` (0x11) - Context ID + IP Version +

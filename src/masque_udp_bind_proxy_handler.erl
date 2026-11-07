@@ -53,6 +53,7 @@ Configurable via `handler_opts`:
 """.
 
 -export([init/2, handle_bind_packet/3, handle_packet/2, handle_info/2, terminate/2]).
+-export([allow_peer/2]).
 
 -include("masque_udp_bind.hrl").
 
@@ -219,6 +220,25 @@ handle_packet(Payload, #state{scope = Scope} = S) ->
         {drop, Reason, S2} ->
             masque_metrics:bind_drop_inc(Reason),
             {ok, S2}
+    end.
+
+-doc """
+Whether a client may register a compressed context for a peer. The
+session asks before it accepts a COMPRESSION_ASSIGN and rejects the
+registration otherwise (draft-ietf-masque-connect-udp-listen-16
+section 9). The policy is the one `handle_bind_packet/3` applies to
+every datagram: scope, peer filter and the listener's `allow`.
+""".
+-spec allow_peer(ip_port(), #state{}) -> {boolean(), #state{}}.
+allow_peer({IP, Port} = Peer, #state{} = S0) ->
+    case in_scope(Peer, S0) andalso (S0#state.peer_filter_fun)(IP, Port) of
+        ok ->
+            case allowed(Peer, S0) of
+                {true, S1} -> {true, S1};
+                false -> {false, S0}
+            end;
+        _ ->
+            {false, S0}
     end.
 
 in_scope(_Peer, #state{scope = any}) -> true;

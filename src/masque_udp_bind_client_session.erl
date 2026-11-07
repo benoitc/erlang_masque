@@ -1,5 +1,5 @@
 %%% Connect-UDP-Bind client session for h2 / h3
-%%% (draft-ietf-masque-connect-udp-listen-11). Sibling of
+%%% (draft-ietf-masque-connect-udp-listen-16). Sibling of
 %%% `masque_client_session` / `masque_ip_client_session`; one module
 %%% serves both transports by dispatching on a `transport` field.
 %%%
@@ -366,18 +366,20 @@ open_inner({call, From}, stop, Data) ->
         {reply, From, ok},
         {next_event, internal, do_close}
     ]};
+open_inner(info, {masque_control_send_failed, Reason}, _Data) ->
+    {stop, {control_send_failed, Reason}};
 open_inner(
     info,
     {h2_datagram, _Conn, StreamId, Payload},
     #data{transport = h2, stream_id = StreamId} = Data
 ) ->
-    {keep_state, handle_inbound_datagram(Payload, Data)};
+    datagram_result(handle_inbound_datagram(Payload, Data));
 open_inner(
     info,
     {quic_h3, _Conn, {datagram, StreamId, Payload}},
     #data{transport = h3, stream_id = StreamId} = Data
 ) ->
-    {keep_state, handle_inbound_datagram(Payload, Data)};
+    datagram_result(handle_inbound_datagram(Payload, Data));
 open_inner(
     info,
     {Tag, _Conn, {data, StreamId, Bytes, Fin}},
@@ -690,7 +692,7 @@ handle_assign_compression(From, {IP, Port}, Data) ->
                     }
                 )
             ),
-            _ = transport_send_data(Data, Bytes, false),
+            _ = control_send(Data, Bytes),
             {keep_state, Data#data{own_table = T2}, [
                 {reply, From, {ok, Entry#compression_entry.context_id}}
             ]};
@@ -715,7 +717,7 @@ handle_open_uncompressed_context(From, Data) ->
                     }
                 )
             ),
-            _ = transport_send_data(Data, Bytes, false),
+            _ = control_send(Data, Bytes),
             {keep_state, Data#data{own_table = T2}, [
                 {reply, From, {ok, Entry#compression_entry.context_id}}
             ]};
@@ -754,7 +756,20 @@ send_close_capsule(Id, Data) ->
             #compression_close{context_id = Id}
         )
     ),
-    transport_send_data(Data, Bytes, false).
+    control_send(Data, Bytes).
+
+%% Capsules on the request stream wait for the transport instead of
+%% being dropped on a full send queue (`masque_stream_send'); a write
+%% that does not drain ends the session (draft -16 section 9 bounds the
+%% responses an endpoint buffers).
+control_send(#data{transport = T, conn = C, stream_id = Sid}, Bytes) ->
+    case masque_stream_send:send(T, C, Sid, Bytes, false) of
+        ok ->
+            ok;
+        {error, Reason} = Err ->
+            self() ! {masque_control_send_failed, Reason},
+            Err
+    end.
 
 %%====================================================================
 %% Inbound datagram + capsule paths
@@ -775,8 +790,13 @@ handle_context_zero(Inner, #data{bind_scope = scoped} = Data) ->
     %% don't have the peer tuple in-band so we surface the bytes
     %% with a `scoped' marker.
     deliver_bind_packet({Data#data.bind_target, scoped}, Inner, Data);
-handle_context_zero(_Inner, Data) ->
-    Data.
+%% Unscoped: draft -16 section 3, the recipient MUST abort the request
+%% stream.
+handle_context_zero(_Inner, _Data) ->
+    {abort, context_zero_datagram}.
+
+datagram_result({abort, Reason}) -> {stop, Reason};
+datagram_result(Data) -> {keep_state, Data}.
 
 handle_known_context(Ctx, Inner, Data) ->
     case lookup_context(Ctx, Data) of
@@ -902,7 +922,7 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_ASSIGN, Body, Data) ->
                             }
                         )
                     ),
-                    _ = transport_send_data(Data, Bytes, false),
+                    _ = control_send(Data, Bytes),
                     {ok, Data#data{peer_table = T2}};
                 {ok, {conflict, close_proxy_id, ProxyId}, T2} ->
                     %% We already opened this tuple: acknowledge, then
@@ -914,10 +934,30 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_ASSIGN, Body, Data) ->
                         masque_compression_capsule:encode(#compression_ack{context_id = ProxyId}),
                         masque_compression_capsule:encode(#compression_close{context_id = ProxyId})
                     ]),
-                    _ = transport_send_data(Data, Bytes, false),
+                    _ = control_send(Data, Bytes),
                     {ok, Data#data{peer_table = T3}};
-                {error, _} ->
-                    {stop, malformed_capsule}
+                {error, Why} ->
+                    case masque_compression_table:refusal(Why) of
+                        %% Sections 3.1 and 9: reject with
+                        %% COMPRESSION_CLOSE; the id stays closed.
+                        reject ->
+                            Id = A#compression_assign.context_id,
+                            _ = control_send(
+                                Data,
+                                iolist_to_binary(
+                                    masque_compression_capsule:encode(
+                                        #compression_close{context_id = Id}
+                                    )
+                                )
+                            ),
+                            {ok, Data#data{
+                                peer_table = masque_compression_table:reject(
+                                    Data#data.peer_table, Id
+                                )
+                            }};
+                        malformed ->
+                            {stop, malformed_capsule}
+                    end
             end;
         {error, _} ->
             {stop, malformed_capsule}
@@ -1134,7 +1174,7 @@ default_template_bin() ->
 
 %%====================================================================
 %% Response validation: both Connect-UDP-Bind: ?1 AND
-%% Proxy-Public-Address are required per draft-11.
+%% Proxy-Public-Address are required per draft-16.
 %%====================================================================
 
 validate_response(Headers) ->

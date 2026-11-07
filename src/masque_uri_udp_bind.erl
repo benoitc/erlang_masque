@@ -212,20 +212,38 @@ classify({_, _}) -> scoped.
 
 -doc """
 Read the `Connect-UDP-Bind` field from a Headers list.
-Per draft-11, invalid value types are treated as absent (the
+Per draft-16, invalid value types are treated as absent (the
 library returns `invalid` so the caller can choose to log or
 reject; the dispatch path treats `invalid` the same as `absent`).
 """.
 -spec parse_bind_header([{binary(), binary()}]) -> bind_header_value().
 parse_bind_header(Headers) when is_list(Headers) ->
-    case header_value(?MASQUE_HF_CONNECT_UDP_BIND, Headers) of
-        undefined -> absent;
-        Bin -> classify_bind_value(strip(Bin))
+    case header_values(?MASQUE_HF_CONNECT_UDP_BIND, Headers) of
+        [] -> absent;
+        [Bin] -> classify_bind_value(strip(Bin));
+        %% Draft -16 section 6: a field sent more than once is a List,
+        %% not a Boolean, and is ignored.
+        _ -> invalid
     end.
 
-classify_bind_value(<<"?1">>) -> bind;
-classify_bind_value(<<"?0">>) -> absent;
-classify_bind_value(_) -> invalid.
+%% Draft -16 section 6: unknown parameters are ignored; anything other
+%% than a single Boolean item (a list, another type) is ignored too.
+classify_bind_value(Bin) ->
+    case binary:match(Bin, <<",">>) of
+        nomatch ->
+            [Item | _] = binary:split(Bin, <<";">>),
+            case strip(Item) of
+                <<"?1">> -> bind;
+                <<"?0">> -> absent;
+                _ -> invalid
+            end;
+        _ ->
+            invalid
+    end.
+
+header_values(Name, Headers) ->
+    LName = lowercase_bin(Name),
+    [V || {K, V} <- Headers, lowercase_bin(K) =:= LName].
 
 -doc """
 The header pair to emit for `Connect-UDP-Bind: ?1` on a
@@ -264,7 +282,7 @@ parse_proxy_public_address(Headers) when is_list(Headers) ->
 -doc """
 Render a list of `{ip, port}` tuples for emission on a
 response. Bracket IPv6 literals; quote each entry as a Structured
-Field String. Crashes on an empty list - draft-11 requires at
+Field String. Crashes on an empty list - draft-16 requires at
 least one valid entry on a successful bind 2xx.
 """.
 -spec format_proxy_public_address(

@@ -343,8 +343,8 @@ change_network(Sess, Config, IP) ->
     migrate(Sess, 100).
 
 %% The proxy issues its spare connection id just after the handshake.
-migrate(_Sess, 0) ->
-    ct:fail(no_spare_connection_id);
+migrate(Sess, 0) ->
+    ct:fail({no_spare_connection_id, cid_state(Sess)});
 migrate(Sess, N) ->
     case masque:migrate(Sess) of
         ok ->
@@ -352,6 +352,34 @@ migrate(Sess, N) ->
         {error, no_available_connection_id} ->
             timer:sleep(50),
             migrate(Sess, N - 1)
+    end.
+
+%% Every QUIC connection's connection-id pools (ours issued, the peer's
+%% held), for a failure report.
+cid_state(_Sess) ->
+    [
+        {P, pools(P)}
+     || P <- processes(),
+        {dictionary, D} <- [process_info(P, dictionary)],
+        {_, {quic_connection, init, 1}} <- [lists:keyfind('$initial_call', 1, D)]
+    ].
+
+pools(P) ->
+    try sys:get_state(P, 1000) of
+        {_StateName, Data} ->
+            [
+                #{
+                    local => quic_cid:local_entries(Pool),
+                    peer => quic_cid:peer_entries(Pool),
+                    peer_active => quic_cid:peer_active_count(Pool)
+                }
+             || Pool <- tuple_to_list(Data),
+                is_tuple(Pool),
+                tuple_size(Pool) > 0,
+                element(1, Pool) =:= cid_pool_state
+            ]
+    catch
+        _:R -> {unavailable, R}
     end.
 
 %% The proxy's connection really moved to the new address.

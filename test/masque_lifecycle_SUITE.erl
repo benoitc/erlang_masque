@@ -1051,7 +1051,10 @@ bind_message_before_finalize(_Config) ->
     },
     {ok, Pid} = gen_server:start(masque_udp_bind_server_session, Args, []),
     MRef = erlang:monitor(process, Pid),
-    Pid ! {masque_datagram_in, 0, <<0, 1, 2>>},
+    %% A datagram on a context nobody opened: dropped, whatever the
+    %% session's state. (Context 0 would abort an unscoped bind, as
+    %% draft -16 section 3 asks.)
+    Pid ! {masque_datagram_in, 0, <<2, 1, 2>>},
     Pid ! unrelated,
     gen_server:cast(Pid, ignored),
     timer:sleep(100),

@@ -39,6 +39,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Connect-UDP-Bind follows the latest draft (connect-udp-listen-16):
+  the proxy refuses to register a compressed peer its policy would
+  block, answers registrations it cannot take (too many, wrong address
+  family) with a refusal instead of ending the tunnel, treats a reused
+  context id as an error and drops datagrams on closed ones as the
+  draft asks, aborts a tunnel that misuses context zero, accepts
+  parameters on the
+  Connect-UDP-Bind header, and no longer loses compression replies when
+  the connection is busy.
 - Tunnels that end normally, because the target closed, the peer reset
   or a timer ran out, no longer log an error report. A busy proxy logged
   one for nearly every finished connection.

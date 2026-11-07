@@ -52,6 +52,7 @@ End-to-end behaviour pinned to a spec. Add a case here when you implement or fix
 | `masque_ip_compliance_SUITE` | RFC 9484 over h3 with the default IP handler |
 | `masque_ip_compliance_h1_SUITE` | the server-side RFC 9484 cases against an h1 listener |
 | `masque_udp_bind_compliance_SUITE` | udp-listen draft over h3 (and the h3/h2 race) |
+| `masque_udp_bind_vectors_SUITE` | Connect-UDP-Bind draft -16 wire vectors on h3, h2 and h1: hand-built requests, capsules and datagrams (one `*`, header parameters and repeats, context 0, rejections, malformed and reused ids, closed contexts) |
 
 ### Per-transport suites (CT)
 

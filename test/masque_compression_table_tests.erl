@@ -98,7 +98,7 @@ open_uncompressed_singleton_test() ->
         masque_compression_table:open_uncompressed(T1)
     ).
 
-%% Post-close prohibition (draft-11): after the client closed its
+%% Post-close prohibition (draft-16): after the client closed its
 %% uncompressed context the proxy opens no new compressed contexts.
 open_compressed_after_uncompressed_close_rejected_test() ->
     T0 = masque_compression_table:new_own(proxy, #{}),
@@ -426,3 +426,57 @@ close_after_local_close_ignored_test() ->
     ?assertEqual(
         {ok, T2}, masque_compression_table:install_close(T2, #compression_close{context_id = Id})
     ).
+
+%%====================================================================
+%% draft-ietf-masque-connect-udp-listen-16
+%%====================================================================
+
+assign(Id, V, A, P) ->
+    #compression_assign{context_id = Id, ip_version = V, address = A, port = P}.
+
+%% Section 3.3: a closed id cannot be reused.
+closed_id_is_not_reused_test() ->
+    T0 = masque_compression_table:new_peer(proxy, #{}),
+    {ok, T1} = masque_compression_table:install(T0, assign(2, 4, {192, 0, 2, 1}, 53)),
+    {ok, T2} = masque_compression_table:install_close(T1, #compression_close{context_id = 2}),
+    ?assertEqual(
+        {error, reused_context_id},
+        masque_compression_table:install(T2, assign(2, 4, {192, 0, 2, 2}, 53))
+    ).
+
+%% Sections 3.1 and 9: a rejected registration's id is closed too.
+rejected_id_is_not_reused_test() ->
+    T0 = masque_compression_table:new_peer(proxy, #{}),
+    T1 = masque_compression_table:reject(T0, 4),
+    ?assertEqual(
+        {error, reused_context_id},
+        masque_compression_table:install(T1, assign(4, 4, {192, 0, 2, 1}, 53))
+    ).
+
+%% Section 9 limits and section 7 families are rejections; the
+%% section 3 rules are malformed capsules.
+refusal_test() ->
+    [
+        ?assertEqual(reject, masque_compression_table:refusal(R))
+     || R <- [table_full, unadvertised_family, peer_refused]
+    ],
+    [
+        ?assertEqual(malformed, masque_compression_table:refusal(R))
+     || R <- [
+            bad_parity,
+            bad_ip_version,
+            duplicate_context_id,
+            reused_context_id,
+            uncompressed_only_from_client,
+            uncompressed_context_already_open,
+            malformed_duplicate_tuple
+        ]
+    ].
+
+%% Section 9: registrations beyond the limit are refused, so the session
+%% rejects them.
+table_full_is_refused_test() ->
+    T0 = masque_compression_table:new_peer(proxy, #{max_entries => 1}),
+    {ok, T1} = masque_compression_table:install(T0, assign(2, 4, {192, 0, 2, 1}, 53)),
+    {error, Why} = masque_compression_table:install(T1, assign(4, 4, {192, 0, 2, 2}, 53)),
+    ?assertEqual(reject, masque_compression_table:refusal(Why)).

@@ -24,7 +24,7 @@ match_scoped_test() ->
     ).
 
 match_unscoped_pct_encoded_test() ->
-    %% draft-11: when target_host and target_port are both `*' (or
+    %% draft-16: when target_host and target_port are both `*' (or
     %% percent-encoded), the bind is unscoped.
     Path = <<"/.well-known/masque/udp/%2A/%2A/">>,
     ?assertEqual(
@@ -171,7 +171,7 @@ bind_header_false_is_absent_test() ->
 
 bind_header_invalid_value_test() ->
     %% Anything that is not ?0 or ?1 is an invalid Boolean and per
-    %% draft-11 must be treated as absent. We surface `invalid' so
+    %% draft-16 must be treated as absent. We surface `invalid' so
     %% callers can log it.
     ?assertEqual(
         invalid,
@@ -337,3 +337,36 @@ proxy_public_address_shorthand_ipv4_rejected_test() ->
 
 proxy_public_address_non_string_rejected_test() ->
     ?assertEqual({error, malformed}, ppa(<<"192.0.2.1:443">>)).
+
+%% draft -16 section 6: unknown parameters are ignored.
+bind_header_with_parameters_test() ->
+    ?assertEqual(
+        bind,
+        masque_uri_udp_bind:parse_bind_header([{<<"connect-udp-bind">>, <<"?1;future=1">>}])
+    ),
+    ?assertEqual(
+        bind,
+        masque_uri_udp_bind:parse_bind_header([{<<"connect-udp-bind">>, <<"?1; a; b=?0">>}])
+    ).
+
+%% Section 6: a field sent twice becomes a List and is ignored, as is a
+%% list in one field.
+bind_header_repeated_is_ignored_test() ->
+    ?assertEqual(
+        invalid,
+        masque_uri_udp_bind:parse_bind_header([
+            {<<"connect-udp-bind">>, <<"?1">>}, {<<"Connect-UDP-Bind">>, <<"?1">>}
+        ])
+    ),
+    ?assertEqual(
+        invalid,
+        masque_uri_udp_bind:parse_bind_header([{<<"connect-udp-bind">>, <<"?1, ?1">>}])
+    ).
+
+%% Section 2: only one of the two variables set to `*' is malformed.
+one_wildcard_is_malformed_test() ->
+    T = <<"/.well-known/masque/udp/{target_host}/{target_port}/">>,
+    ?assertMatch({error, _}, masque_uri_udp_bind:match(T, <<"/.well-known/masque/udp/%2A/53/">>)),
+    ?assertMatch(
+        {error, _}, masque_uri_udp_bind:match(T, <<"/.well-known/masque/udp/192.0.2.1/%2A/">>)
+    ).

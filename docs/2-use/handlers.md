@@ -38,6 +38,7 @@ All callbacks are optional. An event whose callback is not exported is ignored, 
 | `handle_address_assign(Entries, S)` | Client ADDRESS_ASSIGN (`[#ip_assignment{}]`). | see below |
 | `handle_route_advertisement(Routes, S)` | Client ROUTE_ADVERTISEMENT (`[#ip_route{}]`). | see below |
 | `handle_bind_packet(Peer, Payload, S)` | udp-bind datagram from the client for `Peer = {IP, Port}`. Not part of the behaviour declaration; the bind sessions call it when exported. | see below, plus `{drop, Reason, S}` |
+| `allow_peer(Peer, S)` | udp-bind: the client asked to register a compressed context for `Peer = {IP, Port}`. Not part of the behaviour declaration. | `{true, S}` accepts; `{false, S}` rejects it with COMPRESSION_CLOSE. Without it every peer is accepted. |
 | `terminate(Reason, S)` | Session is ending. | ignored |
 
 Event callbacks return `{ok, S}`, `{ok, S, Actions}` or `{stop, Reason, S}`. `handle_bind_packet/3` may also return `{drop, Reason, S}` to discard the packet (counted as a udp-bind drop on h3 and h2). Any other return value is ignored and the previous state is kept.

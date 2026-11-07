@@ -12,12 +12,12 @@ Two of these live in every bind session, one per role:
   compressing outbound traffic to a peer we already have a
   mapping for.
 
-Draft-ietf-masque-connect-udp-listen-11 invariants enforced here:
+Draft-ietf-masque-connect-udp-listen-16 invariants enforced here:
 
 - Parity: client-even / proxy-odd context-IDs on `open`.
   Cross-parity from the peer is malformed on `install`.
 - Duplicate context-ID is malformed.
-- Per-tuple uniqueness with the two distinct draft-11 cases:
+- Per-tuple uniqueness with the two distinct draft-16 cases:
 - Cross-side conflict: peer ASSIGNs a tuple our side
   already opened. `install/3` (given the own table)
   returns `{conflict, close_proxy_id, Id}` so the session
@@ -66,6 +66,8 @@ returned `state()` through their gen_server state.
     mark_uncompressed_closed/1,
     install_ack/2,
     install_close/2,
+    reject/2,
+    refusal/1,
     lookup_by_id/2,
     lookup_by_tuple/2,
     entries/1,
@@ -117,6 +119,7 @@ returned `state()` through their gen_server state.
     bad_parity
     | bad_ip_version
     | duplicate_context_id
+    | reused_context_id
     | uncompressed_only_from_client
     | uncompressed_context_already_open
     | malformed_duplicate_tuple
@@ -219,7 +222,7 @@ open_compressed(
                     case maps:is_key(Peer, S#state.by_tuple) of
                         true ->
                             %% Same tuple already mapped on our own
-                            %% side; refuse the duplicate. Per draft-11
+                            %% side; refuse the duplicate. Per draft-16
                             %% the cross-side conflict resolution is
                             %% only triggered by an *incoming* ASSIGN.
                             {error, malformed_duplicate_tuple};
@@ -260,7 +263,7 @@ Returns:
 - `{ok, {conflict, close_proxy_id, Id}, NewState}` when the
   peer's tuple matches one our own side has already opened
   (the proxy must close the proxy-opened context per
-  draft-11). The session emits the matching CLOSE; the close
+  draft-16). The session emits the matching CLOSE; the close
   refers to the `Id` on the *own* table, not this one.
 - `{error, _}` on a malformed install.
 
@@ -320,13 +323,21 @@ own_conflict(
         _ -> Id
     end.
 
-install_1(#state{entries = E}, #compression_assign{context_id = Id}) when
+%% draft -16 section 3.3: a closed id is never reused. Only the last
+%% `?MAX_TOMBSTONES' closed ids are remembered, so memory stays bounded.
+install_1(#state{closed = Closed} = S, #compression_assign{context_id = Id} = A) ->
+    case lists:member(Id, Closed) of
+        true -> {error, reused_context_id};
+        false -> install_checked(S, A)
+    end.
+
+install_checked(#state{entries = E}, #compression_assign{context_id = Id}) when
     is_map_key(Id, E)
 ->
     {error, duplicate_context_id};
-install_1(#state{} = S, #compression_assign{ip_version = 0} = A) ->
+install_checked(#state{} = S, #compression_assign{ip_version = 0} = A) ->
     install_uncompressed(S, A);
-install_1(
+install_checked(
     #state{advertised_families = Fams} = S,
     #compression_assign{ip_version = V} = A
 ) when
@@ -336,7 +347,7 @@ install_1(
         false -> {error, unadvertised_family};
         true -> install_compressed(S, A)
     end;
-install_1(_S, _A) ->
+install_checked(_S, _A) ->
     %% the draft only allows 0 / 4 / 6
     {error, bad_ip_version}.
 
@@ -413,10 +424,31 @@ install_compressed(
                 _PriorId ->
                     %% Same-side duplicate: the peer has the same
                     %% tuple open under two of its own context-IDs.
-                    %% Malformed per draft-11.
+                    %% Malformed per draft-16.
                     {error, malformed_duplicate_tuple}
             end
     end.
+
+-doc """
+Whether a refused COMPRESSION_ASSIGN is rejected with a
+COMPRESSION_CLOSE (`reject`) or is malformed and aborts the request
+stream (`malformed`). draft -16 rejects registrations beyond the limit,
+for a family the proxy did not advertise, and to a target it refuses
+(sections 7 and 9); everything else breaks a MUST of section 3.
+""".
+-spec refusal(install_error() | peer_refused) -> reject | malformed.
+refusal(table_full) -> reject;
+refusal(unadvertised_family) -> reject;
+refusal(peer_refused) -> reject;
+refusal(_) -> malformed.
+
+-doc """
+Remember a rejected registration as closed: its id cannot be used
+again (draft -16 section 3.3).
+""".
+-spec reject(state(), pos_integer()) -> state().
+reject(#state{} = S, Id) ->
+    S#state{closed = lists:sublist([Id | S#state.closed], ?MAX_TOMBSTONES)}.
 
 %%====================================================================
 %% Inbound: install_ack (peer's ACK of our ASSIGN)

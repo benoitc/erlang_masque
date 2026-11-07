@@ -53,7 +53,7 @@ assign_uncompressed_roundtrip_test() ->
         masque_compression_capsule:decode_assign(Body)
     ).
 
-%% Encoding rejects context_id = 0 (cannot be zero per draft-11).
+%% Encoding rejects context_id = 0 (cannot be zero per draft-16).
 assign_encode_rejects_zero_id_test() ->
     R = #compression_assign{
         context_id = 0,
