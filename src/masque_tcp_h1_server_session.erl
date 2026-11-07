@@ -80,6 +80,9 @@ start_link(Args) ->
 %% was sent, `{stop, R, S}' once the handler started, so `terminate/2'
 %% cleans up and the listener stays silent.
 init(Args) ->
+    masque_quiet:stop(init_inner(Args)).
+
+init_inner(Args) ->
     case masque_session_start:deferred(Args) of
         true ->
             {ok, {starting, Args}, {continue, start}};
@@ -91,7 +94,10 @@ init(Args) ->
             end
     end.
 
-handle_continue(start, {starting, Args}) ->
+handle_continue(Continue, State) ->
+    masque_quiet:stop(handle_continue_inner(Continue, State)).
+
+handle_continue_inner(start, {starting, Args}) ->
     case start(Args) of
         {ok, S} ->
             masque_session_start:report(Args, ok),
@@ -208,7 +214,10 @@ socket_transport(_Socket) -> gen_tcp.
 %% A call for the handler, such as the stream API of a reverse connect
 %% accept stream. The reply goes out once the actions ran, so a caller
 %% that sends data waits for the blocking write.
-handle_call(Req, From, #state{handler = Handler, h_state = HS} = S) ->
+handle_call(Request, From, State) ->
+    masque_quiet:stop(handle_call_inner(Request, From, State)).
+
+handle_call_inner(Req, From, #state{handler = Handler, h_state = HS} = S) ->
     case exported(Handler, handle_call, 3) of
         false ->
             {reply, {error, unknown_call}, S};
@@ -229,38 +238,47 @@ handle_call(Req, From, #state{handler = Handler, h_state = HS} = S) ->
                     {stop, Reason, {error, closed}, S}
             end
     end;
-handle_call(_Req, _From, S) ->
+handle_call_inner(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
-handle_cast(_Msg, S) ->
+handle_cast(Msg, State) ->
+    masque_quiet:stop(handle_cast_inner(Msg, State)).
+
+handle_cast_inner(_Msg, S) ->
     {noreply, S}.
 
-handle_info({ssl, Sock, Bytes}, #state{socket = Sock} = S) ->
+handle_info(Msg, State) ->
+    masque_quiet:stop(handle_info_inner(Msg, State)).
+
+handle_info_inner({ssl, Sock, Bytes}, #state{socket = Sock} = S) ->
     handle_proxy_bytes(Bytes, arm_idle(S));
-handle_info({tcp, Sock, Bytes}, #state{socket = Sock} = S) ->
+handle_info_inner({tcp, Sock, Bytes}, #state{socket = Sock} = S) ->
     handle_proxy_bytes(Bytes, arm_idle(S));
-handle_info(
+handle_info_inner(
     {timeout, Ref, idle},
     #state{idle_ref = Ref} = S
 ) ->
     {stop, idle_timeout, S};
-handle_info({ssl_closed, Sock}, #state{socket = Sock} = S) ->
+handle_info_inner({ssl_closed, Sock}, #state{socket = Sock} = S) ->
     handle_proxy_eof(S);
-handle_info({tcp_closed, Sock}, #state{socket = Sock} = S) ->
+handle_info_inner({tcp_closed, Sock}, #state{socket = Sock} = S) ->
     handle_proxy_eof(S);
-handle_info({ssl_error, Sock, Reason}, #state{socket = Sock} = S) ->
+handle_info_inner({ssl_error, Sock, Reason}, #state{socket = Sock} = S) ->
     {stop, {ssl_error, Reason}, S};
-handle_info({tcp_error, Sock, Reason}, #state{socket = Sock} = S) ->
+handle_info_inner({tcp_error, Sock, Reason}, #state{socket = Sock} = S) ->
     {stop, {tcp_error, Reason}, S};
-handle_info({'EXIT', _Pid, _Reason}, S) ->
+handle_info_inner({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
 %% Target-side traffic counts for the idle timer too.
-handle_info(Msg, S) ->
+handle_info_inner(Msg, S) ->
     dispatch(handle_info, [Msg], arm_idle(S)).
 
-terminate(_Reason, {starting, Args}) ->
+terminate(Reason, State) ->
+    terminate_inner(masque_quiet:reason(Reason), State).
+
+terminate_inner(_Reason, {starting, Args}) ->
     masque_session_start:abandon(Args);
-terminate(
+terminate_inner(
     Reason,
     #state{
         handler = Handler,

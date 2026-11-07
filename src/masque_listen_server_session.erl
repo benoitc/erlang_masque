@@ -72,6 +72,9 @@ start_link(Args) ->
 %%====================================================================
 
 init(Args) ->
+    masque_quiet:stop(init_inner(Args)).
+
+init_inner(Args) ->
     case masque_session_start:deferred(Args) of
         true ->
             {ok, {starting, Args}, {continue, start}};
@@ -83,7 +86,10 @@ init(Args) ->
             end
     end.
 
-handle_continue(start, {starting, Args}) ->
+handle_continue(Continue, State) ->
+    masque_quiet:stop(handle_continue_inner(Continue, State)).
+
+handle_continue_inner(start, {starting, Args}) ->
     case start(Args) of
         {ok, S} ->
             masque_session_start:report(Args, ok),
@@ -212,19 +218,22 @@ replay_calls([{Request, From} | Rest], S) ->
             {stop, Reason, S2}
     end.
 
-handle_call(finalize, _From, #state{pending = true} = S) ->
+handle_call(Request, From, State) ->
+    masque_quiet:stop(handle_call_inner(Request, From, State)).
+
+handle_call_inner(finalize, _From, #state{pending = true} = S) ->
     case finalize(S) of
         {noreply, S2} -> {reply, ok, S2};
         {stop, Reason, S2} -> {stop, Reason, ok, S2};
         {error, S2} -> {reply, {error, stream_dead}, S2}
     end;
-handle_call(Request, From, #state{pending = true, early_calls = Calls} = S) ->
+handle_call_inner(Request, From, #state{pending = true, early_calls = Calls} = S) ->
     {noreply, S#state{early_calls = [{Request, From} | Calls]}};
-handle_call({request_connection, Service, Timeout}, {Pid, _} = From, S) ->
+handle_call_inner({request_connection, Service, Timeout}, {Pid, _} = From, S) ->
     request_connection(Service, Timeout, Pid, From, S);
-handle_call(info, _From, #state{transport = T, identity = I, requests = R} = S) ->
+handle_call_inner(info, _From, #state{transport = T, identity = I, requests = R} = S) ->
     {reply, #{protocol => listen, transport => T, identity => I, pending => map_size(R)}, S};
-handle_call(_Request, _From, S) ->
+handle_call_inner(_Request, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
 %% Section 5.1: a random id, registered before the capsule goes out, so
@@ -249,7 +258,10 @@ request_connection(Service, Timeout, Requester, From, S) ->
             {stop, {control_send_failed, Reason}, {error, closed}, S}
     end.
 
-handle_cast({finalize, Router}, #state{pending = true} = S) ->
+handle_cast(Msg, State) ->
+    masque_quiet:stop(handle_cast_inner(Msg, State)).
+
+handle_cast_inner({finalize, Router}, #state{pending = true} = S) ->
     Result = finalize(S),
     Reply =
         case Result of
@@ -262,17 +274,20 @@ handle_cast({finalize, Router}, #state{pending = true} = S) ->
         {stop, Reason, S2} -> {stop, Reason, S2};
         {error, S2} -> {stop, stream_dead, S2}
     end;
-handle_cast(connection_closed, S) ->
+handle_cast_inner(connection_closed, S) ->
     {stop, connection_closed, S};
-handle_cast(_Msg, S) ->
+handle_cast_inner(_Msg, S) ->
     {noreply, S}.
 
-handle_info({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
+handle_info(Msg, State) ->
+    masque_quiet:stop(handle_info_inner(Msg, State)).
+
+handle_info_inner({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
     case masque_idle:check(Ref, Idle) of
         expired -> {stop, idle_timeout, S};
         {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
     end;
-handle_info({timeout, _TRef, {request_timeout, Id}}, #state{requests = R} = S) ->
+handle_info_inner({timeout, _TRef, {request_timeout, Id}}, #state{requests = R} = S) ->
     case maps:take(Id, R) of
         {{From, _}, R2} ->
             ok = masque_reverse_registry:delete(Id),
@@ -281,7 +296,7 @@ handle_info({timeout, _TRef, {request_timeout, Id}}, #state{requests = R} = S) -
         error ->
             {noreply, S}
     end;
-handle_info({masque_reverse_accepted, Id, Stream}, #state{requests = R} = S) ->
+handle_info_inner({masque_reverse_accepted, Id, Stream}, #state{requests = R} = S) ->
     case maps:take(Id, R) of
         {{From, TRef}, R2} ->
             _ = erlang:cancel_timer(TRef),
@@ -292,29 +307,29 @@ handle_info({masque_reverse_accepted, Id, Stream}, #state{requests = R} = S) ->
             exit(Stream, kill),
             {noreply, S}
     end;
-handle_info({'DOWN', MRef, process, _, _}, #state{router_ref = MRef} = S) ->
+handle_info_inner({'DOWN', MRef, process, _, _}, #state{router_ref = MRef} = S) ->
     {stop, router_gone, S};
-handle_info(Msg, #state{pending = true, early = Early} = S) ->
+handle_info_inner(Msg, #state{pending = true, early = Early} = S) ->
     {noreply, S#state{early = [Msg | Early]}};
-handle_info({Tag, _Conn, {data, Sid, Bytes, Fin}}, #state{stream_id = Sid} = S) when
+handle_info_inner({Tag, _Conn, {data, Sid, Bytes, Fin}}, #state{stream_id = Sid} = S) when
     Tag =:= quic_h3; Tag =:= h2
 ->
     stream_in(Bytes, Fin, touch(S));
-handle_info({masque_stream_data, Sid, Bytes, Fin}, #state{stream_id = Sid} = S) ->
+handle_info_inner({masque_stream_data, Sid, Bytes, Fin}, #state{stream_id = Sid} = S) ->
     stream_in(Bytes, Fin, touch(S));
-handle_info({Tag, _Conn, {stream_reset, Sid, _}}, #state{stream_id = Sid} = S) when
+handle_info_inner({Tag, _Conn, {stream_reset, Sid, _}}, #state{stream_id = Sid} = S) when
     Tag =:= quic_h3; Tag =:= h2
 ->
     {stop, peer_reset, S};
-handle_info({masque_stream_reset, Sid, _}, #state{stream_id = Sid} = S) ->
+handle_info_inner({masque_stream_reset, Sid, _}, #state{stream_id = Sid} = S) ->
     {stop, peer_reset, S};
-handle_info({quic_h3, _Conn, {send_ready, _}}, S) ->
+handle_info_inner({quic_h3, _Conn, {send_ready, _}}, S) ->
     {noreply, S};
-handle_info({h2, _Conn, {closed, _}}, S) ->
+handle_info_inner({h2, _Conn, {closed, _}}, S) ->
     {stop, peer_closed, S};
-handle_info({'EXIT', _Pid, _Reason}, S) ->
+handle_info_inner({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
-handle_info(Msg, S) ->
+handle_info_inner(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
 %% Capsules from the client. Unknown types are skipped (RFC 9297
@@ -388,9 +403,12 @@ dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
 touch(#state{idle = undefined} = S) -> S;
 touch(#state{idle = Idle} = S) -> S#state{idle = masque_idle:touch(Idle)}.
 
-terminate(_Reason, {starting, Args}) ->
+terminate(Reason, State) ->
+    terminate_inner(masque_quiet:reason(Reason), State).
+
+terminate_inner(_Reason, {starting, Args}) ->
     masque_session_start:abandon(Args);
-terminate(Reason, #state{handler = Handler, h_state = HS, requests = R} = S) ->
+terminate_inner(Reason, #state{handler = Handler, h_state = HS, requests = R} = S) ->
     %% Requests still waiting for an accept fail now.
     maps:foreach(
         fun(_Id, {From, TRef}) ->

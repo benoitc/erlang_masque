@@ -39,6 +39,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Tunnels that end normally, because the target closed, the peer reset
+  or a timer ran out, no longer log an error report. A busy proxy logged
+  one for nearly every finished connection.
 - CONNECT-TCP clients on HTTP/3 now send keepalives themselves. A quiet
   tunnel stayed open only because the proxy sent them.
 

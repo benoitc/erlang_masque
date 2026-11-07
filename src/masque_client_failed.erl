@@ -42,7 +42,7 @@ guard(Fun) ->
     try
         Fun()
     catch
-        exit:{Reason, {gen_statem, call, _}} -> {error, Reason};
-        exit:{Reason, {gen_server, call, _}} -> {error, Reason};
+        exit:{Reason, {gen_statem, call, _}} -> {error, masque_quiet:reason(Reason)};
+        exit:{Reason, {gen_server, call, _}} -> {error, masque_quiet:reason(Reason)};
         exit:Reason -> {error, Reason}
     end.

@@ -81,6 +81,9 @@ start_link(Args) ->
 %% was sent, `{stop, R, S}' once the handler started, so `terminate/2'
 %% cleans up and the listener stays silent.
 init(Args) ->
+    masque_quiet:stop(init_inner(Args)).
+
+init_inner(Args) ->
     case masque_session_start:deferred(Args) of
         true ->
             {ok, {starting, Args}, {continue, start}};
@@ -92,7 +95,10 @@ init(Args) ->
             end
     end.
 
-handle_continue(start, {starting, Args}) ->
+handle_continue(Continue, State) ->
+    masque_quiet:stop(handle_continue_inner(Continue, State)).
+
+handle_continue_inner(start, {starting, Args}) ->
     case start(Args) of
         {ok, S} ->
             masque_session_start:report(Args, ok),
@@ -351,7 +357,10 @@ release_credit(N, #state{held = Held, transport = T} = S) ->
     _ = consume_bytes(Tag, Release, S),
     S#state{held = Held - Release}.
 
-handle_call(
+handle_call(Request, From, State) ->
+    masque_quiet:stop(handle_call_inner(Request, From, State)).
+
+handle_call_inner(
     finalize,
     _From,
     #state{pending_actions = Actions} = S
@@ -366,7 +375,7 @@ handle_call(
 %% A call for the handler, such as the stream API of a reverse connect
 %% accept stream. The reply goes out once the actions ran, so a caller
 %% that sends data waits for the blocking write.
-handle_call(Req, From, #state{handler = Handler, h_state = HS} = S) ->
+handle_call_inner(Req, From, #state{handler = Handler, h_state = HS} = S) ->
     case exported(Handler, handle_call, 3) of
         false ->
             {reply, {error, unknown_call}, S};
@@ -387,13 +396,16 @@ handle_call(Req, From, #state{handler = Handler, h_state = HS} = S) ->
                     {stop, Reason, {error, closed}, S}
             end
     end;
-handle_call(_Req, _From, S) ->
+handle_call_inner(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
 %% Asynchronous finalize from the router: run the same steps as the
 %% `finalize' call and report back; the session stops if the stream
 %% could not be opened.
-handle_cast({finalize, Router}, #state{pending_actions = Actions} = S) when
+handle_cast(Msg, State) ->
+    masque_quiet:stop(handle_cast_inner(Msg, State)).
+
+handle_cast_inner({finalize, Router}, #state{pending_actions = Actions} = S) when
     Actions =/= undefined
 ->
     Result = finalize(S),
@@ -408,22 +420,25 @@ handle_cast({finalize, Router}, #state{pending_actions = Actions} = S) when
         {stop, Reason, S2} -> {stop, Reason, S2};
         {error, S2} -> {stop, stream_dead, S2}
     end;
-handle_cast(connection_closed, S) ->
+handle_cast_inner(connection_closed, S) ->
     {stop, connection_closed, S};
-handle_cast(_Msg, S) ->
+handle_cast_inner(_Msg, S) ->
     {noreply, S}.
 
 %% Incoming stream data - raw TCP bytes
 %% Every message counts as traffic for the idle timer; the timer's
 %% own message checks whether the tunnel has been idle long enough.
-handle_info({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
+handle_info(Msg, State) ->
+    masque_quiet:stop(handle_info_inner(Msg, State)).
+
+handle_info_inner({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
     case masque_idle:check(Ref, Idle) of
         expired -> {stop, idle_timeout, S};
         {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
     end;
-handle_info(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
+handle_info_inner(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
     handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
-handle_info(Msg, S) ->
+handle_info_inner(Msg, S) ->
     handle_traffic(Msg, S).
 
 handle_traffic(
@@ -492,9 +507,12 @@ handle_traffic(Msg, #state{pending_actions = Actions, early = Early} = S) when
 handle_traffic(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
-terminate(_Reason, {starting, Args}) ->
+terminate(Reason, State) ->
+    terminate_inner(masque_quiet:reason(Reason), State).
+
+terminate_inner(_Reason, {starting, Args}) ->
     masque_session_start:abandon(Args);
-terminate(
+terminate_inner(
     Reason,
     #state{
         conn = Conn,
@@ -512,7 +530,7 @@ terminate(
     try_callback(Handler, terminate, [Reason, HState]),
     emit_tunnel_closed(S),
     ok;
-terminate(
+terminate_inner(
     Reason,
     #state{
         conn = Conn,

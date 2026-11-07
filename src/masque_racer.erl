@@ -406,7 +406,7 @@ transfer_owner(_Transport, Pid, Owner) ->
         ok -> ok;
         Other -> {error, {owner_transfer_failed, Other}}
     catch
-        exit:{Reason, {gen_statem, call, _}} -> {error, Reason};
+        exit:{Reason, {gen_statem, call, _}} -> {error, masque_quiet:reason(Reason)};
         _:Reason -> {error, Reason}
     end.
 

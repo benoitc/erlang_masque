@@ -57,6 +57,9 @@ start_link(Args) ->
 %% With a `starter' the real start runs in `handle_continue/2' so the
 %% session supervisor is not held up (see `masque_session_start').
 init(Args) ->
+    masque_quiet:stop(init_inner(Args)).
+
+init_inner(Args) ->
     case masque_session_start:deferred(Args) of
         true ->
             {ok, {starting, Args}, {continue, start}};
@@ -68,7 +71,10 @@ init(Args) ->
             end
     end.
 
-handle_continue(start, {starting, Args}) ->
+handle_continue(Continue, State) ->
+    masque_quiet:stop(handle_continue_inner(Continue, State)).
+
+handle_continue_inner(start, {starting, Args}) ->
     case start(Args) of
         {ok, S} ->
             masque_session_start:report(Args, ok),
@@ -172,7 +178,10 @@ maybe_flush_buf(#state{} = S) ->
 
 %% A call for the handler, such as the stream API of a reverse connect
 %% accept stream. The reply goes out once the actions ran.
-handle_call(Req, From, #state{handler = Handler, h_state = HS} = S) ->
+handle_call(Request, From, State) ->
+    masque_quiet:stop(handle_call_inner(Request, From, State)).
+
+handle_call_inner(Req, From, #state{handler = Handler, h_state = HS} = S) ->
     case exported(Handler, handle_call, 3) of
         false ->
             {reply, {error, unknown_call}, S};
@@ -192,22 +201,28 @@ handle_call(Req, From, #state{handler = Handler, h_state = HS} = S) ->
                     {stop, Reason, {error, closed}, S}
             end
     end;
-handle_call(_Req, _From, S) ->
+handle_call_inner(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
-handle_cast(_Msg, S) ->
+handle_cast(Msg, State) ->
+    masque_quiet:stop(handle_cast_inner(Msg, State)).
+
+handle_cast_inner(_Msg, S) ->
     {noreply, S}.
 
 %% Every message counts as traffic for the idle timer; the timer's
 %% own message checks whether the tunnel has been idle long enough.
-handle_info({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
+handle_info(Msg, State) ->
+    masque_quiet:stop(handle_info_inner(Msg, State)).
+
+handle_info_inner({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
     case masque_idle:check(Ref, Idle) of
         expired -> {stop, idle_timeout, S};
         {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
     end;
-handle_info(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
+handle_info_inner(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
     handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
-handle_info(Msg, S) ->
+handle_info_inner(Msg, S) ->
     handle_traffic(Msg, S).
 
 handle_traffic(
@@ -239,9 +254,12 @@ handle_traffic({h2, _Conn, {closed, _Reason}}, S) ->
 handle_traffic(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
-terminate(_Reason, {starting, Args}) ->
+terminate(Reason, State) ->
+    terminate_inner(masque_quiet:reason(Reason), State).
+
+terminate_inner(_Reason, {starting, Args}) ->
     masque_session_start:abandon(Args);
-terminate(Reason, S) ->
+terminate_inner(Reason, S) ->
     emit_tunnel_closed(S),
     terminate_session(Reason, S).
 

@@ -146,7 +146,10 @@ await_response(#state{conn = C, stream_id = Sid} = S, Timeout) ->
     end.
 
 %% Section 5.2: an id the proxy offered and that is not answered yet.
-handle_call({accept_spec, Id}, _From, #state{open = Open} = S) ->
+handle_call(Request, From, State) ->
+    masque_quiet:stop(handle_call_inner(Request, From, State)).
+
+handle_call_inner({accept_spec, Id}, _From, #state{open = Open} = S) ->
     case maps:take(Id, Open) of
         {Service, Open2} ->
             Spec = #{
@@ -160,7 +163,7 @@ handle_call({accept_spec, Id}, _From, #state{open = Open} = S) ->
         error ->
             {reply, {error, unknown_request}, S}
     end;
-handle_call({decline, Id}, _From, #state{open = Open} = S) ->
+handle_call_inner({decline, Id}, _From, #state{open = Open} = S) ->
     case maps:take(Id, Open) of
         {_, Open2} ->
             reply_send(masque_reverse_capsule:encode({connection_request_declined, Id}), S#state{
@@ -169,17 +172,17 @@ handle_call({decline, Id}, _From, #state{open = Open} = S) ->
         error ->
             {reply, {error, unknown_request}, S}
     end;
-handle_call({advertise, Services}, _From, S) ->
+handle_call_inner({advertise, Services}, _From, S) ->
     reply_send(masque_reverse_capsule:encode({available_services, Services}), S);
-handle_call(migrate, _From, #state{transport = h3, upstream = Up} = S) ->
+handle_call_inner(migrate, _From, #state{transport = h3, upstream = Up} = S) ->
     {reply, masque_upstream_owner:migrate(Up), S};
-handle_call(migrate, _From, S) ->
+handle_call_inner(migrate, _From, S) ->
     {reply, {error, not_supported}, S};
-handle_call(info, _From, #state{transport = T, open = Open} = S) ->
+handle_call_inner(info, _From, #state{transport = T, open = Open} = S) ->
     {reply, #{protocol => listen, transport => T, pending => map_size(Open)}, S};
-handle_call(stop, _From, S) ->
+handle_call_inner(stop, _From, S) ->
     {stop, normal, ok, S};
-handle_call(_Request, _From, S) ->
+handle_call_inner(_Request, _From, S) ->
     {reply, {error, unknown_call}, S}.
 
 %% Capsule writes wait for the transport (`masque_stream_send'); a
@@ -190,26 +193,32 @@ reply_send(Capsule, #state{transport = T, conn = C, stream_id = Sid} = S) ->
         {error, Reason} -> {stop, {control_send_failed, Reason}, {error, closed}, S}
     end.
 
-handle_cast(_Msg, S) ->
+handle_cast(Msg, State) ->
+    masque_quiet:stop(handle_cast_inner(Msg, State)).
+
+handle_cast_inner(_Msg, S) ->
     {noreply, S}.
 
-handle_info({Tag, C, {data, Sid, Bytes, Fin}}, #state{conn = C, stream_id = Sid} = S) when
+handle_info(Msg, State) ->
+    masque_quiet:stop(handle_info_inner(Msg, State)).
+
+handle_info_inner({Tag, C, {data, Sid, Bytes, Fin}}, #state{conn = C, stream_id = Sid} = S) when
     Tag =:= quic_h3; Tag =:= h2
 ->
     stream_in(Bytes, Fin, S);
-handle_info({Tag, C, {stream_reset, Sid, _}}, #state{conn = C, stream_id = Sid} = S) when
+handle_info_inner({Tag, C, {stream_reset, Sid, _}}, #state{conn = C, stream_id = Sid} = S) when
     Tag =:= quic_h3; Tag =:= h2
 ->
     {stop, peer_reset, S};
-handle_info({Tag, C, {closed, _}}, #state{conn = C} = S) when Tag =:= quic_h3; Tag =:= h2 ->
+handle_info_inner({Tag, C, {closed, _}}, #state{conn = C} = S) when Tag =:= quic_h3; Tag =:= h2 ->
     {stop, peer_closed, S};
-handle_info({quic_h3, _C, {send_ready, _}}, S) ->
+handle_info_inner({quic_h3, _C, {send_ready, _}}, S) ->
     {noreply, S};
-handle_info({'DOWN', Ref, process, _, _}, #state{owner_mon = Ref} = S) ->
+handle_info_inner({'DOWN', Ref, process, _, _}, #state{owner_mon = Ref} = S) ->
     {stop, owner_gone, S};
-handle_info({'EXIT', _Pid, _Reason}, S) ->
+handle_info_inner({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
-handle_info(_Msg, S) ->
+handle_info_inner(_Msg, S) ->
     {noreply, S}.
 
 stream_in(Bytes, Fin, #state{buf = Buf} = S) ->
@@ -251,7 +260,10 @@ capsule(connection_request, Value, #state{seen = Seen, open = Open, owner = Owne
 capsule(_Other, _Value, S) ->
     {ok, S}.
 
-terminate(Reason, #state{owner = Owner, upstream = Up} = S) ->
+terminate(Reason, State) ->
+    terminate_inner(masque_quiet:reason(Reason), State).
+
+terminate_inner(Reason, #state{owner = Owner, upstream = Up} = S) ->
     _ =
         (try
             end_stream(Reason, S)
@@ -271,7 +283,7 @@ terminate(Reason, #state{owner = Owner, upstream = Up} = S) ->
             _:_ -> ok
         end),
     ok;
-terminate(_Reason, _S) ->
+terminate_inner(_Reason, _S) ->
     ok.
 
 end_stream(Reason, #state{transport = h3, conn = C, stream_id = Sid}) when
