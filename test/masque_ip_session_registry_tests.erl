@@ -258,3 +258,38 @@ wait_for(Pred, Until) ->
                     wait_for(Pred, Until)
             end
     end.
+
+%% The table outlives a registry that is restarting (masque_sup owns it):
+%% a registration in that window is refused, not silently dropped.
+registry_down_refuses_test() ->
+    case {whereis(masque_ip_session_registry), ets:whereis(masque_ip_session_registry)} of
+        {undefined, undefined} ->
+            Self = self(),
+            Owner = spawn(fun() ->
+                ok = masque_ip_session_registry:new_table(),
+                Self ! table_ready,
+                receive
+                    stop -> ok
+                end
+            end),
+            receive
+                table_ready -> ok
+            end,
+            ?assertEqual(
+                {error, registry_down},
+                masque_ip_session_registry:register(4, {10, 9, 9, 9}, 32, self(), 0)
+            ),
+            Owner ! stop;
+        _ ->
+            %% The application (or another test) holds the registry.
+            ok
+    end.
+
+%% Without the application (no table, no registry) writes are no-ops.
+no_application_is_noop_test() ->
+    case {whereis(masque_ip_session_registry), ets:whereis(masque_ip_session_registry)} of
+        {undefined, undefined} ->
+            ?assertEqual(ok, masque_ip_session_registry:register(4, {10, 9, 9, 8}, 32, self(), 0));
+        _ ->
+            ok
+    end.

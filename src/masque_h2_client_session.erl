@@ -184,6 +184,16 @@ connecting_inner(
 ) when is_integer(StreamId), StreamId > LastId ->
     reply_handshake(Data, {error, goaway}),
     {stop, goaway};
+%% Interim responses (1xx, such as 103 Early Hints) come before the
+%% final one and are skipped (RFC 9110 section 15.2).
+connecting_inner(
+    info,
+    {Tag, _Conn, {response, StreamId, Status, _Headers}},
+    #data{stream_id = StreamId}
+) when
+    (Tag =:= quic_h3 orelse Tag =:= h2), Status >= 100, Status < 200
+->
+    keep_state_and_data;
 connecting_inner(
     info,
     {h2, _Conn, {response, StreamId, Status, Headers}},
@@ -596,7 +606,7 @@ deliver_capsule(datagram, Inner, Data) ->
 deliver_capsule(Type, Inner, #data{owner = Owner} = Data) when
     is_integer(Type)
 ->
-    masque_client_owner:send(Owner, {masque_capsule, self(), Type, Inner}),
+    masque_client_owner:send_bounded(Owner, {masque_capsule, self(), Type, Inner}),
     Data.
 
 client_stream_abort(

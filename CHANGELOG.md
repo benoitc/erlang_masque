@@ -8,6 +8,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- HTTP/1.1 listeners take h1's own limits before the upgrade (TLS
+  handshake, request and idle timeouts, header sizes), so slow or
+  oversized clients can be dropped sooner.
+- A CONNECT-TCP tunnel on HTTP/3 tells its owner when a full send queue
+  has drained, so the owner knows when to send again instead of polling.
+- A reverse connect agent takes `max_pending_requests` (64 by default):
+  requests past it are declined for you.
 - HTTP/3 listeners and clients take QUIC options. A listener can pick its
   certificate per server name, carry more than 100 tunnels per connection,
   or require client certificates. A client can set a certificate or idle
@@ -39,6 +46,44 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A client could get past the per-connection tunnel limit on HTTP/3 by
+  resetting streams while their tunnels were starting, and so hold far
+  more sockets and lookups on the proxy than the limit allows.
+- A client could stall a Connect-UDP-Bind tunnel for hours by not reading
+  its responses, and a proxy write could wait for ever when the client
+  kept the rest of its connection busy. Blocked writes now give up.
+- Datagrams sent on a CONNECT-TCP or reverse connect stream kept the
+  tunnel from ever idling out. They are now dropped.
+- When a client dropped its connection while packets were still on their
+  way, every tunnel on it logged a crash report. A handler crash was also
+  reported three times; it is now reported once.
+- A reverse connect accept stream that nobody waited for any more was
+  killed, which left an HTTP/2 tunnel slot taken until the connection
+  closed. Requests left behind by a control channel that was killed are
+  now cleaned up too.
+- A handler that took longer than 30 s to accept a tunnel was reported
+  to the client as a failed DNS lookup; it is now a gateway timeout (504)
+  on HTTP/3 and HTTP/2.
+- CONNECT-UDP, CONNECT-IP and Connect-UDP-Bind clients on HTTP/1.1 could
+  hang for ever on a proxy that stopped reading. Their writes now give up
+  after 30 s and the tunnel ends.
+- A proxy could grow a reverse connect agent's memory without limit by
+  sending connection requests, or flood a client's mailbox with capsules
+  or repeated CONNECT-IP updates. All of these are now bounded.
+- HTTP/3 tunnels on a shared connection, and the streams a reverse
+  connect agent accepted, were not told when that connection was closed
+  on the client side, and crashed on their next write. Connections a
+  restarted pool no longer knew about stayed open.
+- Against a proxy that allows fewer than 100 streams per connection,
+  pooled tunnels failed once the connection was full instead of opening
+  another one. A tunnel joining a connection still being opened now waits
+  no longer than its own connect timeout.
+- CONNECT-UDP, CONNECT-IP and Connect-UDP-Bind clients refused a tunnel
+  when the proxy sent an informational response (such as 103 Early
+  Hints) before accepting it.
+- The CONNECT-IP address registry accepted registrations while it was
+  restarting without recording them, so two sessions could be given the
+  same address.
 - An HTTP/3 client that changed networks several times in a row could be
   left unable to move again, mostly on a busy machine. This comes from the
   update to quic 2.5.0, which also fixes slow decoding of large HTTP/3

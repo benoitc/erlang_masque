@@ -30,7 +30,7 @@
     buf = <<>> :: binary(),
     %% Request ids seen on this channel (section 5.1: never reused), and
     %% the ones not answered yet.
-    seen = #{} :: #{non_neg_integer() => true},
+    seen = masque_reverse_ids:new() :: masque_reverse_ids:ids(),
     open = #{} :: #{non_neg_integer() => masque_reverse_capsule:service()},
     accept_template :: binary(),
     opts :: map(),
@@ -249,16 +249,38 @@ capsules(Buf, S) ->
 %% error. Other capsule types are skipped (RFC 9297 section 3.3).
 capsule(connection_request, Value, #state{seen = Seen, open = Open, owner = Owner} = S) ->
     case masque_reverse_capsule:decode(connection_request, Value) of
-        {ok, {connection_request, Id, _}} when is_map_key(Id, Seen) ->
-            {stop, malformed_capsule, S};
         {ok, {connection_request, Id, Service}} ->
-            Owner ! {masque_connection_request, self(), Id, Service},
-            {ok, S#state{seen = Seen#{Id => true}, open = Open#{Id => Service}}};
+            case masque_reverse_ids:seen(Id, Seen) of
+                true ->
+                    {stop, malformed_capsule, S};
+                false ->
+                    S2 = S#state{seen = masque_reverse_ids:add(Id, Seen)},
+                    case map_size(Open) >= max_pending(S) of
+                        true ->
+                            %% The owner already has as many requests as it
+                            %% may hold: decline, so a proxy cannot grow the
+                            %% agent's memory or its owner's mailbox.
+                            decline_now(Id, S2);
+                        false ->
+                            Owner ! {masque_connection_request, self(), Id, Service},
+                            {ok, S2#state{open = Open#{Id => Service}}}
+                    end
+            end;
         {error, _} ->
             {stop, malformed_capsule, S}
     end;
 capsule(_Other, _Value, S) ->
     {ok, S}.
+
+max_pending(#state{opts = Opts}) ->
+    maps:get(max_pending_requests, Opts, ?MASQUE_DEFAULT_MAX_PENDING_REQUESTS).
+
+decline_now(Id, #state{transport = T, conn = C, stream_id = Sid} = S) ->
+    Capsule = masque_reverse_capsule:encode({connection_request_declined, Id}),
+    case masque_stream_send:send(T, C, Sid, Capsule, false) of
+        ok -> {ok, S};
+        {error, Reason} -> {stop, {control_send_failed, Reason}, S}
+    end.
 
 terminate(Reason, State) ->
     terminate_inner(masque_quiet:reason(Reason), State).

@@ -15,12 +15,17 @@
     h3_listener_quic_opts_override/1,
     h3_client_quic_opts_override/1,
     h3_more_streams_per_connection/1,
+    h3_pool_learns_proxy_stream_limit/1,
     h3_session_ticket/1,
     h3_client_certificate/1,
     h3_client_without_certificate_refused/1,
     h3_pool_keeps_quic_opts_apart/1,
+    h3_pool_restart_ends_its_owners/1,
+    h3_pool_checkout_keeps_caller_timeout/1,
+    h3_tcp_send_ready_after_full_queue/1,
     h2_sni_fun/1,
-    h1_sni_fun/1
+    h1_sni_fun/1,
+    h1_handshake_timeout/1
 ]).
 -export([accept/1, init/2, handle_data/2, terminate/2]).
 
@@ -35,12 +40,17 @@ all() ->
         h3_listener_quic_opts_override,
         h3_client_quic_opts_override,
         h3_more_streams_per_connection,
+        h3_pool_learns_proxy_stream_limit,
         h3_session_ticket,
         h3_client_certificate,
         h3_client_without_certificate_refused,
         h3_pool_keeps_quic_opts_apart,
+        h3_pool_restart_ends_its_owners,
+        h3_pool_checkout_keeps_caller_timeout,
+        h3_tcp_send_ready_after_full_queue,
         h2_sni_fun,
-        h1_sni_fun
+        h1_sni_fun,
+        h1_handshake_timeout
     ].
 
 init_per_suite(Config) ->
@@ -129,6 +139,20 @@ h3_more_streams_per_connection(Config) ->
     [masque:close(S) || S <- Sessions],
     ok.
 
+%% A proxy that allows fewer streams than the pool expects (10, not 100):
+%% every tunnel still connects, the pool opening more connections.
+h3_pool_learns_proxy_stream_limit(Config) ->
+    Port = start_h3(Config, #{
+        max_tunnels_per_connection => 0,
+        quic_opts => #{max_streams_bidi => 10}
+    }),
+    Opts = #{protocol => tcp, upstream_pool => true},
+    Sessions = [connect(<<"127.0.0.1">>, Port, Config, Opts) || _ <- lists:seq(1, 30)],
+    [ok = echo(S) || S <- Sessions],
+    ?assert(length(server_connections()) >= 3),
+    [masque:close(S) || S <- Sessions],
+    ok.
+
 %% The client hands the ticket to its owner, and a new connection can
 %% use it.
 h3_session_ticket(Config) ->
@@ -197,6 +221,101 @@ h3_pool_keeps_quic_opts_apart(Config) ->
     ?assertEqual(2, length(server_connections())),
     masque:close(A),
     masque:close(B).
+
+upstream_owners() ->
+    [
+        P
+     || P <- processes(),
+        {dictionary, D} <- [process_info(P, dictionary)],
+        {_, {masque_upstream_owner, _, _}} <- [lists:keyfind('$initial_call', 1, D)]
+    ].
+
+%% A caller that joins a dial already in flight gives up after its own
+%% timeout, not the pool's 60 s: here the "proxy" never answers.
+h3_pool_checkout_keeps_caller_timeout(_Config) ->
+    {ok, Silent} = gen_udp:open(0, [binary, {ip, {127, 0, 0, 1}}]),
+    {ok, Port} = inet:port(Silent),
+    Uri = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    Opts = #{protocol => tcp, upstream_pool => true, transports => [h3], verify => verify_none},
+    Self = self(),
+    _ = spawn(fun() ->
+        Self ! {first, masque:connect(Uri, {<<"127.0.0.1">>, 9}, Opts#{timeout => 8000})}
+    end),
+    timer:sleep(200),
+    T0 = erlang:monotonic_time(millisecond),
+    ?assertMatch({error, _}, masque:connect(Uri, {<<"127.0.0.1">>, 9}, Opts#{timeout => 1000})),
+    Elapsed = erlang:monotonic_time(millisecond) - T0,
+    ct:pal("second caller gave up after ~p ms", [Elapsed]),
+    ?assert(Elapsed < 3000),
+    receive
+        {first, _} -> ok
+    after 15000 -> ct:fail(first_caller_stuck)
+    end,
+    gen_udp:close(Silent).
+
+%% A CONNECT-TCP send refused because the h3 send queue is full is
+%% followed by `masque_send_ready' once the queue drains, so the owner
+%% knows when to send again instead of polling.
+h3_tcp_send_ready_after_full_queue(Config) ->
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {ip, {127, 0, 0, 1}}, {recbuf, 4096}]),
+    {ok, TPort} = inet:port(L),
+    Target = spawn(fun() ->
+        {ok, Sock} = gen_tcp:accept(L, 10000),
+        receive
+            go -> ok
+        end,
+        drain_tcp(Sock)
+    end),
+    ok = gen_tcp:controlling_process(L, Target),
+    Port = start_h3(Config, #{}),
+    Uri = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    {ok, Sess} = masque:connect(Uri, {<<"127.0.0.1">>, TPort}, #{
+        protocol => tcp, transports => [h3], verify => verify_none, timeout => 5000
+    }),
+    Chunk = binary:copy(<<"q">>, 65536),
+    ok = fill_until_full(Sess, Chunk, 4000),
+    Target ! go,
+    receive
+        {masque_send_ready, Sess} -> ok
+    after 10000 -> ct:fail(no_send_ready)
+    end,
+    ?assertEqual(ok, masque:send(Sess, <<"more">>)),
+    masque:close(Sess),
+    exit(Target, kill).
+
+fill_until_full(_Sess, _Chunk, 0) ->
+    ct:fail(send_queue_never_full);
+fill_until_full(Sess, Chunk, N) ->
+    case masque:send(Sess, Chunk) of
+        ok -> fill_until_full(Sess, Chunk, N - 1);
+        {error, send_queue_full} -> ok
+    end.
+
+drain_tcp(Sock) ->
+    case gen_tcp:recv(Sock, 0) of
+        {ok, _} -> drain_tcp(Sock);
+        {error, _} -> ok
+    end.
+
+%% A pool that dies and restarts no longer knows the connections it
+%% opened: they end with it, and the tunnels on them are told.
+h3_pool_restart_ends_its_owners(Config) ->
+    Port = start_h3(Config, #{}),
+    Earlier = upstream_owners(),
+    Sess = connect(<<"127.0.0.1">>, Port, Config, #{protocol => tcp, upstream_pool => true}),
+    ok = echo(Sess),
+    %% Owners left by earlier cases are still on their idle timer.
+    [Owner] = upstream_owners() -- Earlier,
+    MRef = erlang:monitor(process, Owner),
+    exit(whereis(masque_upstream_pool), kill),
+    receive
+        {'DOWN', MRef, process, Owner, _} -> ok
+    after 5000 -> ct:fail(owner_outlived_pool)
+    end,
+    receive
+        {masque_closed, Sess, _} -> ok
+    after 5000 -> ct:fail(tunnel_not_told)
+    end.
 
 %%====================================================================
 %% h2 and h1 listeners
@@ -344,3 +463,14 @@ echo_loop(Sock) ->
         {error, _} ->
             gen_tcp:close(Sock)
     end.
+
+%% h1's own limits before the upgrade reach h1: a short handshake timeout
+%% closes a client that never sends its TLS hello.
+h1_handshake_timeout(Config) ->
+    #{cert_file := Cert, key_file := Key} = ?config(certs, Config),
+    {ok, Ref} = masque:start_listener_h1(?config(name, Config), #{
+        port => 0, cert => Cert, key => Key, handshake_timeout => 300
+    }),
+    {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, h1:server_port(Ref), [binary, {active, false}]),
+    ?assertEqual({error, closed}, gen_tcp:recv(Sock, 0, 3000)),
+    gen_tcp:close(Sock).

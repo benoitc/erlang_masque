@@ -237,6 +237,16 @@ connecting_inner({call, From}, stop, Data) ->
 connecting_inner({call, From}, _Other, Data) ->
     %% No outbound API works before the handshake completes.
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
+%% Interim responses (1xx, such as 103 Early Hints) come before the
+%% final one and are skipped (RFC 9110 section 15.2).
+connecting_inner(
+    info,
+    {Tag, _Conn, {response, StreamId, Status, _Headers}},
+    #data{stream_id = StreamId}
+) when
+    (Tag =:= quic_h3 orelse Tag =:= h2), Status >= 100, Status < 200
+->
+    keep_state_and_data;
 connecting_inner(
     info,
     {Tag, _Conn, {response, StreamId, Status, Headers}},

@@ -197,7 +197,9 @@ handle_info_inner({masque_reverse_accepted, Id, Stream}, #state{requests = R} = 
             gen_server:reply(From, {ok, Stream}),
             {noreply, arm_idle(S#state{requests = R2})};
         error ->
-            exit(Stream, kill),
+            %% Stopped, not killed, so its `terminate' resets the stream
+            %% and frees the h2 tunnel slot and the gauge.
+            gen_server:cast(Stream, abandon),
             {noreply, S}
     end;
 handle_info_inner({'EXIT', _Pid, _Reason}, S) ->

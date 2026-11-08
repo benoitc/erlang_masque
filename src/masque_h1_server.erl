@@ -62,7 +62,24 @@ start_h1_listener(Name, Opts0) ->
         handler => Handler
     },
     %% `ssl_opts' are TLS options for the listening socket, such as `sni_fun'.
-    ServerOpts = maybe_add(ssl_opts, Opts, maybe_add(acceptors, Opts, ServerOpts0)),
+    %% The h1 limits before the upgrade (TLS handshake, request line and
+    %% headers) are passed through, so an operator can tighten them.
+    ServerOpts = lists:foldl(
+        fun(Key, Acc) -> maybe_add(Key, Opts, Acc) end,
+        ServerOpts0,
+        [
+            ssl_opts,
+            acceptors,
+            handshake_timeout,
+            request_timeout,
+            idle_timeout,
+            max_request_line_size,
+            max_header_name_size,
+            max_header_value_size,
+            max_headers,
+            max_header_block_size
+        ]
+    ),
     case h1:start_server(Name, Port, ServerOpts) of
         {ok, Ref} ->
             persistent_term:put({masque_h1_ref, Name}, Ref),
@@ -286,6 +303,10 @@ spawn_session(Conn, StreamId, Protocol, Handler, HOpts, Req) ->
 %% A session that stopped in `init/1' exits quietly (`masque_quiet').
 map_init_error({shutdown, {masque_quiet, _}} = Quiet) ->
     map_init_error(masque_quiet:reason(Quiet));
+%% The handler's `init' ran past the start deadline: the target did not
+%% answer in time (504), not a name that failed to resolve.
+map_init_error({start_timeout, _}) ->
+    upstream_timeout;
 map_init_error({reject, Err}) ->
     Err;
 map_init_error(_) ->

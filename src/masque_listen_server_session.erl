@@ -282,6 +282,11 @@ handle_cast_inner(_Msg, S) ->
 handle_info(Msg, State) ->
     masque_quiet:stop(handle_info_inner(Msg, State)).
 
+%% This stream carries no HTTP datagrams; the h3 router passes on
+%% whatever the peer sends for it. Drop them before they count as
+%% traffic, so they cannot keep the stream from idling out or pile up.
+handle_info_inner({masque_datagram_in, _, _}, S) ->
+    {noreply, S};
 handle_info_inner({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
     case masque_idle:check(Ref, Idle) of
         expired -> {stop, idle_timeout, S};
@@ -304,7 +309,9 @@ handle_info_inner({masque_reverse_accepted, Id, Stream}, #state{requests = R} = 
             {noreply, touch(S#state{requests = R2})};
         error ->
             %% The caller gave up first: nobody owns the stream.
-            exit(Stream, kill),
+            %% Stopped, not killed, so its `terminate' resets the stream
+            %% and frees the h2 tunnel slot and the gauge.
+            gen_server:cast(Stream, abandon),
             {noreply, S}
     end;
 handle_info_inner({'DOWN', MRef, process, _, _}, #state{router_ref = MRef} = S) ->

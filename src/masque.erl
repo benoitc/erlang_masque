@@ -427,9 +427,15 @@ dial_single_or_pool(
     case masque_racer:checkout_pool(Transport, Opts) of
         {ok, Opts1} ->
             case dial_single(Mod, Target, Opts1#{transport => Transport}, Owner) of
-                {error, owner_gone} when not is_map_key(pool_retried, Opts) ->
+                {error, R} when
+                    (R =:= owner_gone orelse R =:= stream_limit orelse R =:= goaway),
+                    not is_map_key(pool_retried, Opts)
+                ->
                     %% The pooled connection closed under us (idle
-                    %% timer): check out again, once.
+                    %% timer), hit the proxy's stream limit, or is
+                    %% draining (GOAWAY): check out again, once. The
+                    %% owner no longer offers itself, so the pool dials
+                    %% another connection.
                     dial_single_or_pool(Mod, Transport, Target, Opts#{pool_retried => true}, Owner);
                 Result ->
                     Result

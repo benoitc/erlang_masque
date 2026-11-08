@@ -852,6 +852,9 @@ do_connect(Data, Opts) ->
     Port = Data#data.proxy_port,
     case ssl:connect(Host, Port, SslOpts, Timeout) of
         {ok, Socket} ->
+            %% Every write on this socket is bounded, the request
+            %% included (`masque_tls:bound_sends/2').
+            _ = masque_tls:bound_sends(ssl, Socket),
             ReqBin = build_request(Data),
             case ssl:send(Socket, ReqBin) of
                 ok ->
@@ -1041,11 +1044,11 @@ session_info(#data{bind_scope = Scope, rx_dropped = Dropped}, State) ->
         bind => Scope
     }.
 
+%% A failed write ends the session the way a close does
+%% (`masque_tls:send_failed/3'), so a proxy that stops reading cannot
+%% pin it.
 ssl_send(#data{socket = Socket}, Bytes) ->
-    case ssl:send(Socket, Bytes) of
-        ok -> ok;
-        Err -> Err
-    end.
+    masque_tls:send_failed(ssl:send(Socket, Bytes), ssl, Socket).
 
 setopts_active_once(undefined) ->
     ok;

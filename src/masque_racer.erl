@@ -229,9 +229,13 @@ start_attempt(Racer, RRef, Deadline, Transport, Target, Opts, Mod) ->
                     end;
                 lose ->
                     stop_session(Mod, Pid);
-                {error, owner_gone} when not is_map_key(pool_retried, Opts) ->
-                    %% The pooled connection closed under us (idle
-                    %% timer): check out again, once.
+                {error, R} when
+                    (R =:= owner_gone orelse R =:= stream_limit orelse R =:= goaway),
+                    not is_map_key(pool_retried, Opts)
+                ->
+                    %% The pooled connection closed under us, hit the
+                    %% proxy's stream limit or is draining: check out
+                    %% again, once.
                     kill_session(Pid),
                     retry_pooled(Racer, RRef, Deadline, Transport, Target, Opts, Mod);
                 {error, Reason} ->
@@ -335,15 +339,20 @@ pool_fingerprint(Transport, Opts) ->
             FP = masque_upstream_pool:fingerprint(
                 Host, Port, PoolTransport, Opts
             ),
-            PoolOpts = maps:merge(
-                #{
-                    transport => PoolTransport,
-                    host => Host,
-                    port => Port,
-                    connect_opts => pool_connect_opts(Transport, Host, Opts)
-                },
-                maps:get(upstream_pool_opts, Opts, #{})
-            ),
+            Base = #{
+                transport => PoolTransport,
+                host => Host,
+                port => Port,
+                connect_opts => pool_connect_opts(Transport, Host, Opts)
+            },
+            %% A caller joining a dial already in flight waits no longer
+            %% than its own connect timeout, not the pool's 60 s.
+            Base1 =
+                case maps:find(timeout, Opts) of
+                    {ok, T} when is_integer(T), T > 0 -> Base#{checkout_timeout_ms => T};
+                    _ -> Base
+                end,
+            PoolOpts = maps:merge(Base1, maps:get(upstream_pool_opts, Opts, #{})),
             {ok, FP, PoolOpts};
         _ ->
             {error, no_proxy}

@@ -25,11 +25,13 @@ This page lists every module in `src/`, grouped by role, with one line on what i
 | `masque_reverse_accept_handler` | Handler for TCP accept streams on the proxy: takes the pending request and relays the stream to the requester, with `handle_call/3` for its API. | you change the proxy-side accept stream API. |
 | `masque_reverse_accept_udp_handler` | Handler for UDP accept streams on the proxy: relays datagrams to the requester. | you change the proxy-side UDP accept stream. |
 | `masque_reverse_registry` | ETS table of pending requests (id to control session, connection, identity, requester, service). | you change how requests are matched to accepts. |
+| `masque_reverse_ids` | The request ids an agent has seen on a control channel, bounded to the last 4,096, for the reuse check. | you change how reused request ids are detected. |
 | `masque_reverse_capsule` | Codec for AVAILABLE_SERVICES, CONNECTION_REQUEST, CONNECTION_REQUEST_DECLINED and the service record. | the draft changes a capsule. |
 | `masque_uri_reverse` | Listen and accept URI templates. | the draft changes a template or target form. |
 | `masque_listen_handler` | Behaviour for the proxy's `listen_handler`. | you add a callback. |
 | `masque_quiet` | Quiet session exits: wraps a session's stop reason in `{shutdown, {masque_quiet, R}}` so OTP does not log it, and unwraps it for `terminate` and callers. | you add a session module (wrap its callbacks) or read a session's exit reason. |
-| `masque_stream_send` | Blocking write on an h3 or h2 stream (h2 flow-control wait, h3 retry on `send_ready`, 30 s without progress). Used by CONNECT-TCP and the reverse connect control channel. | you change how stream writes wait for the transport. |
+| `masque_stream_send` | Blocking write on an h3 or h2 stream (h2 flow-control wait, h3 retry on `send_ready`, 30 s without progress, 150 s in all; `stream_send_timeout_ms`). Used by CONNECT-TCP, udp-bind control capsules and the reverse connect control channel. | you change how stream writes wait for the transport. |
+| `masque_out` | Non-blocking writes on a server session's traffic path (h3 datagrams and stream data, h2 stream data) that stop the session quietly with `connection_closed` when the connection is already gone. | you add a write on a server session's traffic path. |
 | `masque_ip_proxy_handler` | Default CONNECT-IP handler: address allocation from `address_pool`, route advertisement, source filtering, TTL and MTU handling, `forward_fun` and `lifecycle_fun` hooks. | you change the CONNECT-IP forwarding plane or address policy. |
 | `masque_udp_bind_proxy_handler` | Default Connect-UDP-Bind handler: owns the bind `gen_udp` socket, builds `Proxy-Public-Address`, filters peers. Adds `handle_bind_packet/3`, which is not part of `masque_handler`. | you change bind socket policy or public address reporting. |
 | `masque_chain_handler` | Relay handler: opens a MASQUE client tunnel to `upstream_proxy` and relays UDP, TCP and IP; `via` loop detection and the node token. | you change relay behaviour or loop detection. |
@@ -75,7 +77,7 @@ Change a session module when you change the wire behaviour of that cell: framing
 | Module | Role | Change this when... |
 |---|---|---|
 | `masque_client_failed` | The shared `failed` state: parks a dial error until `handshake_await` collects it. | you change how early dial errors reach the caller. |
-| `masque_client_owner` | Holds application-owner messages while `defer_owner` is set, flushes them on `set_owner`. Uses the process dictionary. | you change the racer handoff. |
+| `masque_client_owner` | Holds application-owner messages while `defer_owner` is set, flushes them on `set_owner`. `send_bounded/2` drops proxy-driven events while the owner has 10,000 messages waiting. Uses the process dictionary. | you change the racer handoff or what reaches the owner. |
 | `masque_client_rx` | Queue-mode rules shared by client sessions: `rx_queue_limit`, the `closed` state that serves unread data, linger timeout. | you change queue-mode delivery or close semantics. |
 | `masque_tls` | TLS client options for h1 and h2 dials: `verify_peer` by default, system CA store, hostname check, ALPN, SNI rules. | you change client TLS defaults. |
 

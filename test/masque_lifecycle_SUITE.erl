@@ -10,6 +10,7 @@
 -include_lib("stdlib/include/assert.hrl").
 -include("masque_ip.hrl").
 
+-export([log/2]).
 -export([
     suite/0,
     all/0,
@@ -28,6 +29,7 @@
     h3_client_fin_ends_server_session/1,
     h2_client_fin_ends_server_session/1,
     h1_close_leaves_no_server_session/1,
+    slow_init_is_504/1,
     h3_server_fin_notifies_client/1,
     h2_server_fin_notifies_client/1,
     h3_early_address_request_answered/1,
@@ -39,6 +41,7 @@
     h3_udp_handler_crash_resets_stream/1,
     h2_udp_handler_crash_resets_stream/1,
     h3_reset_while_starting_answers_listener/1,
+    h3_reset_while_starting_still_counts/1,
     h1_bind_handler_crash_closes_tunnel/1,
     unsupported_call_keeps_session/1,
     udp_bind_skips_pool/1,
@@ -54,6 +57,7 @@
     h3_many_small_capsules_in_one_write/1,
     listener_name_unique_across_transports/1,
     h3_idle_tunnel_ends/1,
+    h3_tcp_datagrams_do_not_keep_tunnel_alive/1,
     h2_tcp_receive_window_is_bounded/1,
     h3_tcp_receive_window_is_bounded/1,
     h2_init_close_session_frees_slot/1,
@@ -107,6 +111,7 @@ all() ->
         h3_client_fin_ends_server_session,
         h2_client_fin_ends_server_session,
         h1_close_leaves_no_server_session,
+        slow_init_is_504,
         h3_server_fin_notifies_client,
         h2_server_fin_notifies_client,
         h3_early_address_request_answered,
@@ -118,6 +123,7 @@ all() ->
         h3_udp_handler_crash_resets_stream,
         h2_udp_handler_crash_resets_stream,
         h3_reset_while_starting_answers_listener,
+        h3_reset_while_starting_still_counts,
         h1_bind_handler_crash_closes_tunnel,
         unsupported_call_keeps_session,
         udp_bind_skips_pool,
@@ -133,6 +139,7 @@ all() ->
         h3_many_small_capsules_in_one_write,
         listener_name_unique_across_transports,
         h3_idle_tunnel_ends,
+        h3_tcp_datagrams_do_not_keep_tunnel_alive,
         h2_tcp_receive_window_is_bounded,
         h3_tcp_receive_window_is_bounded,
         h2_init_close_session_frees_slot,
@@ -271,6 +278,10 @@ extra_opts(h3_send_to_on_proxy_context) ->
     };
 extra_opts(h3_many_small_capsules_in_one_write) ->
     #{handler_opts => #{max_capsule_size => 600}};
+extra_opts(h3_tcp_datagrams_do_not_keep_tunnel_alive) ->
+    #{tcp_handler => masque_report_tcp_handler, handler_opts => #{idle_timeout_ms => 300}};
+extra_opts(slow_init_is_504) ->
+    #{handler_opts => #{init_delay => 32000}};
 extra_opts(h3_idle_tunnel_ends) ->
     #{handler_opts => #{idle_timeout_ms => 300}};
 extra_opts(Case) when
@@ -611,6 +622,7 @@ h2_udp_handler_crash_resets_stream(Config) ->
     udp_handler_crash_resets_stream(Config, h2).
 
 udp_handler_crash_resets_stream(Config, Transport) ->
+    Reports = count_error_reports(),
     Sess = connect(Config, Transport),
     Pid = await_session(),
     MRef = erlang:monitor(process, Pid),
@@ -619,7 +631,29 @@ udp_handler_crash_resets_stream(Config, Transport) ->
     receive
         {masque_closed, Sess, peer_reset} -> ok
     after 5000 -> ct:fail(no_reset_on_crash)
-    end.
+    end,
+    %% Logged once, with its stack, by the session: not again by OTP and
+    %% the supervisor.
+    timer:sleep(200),
+    ?assertEqual(1, stop_counting(Reports)).
+
+count_error_reports() ->
+    Counter = counters:new(1, []),
+    Id = list_to_atom("lifecycle_reports_" ++ integer_to_list(erlang:unique_integer([positive]))),
+    ok = logger:add_handler(Id, ?MODULE, #{level => error, config => #{counter => Counter}}),
+    {Id, Counter}.
+
+stop_counting({Id, Counter}) ->
+    ok = logger:remove_handler(Id),
+    counters:get(Counter, 1).
+
+%% logger handler: one count per error-level event.
+log(#{level := Level}, #{config := #{counter := Counter}}) when
+    Level =:= error; Level =:= critical; Level =:= alert; Level =:= emergency
+->
+    counters:add(Counter, 1, 1);
+log(_Event, _Config) ->
+    ok.
 
 %% The h1 udp-bind session applies the same handler and compression
 %% rules as the h3/h2 one.
@@ -702,6 +736,65 @@ h3_idle_tunnel_ends(Config) ->
     after 3000 -> ct:fail(not_idled_out)
     end,
     await_closed(Sess).
+
+%% A handler whose `init' runs past the 30 s start deadline: on h3 and
+%% h2 the client is told the target did not answer in time (504), not
+%% that the name did not resolve. (On h1 the session already owns the
+%% socket, so the connection just closes.)
+slow_init_is_504(Config) ->
+    ct:timetrap({seconds, 60}),
+    Self = self(),
+    [
+        spawn_link(fun() ->
+            Port = maps:get(port, ?config(T, Config)),
+            Self !
+                {T,
+                    masque:connect(
+                        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+                        {<<"192.0.2.6">>, 443},
+                        #{verify => verify_none, transports => [T], timeout => 45000}
+                    )}
+        end)
+     || T <- [h3, h2]
+    ],
+    [
+        receive
+            {T, {error, Rejected}} when element(1, Rejected) =:= handshake_rejected ->
+                ?assertEqual({T, 504}, {T, element(2, Rejected)});
+            {T, Other} ->
+                ct:fail({T, Other})
+        after 50000 -> ct:fail({no_answer, T})
+        end
+     || T <- [h3, h2]
+    ].
+
+%% A CONNECT-TCP stream carries no HTTP datagrams: datagrams the peer
+%% sends for it are dropped and do not keep the tunnel from idling out.
+h3_tcp_datagrams_do_not_keep_tunnel_alive(Config) ->
+    {ok, LSock} = gen_tcp:listen(0, [binary, {active, false}, {ip, {127, 0, 0, 1}}]),
+    {ok, TPort} = inet:port(LSock),
+    Port = maps:get(port, ?config(h3, Config)),
+    {ok, Sess} = masque:connect(
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+        {<<"127.0.0.1">>, TPort},
+        #{verify => verify_none, transports => [h3], protocol => tcp}
+    ),
+    Pid = await_session(),
+    MRef = erlang:monitor(process, Pid),
+    Flood = spawn_link(fun F() ->
+        Pid ! {masque_datagram_in, 0, binary:copy(<<"d">>, 1200)},
+        timer:sleep(20),
+        F()
+    end),
+    receive
+        {'DOWN', MRef, process, Pid, Reason} ->
+            ?assertEqual(idle_timeout, masque_quiet:reason(Reason))
+    after 3000 -> ct:fail(datagrams_kept_tunnel_alive)
+    end,
+    unlink(Flood),
+    exit(Flood, kill),
+    await_closed(Sess),
+    gen_tcp:close(LSock).
 
 %% h2 receive credit is returned only as the handler consumes data, so
 %% a target that stops reading bounds what piles up in the session.
@@ -981,6 +1074,28 @@ h3_reset_while_starting_answers_listener(_Config) ->
     await_down(MRef, Pid),
     ok = gen_server:stop(Router).
 
+%% A start given up on (stream reset) keeps counting toward the tunnel
+%% limit until its handler returns: resetting streams cannot run more
+%% session starts than the limit allows.
+h3_reset_while_starting_still_counts(_Config) ->
+    {ok, Router} = masque_server_connection:start_link(1),
+    unlink(Router),
+    First = start_session_on(Router, 0, #{init_delay => 1000}),
+    Pid = await_session(),
+    MRef = erlang:monitor(process, Pid),
+    Router ! {quic_h3, self(), {stream_reset, 0, 0}},
+    await_start_result(First, {error, stream_dead}),
+    Second = start_session_on(Router, 4, #{}),
+    await_start_result(Second, {error, too_many_tunnels}),
+    await_down(MRef, Pid),
+    %% The handler returned and its session stopped: the slot is free.
+    Third = start_session_on(Router, 8, #{}),
+    receive
+        {start_result, Third, Result} -> ?assertNotEqual({error, too_many_tunnels}, Result)
+    after 5000 -> ct:fail(listener_still_waiting)
+    end,
+    ok = gen_server:stop(Router).
+
 %% Same, once the session has started and waits for its finalize.
 h3_reset_while_finalizing_answers_listener(_Config) ->
     {Router, Caller} = start_pending_session(#{}),
@@ -999,11 +1114,14 @@ h3_reset_while_finalizing_answers_listener(_Config) ->
 start_pending_session(HOpts) ->
     {ok, Router} = masque_server_connection:start_link(0),
     unlink(Router),
+    {Router, start_session_on(Router, 0, HOpts)}.
+
+start_session_on(Router, StreamId, HOpts) ->
     %% A dead conn pid: transport calls fail fast with noproc.
     Conn = spawn(fun() -> ok end),
     Args = #{
         conn => Conn,
-        stream_id => 0,
+        stream_id => StreamId,
         transport => h3,
         router => Router,
         protocol => udp,
@@ -1012,10 +1130,9 @@ start_pending_session(HOpts) ->
         req => #{target_host => <<"192.0.2.6">>, target_port => 443}
     },
     Self = self(),
-    Caller = spawn(fun() ->
+    spawn(fun() ->
         Self ! {start_result, self(), masque_server_connection:start_session(Router, Args)}
-    end),
-    {Router, Caller}.
+    end).
 
 await_start_result(Caller, Expected) ->
     receive

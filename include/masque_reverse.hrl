@@ -13,6 +13,10 @@
 -define(MASQUE_DEFAULT_LISTEN_URI_TEMPLATE, <<"/.well-known/masque/listen/{target}/{ipproto}/">>).
 -define(MASQUE_DEFAULT_ACCEPT_URI_TEMPLATE, <<"/.well-known/masque/accept/{request_id}/">>).
 
+%% Connection requests an agent holds unanswered before it declines new
+%% ones (`max_pending_requests').
+-define(MASQUE_DEFAULT_MAX_PENDING_REQUESTS, 64).
+
 %% Capsule types (section 7.3). The draft leaves them TBD; these are
 %% provisional private values, kept here only, until it assigns real
 %% ones. None is a reserved GREASE value (RFC 9297 section 5.4).

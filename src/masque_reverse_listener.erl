@@ -136,8 +136,18 @@ route_accept(#{accept_template := T} = Config, Transport, Conn, #{path := Path} 
     case masque_uri_reverse:match_accept(T, Path) of
         {ok, Id} ->
             case masque_reverse_registry:lookup(Id) of
-                {ok, Entry} -> check_accept(Config, Transport, Conn, Id, Entry, Req);
-                error -> {reject, unknown_request}
+                {ok, #{control := Control} = Entry} ->
+                    case is_process_alive(Control) of
+                        true ->
+                            check_accept(Config, Transport, Conn, Id, Entry, Req);
+                        false ->
+                            %% The control session died without its
+                            %% `terminate' (killed): drop what it left.
+                            masque_reverse_registry:delete_control(Control),
+                            {reject, unknown_request}
+                    end;
+                error ->
+                    {reject, unknown_request}
             end;
         {error, no_match} ->
             {reject, bad_path};

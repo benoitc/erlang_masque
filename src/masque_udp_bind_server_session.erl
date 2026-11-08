@@ -94,7 +94,10 @@
     early = [] :: [term()],
     %% Idle timeout (`idle_timeout_ms'), armed once the tunnel is open.
     idle_ms = ?DEFAULT_IDLE_MS :: non_neg_integer() | infinity,
-    idle :: masque_idle:idle() | undefined
+    idle :: masque_idle:idle() | undefined,
+    %% A control capsule write timed out: the session is ending, and no
+    %% further capsule is written (each would block for the timeout).
+    control_failed = false :: boolean()
 }).
 
 -define(DEFAULT_MAX_PENDING_RESPONSES, 16).
@@ -875,7 +878,7 @@ send_datagram(
     } = S
 ) ->
     Enc = masque_datagram:encode(Ctx, Inner),
-    _ = quic_h3:send_datagram(C, Sid, Enc),
+    _ = masque_out:send_datagram(C, Sid, Enc),
     masque_metrics:bytes_out(
         iolist_size(Inner),
         #{protocol => udp_bind, transport => h3}
@@ -888,7 +891,7 @@ send_datagram(Ctx, Inner, #state{transport = h2} = S) ->
     %% session pattern).
     Inner1 = iolist_to_binary(masque_datagram:encode(Ctx, Inner)),
     Cap = h2_capsule:encode(datagram, Inner1),
-    _ = h2:send_data(S#state.conn, S#state.stream_id, Cap),
+    _ = masque_out:h2_send_data(S#state.conn, S#state.stream_id, Cap, false),
     masque_metrics:bytes_out(iolist_size(Inner), #{protocol => udp_bind, transport => h2}),
     S.
 
@@ -953,34 +956,19 @@ send_capsule_bytes_or_state(Bytes, S) ->
     {noreply, S2} = send_capsule_bytes(iolist_to_binary(Bytes), S),
     S2.
 
-send_capsule_bytes(
-    Bytes,
-    #state{
-        transport = h3,
-        conn = C,
-        stream_id = Sid
-    } = S
-) ->
-    _ = control_send(h3, C, Sid, Bytes),
-    masque_metrics:bytes_out(
-        byte_size(Bytes),
-        #{protocol => udp_bind, transport => h3}
-    ),
+send_capsule_bytes(_Bytes, #state{control_failed = true} = S) ->
     {noreply, S};
-send_capsule_bytes(
-    Bytes,
-    #state{
-        transport = h2,
-        conn = C,
-        stream_id = Sid
-    } = S
-) ->
-    _ = control_send(h2, C, Sid, Bytes),
-    masque_metrics:bytes_out(
-        byte_size(Bytes),
-        #{protocol => udp_bind, transport => h2}
-    ),
-    {noreply, S}.
+send_capsule_bytes(Bytes, #state{transport = T, conn = C, stream_id = Sid} = S) ->
+    case control_send(T, C, Sid, Bytes) of
+        ok ->
+            masque_metrics:bytes_out(
+                byte_size(Bytes),
+                #{protocol => udp_bind, transport => T}
+            ),
+            {noreply, S};
+        {error, _} ->
+            {noreply, S#state{control_failed = true}}
+    end.
 
 %% Capsules on the request stream (COMPRESSION_ACK, _CLOSE, _ASSIGN)
 %% wait for the transport instead of being dropped on a full send queue
@@ -991,9 +979,9 @@ control_send(T, C, Sid, Bytes) ->
     case masque_stream_send:send(T, C, Sid, Bytes, false) of
         ok ->
             ok;
-        {error, Reason} ->
+        {error, Reason} = Error ->
             self() ! {masque_control_send_failed, Reason},
-            ok
+            Error
     end.
 
 %%====================================================================

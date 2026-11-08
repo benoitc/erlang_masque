@@ -16,11 +16,14 @@
 %%% release / monitor handling). Lookups go directly through ETS so
 %%% read traffic does not serialise on the server.
 %%%
-%%% All write APIs are tolerant of the registry not being started -
-%%% they become no-ops when `whereis(?MODULE) =:= undefined`. This
-%%% keeps test environments that don't boot the application from
+%%% All write APIs are tolerant of the application not being started -
+%%% they become no-ops when neither the registry nor its table exists.
+%%% This keeps test environments that don't boot the application from
 %%% needing extra setup, and keeps the proxy handler simple (it
 %%% always calls `register/5` / `release/3` without a feature flag).
+%%% When the table exists but the registry is down (it is restarting),
+%%% `register/5' refuses with `{error, registry_down}' rather than
+%%% pretend: an unrecorded range would escape the overlap check.
 -module(masque_ip_session_registry).
 -moduledoc false.
 -behaviour(gen_server).
@@ -58,17 +61,19 @@ start_link() ->
     non_neg_integer(),
     pid(),
     non_neg_integer()
-) -> ok | {error, conflict}.
+) -> ok | {error, conflict | registry_down}.
 register(V, Addr, Pfx, Pid, ContextId) when
     (V =:= 4 orelse V =:= 6),
     is_integer(Pfx),
     is_pid(Pid),
     is_integer(ContextId)
 ->
-    case whereis(?MODULE) of
-        undefined ->
+    case {whereis(?MODULE), ets:whereis(?TABLE)} of
+        {undefined, undefined} ->
             ok;
-        _Server ->
+        {undefined, _Table} ->
+            {error, registry_down};
+        _ ->
             gen_server:call(
                 ?MODULE,
                 {register, V, Addr, Pfx, Pid, ContextId}

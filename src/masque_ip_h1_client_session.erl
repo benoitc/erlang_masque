@@ -71,6 +71,10 @@
     next_req_id = 1 :: pos_integer(),
     assigned = [] :: [masque_ip_capsule:address_entry()],
     routes = [] :: [masque_ip_capsule:route_entry()],
+    %% Whether the owner was told of an ADDRESS_ASSIGN / ROUTE_ADVERTISEMENT
+    %% yet: later ones reach it only when they change.
+    assign_told = false :: boolean(),
+    routes_told = false :: boolean(),
     %% Extra request headers prepended to the GET+Upgrade request.
     extra_headers = [] :: [{binary(), binary()}]
 }).
@@ -281,7 +285,7 @@ open_inner({call, From}, {set_mode, Mode}, Data) ->
 open_inner({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 open_inner({call, From}, {send_capsule, Type, Value}, #data{socket = Sock} = Data) ->
-    Reply = h1_upgrade:send_capsule(ssl, Sock, Type, Value),
+    Reply = socket_capsule(Sock, Type, Value),
     {keep_state, Data, [{reply, From, Reply}]};
 open_inner({call, From}, stop, Data) ->
     {next_state, closing, Data, [{reply, From, ok}, {next_event, internal, do_close}]};
@@ -404,6 +408,12 @@ do_connect(Data, Opts) ->
             {error, {connect, Reason}}
     end.
 
+%% Writes on the upgraded socket: bounded (`masque_tls:bound_sends/2'),
+%% and a failed one ends the session the way a close does, so a proxy
+%% that stops reading cannot pin it.
+socket_capsule(Socket, Type, Value) ->
+    masque_tls:send_failed(h1_upgrade:send_capsule(ssl, Socket, Type, Value), ssl, Socket).
+
 %% Milliseconds left before the overall handshake deadline.
 remaining(Deadline) ->
     max(0, Deadline - erlang:monotonic_time(millisecond)).
@@ -414,6 +424,7 @@ do_upgrade(Conn, Data, Timeout) ->
         {ok, _StreamId, Socket, Buffer, RespHeaders} ->
             case validate_response(RespHeaders) of
                 ok ->
+                    _ = masque_tls:bound_sends(ssl, Socket),
                     {ok, Socket, Buffer};
                 {error, _} = Err ->
                     _ =
@@ -503,7 +514,7 @@ setopts_active_once(Socket) ->
 
 send_datagram(#data{socket = Sock}, Ctx, Payload) ->
     Inner = iolist_to_binary(masque_datagram:encode(Ctx, Payload)),
-    h1_upgrade:send_capsule(ssl, Sock, datagram, Inner).
+    socket_capsule(Sock, datagram, Inner).
 
 %%====================================================================
 %% Capsule decode loop
@@ -539,8 +550,13 @@ deliver_capsule(
 ) ->
     case masque_ip_capsule:decode_address_assign(Inner) of
         {ok, Entries} ->
-            masque_client_owner:send(Owner, {masque_address_assign, self(), Entries}),
-            Data#data{assigned = Entries};
+            %% ADDRESS_ASSIGN replaces the whole set (RFC 9484 section
+            %% 4.7.1): tell the owner only when it changes, so a proxy
+            %% repeating it cannot flood the owner's mailbox.
+            _ =
+                (Entries =/= Data#data.assigned orelse not Data#data.assign_told) andalso
+                    masque_client_owner:send(Owner, {masque_address_assign, self(), Entries}),
+            Data#data{assigned = Entries, assign_told = true};
         {error, _} ->
             {abort, malformed_capsule}
     end;
@@ -555,7 +571,9 @@ deliver_capsule(
             %% floods them gets the rest ignored.
             Room = max(0, ?MAX_PEER_PENDING - map_size(Pend)),
             Entries = lists:sublist(Entries0, Room),
-            masque_client_owner:send(Owner, {masque_address_request, self(), Entries}),
+            _ =
+                Entries =/= [] andalso
+                    masque_client_owner:send(Owner, {masque_address_request, self(), Entries}),
             Pend1 = lists:foldl(
                 fun(R, Acc) ->
                     Id = element(2, R),
@@ -575,15 +593,18 @@ deliver_capsule(
 ) ->
     case masque_ip_capsule:decode_route_advertisement(Inner) of
         {ok, Entries} ->
-            masque_client_owner:send(Owner, {masque_route_advertisement, self(), Entries}),
-            Data#data{routes = Entries};
+            %% Also a full replacement (section 4.7.3): only changes.
+            _ =
+                (Entries =/= Data#data.routes orelse not Data#data.routes_told) andalso
+                    masque_client_owner:send(Owner, {masque_route_advertisement, self(), Entries}),
+            Data#data{routes = Entries, routes_told = true};
         {error, _} ->
             {abort, malformed_capsule}
     end;
 deliver_capsule(Type, Inner, #data{owner = Owner} = Data) when
     is_integer(Type)
 ->
-    masque_client_owner:send(Owner, {masque_capsule, self(), Type, Inner}),
+    masque_client_owner:send_bounded(Owner, {masque_capsule, self(), Type, Inner}),
     Data.
 
 abort(Reason, #data{socket = Socket} = Data) ->
@@ -731,7 +752,7 @@ handle_advertise_routes(From, Routes, Data) ->
 send_wrapped_capsule(#data{socket = Sock}, Type, Body) ->
     %% Control-plane capsules are plain RFC 9297 framing with the
     %% RFC 9484 capsule type as-is (no outer wrapping).
-    h1_upgrade:send_capsule(ssl, Sock, Type, Body).
+    socket_capsule(Sock, Type, Body).
 
 check_prefix(4, {A, B, C, D}, P) when
     P >= 0,

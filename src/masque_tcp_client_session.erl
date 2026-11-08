@@ -60,6 +60,9 @@
     %% with `rx_overflow' rather than dropping bytes.
     rx_limit = ?MASQUE_DEFAULT_RX_QUEUE_LIMIT :: pos_integer(),
     write_closed = false :: boolean(),
+    %% An h3 send was refused with `send_queue_full': the owner gets
+    %% `{masque_send_ready, Sess}' once quic_h3 says the queue drained.
+    send_blocked = false :: boolean(),
     %% The peer sent FIN; the session stays open for sending.
     read_closed = false :: boolean(),
     %% Extra request headers prepended to the CONNECT request.
@@ -294,7 +297,15 @@ open_inner({call, From}, {send, _}, #data{write_closed = true} = Data) ->
     {keep_state, Data, [{reply, From, {error, write_closed}}]};
 open_inner({call, From}, {send, Payload}, Data) ->
     Reply = send_out(Data, Payload),
-    {keep_state, Data, [{reply, From, Reply}]};
+    Blocked = Reply =:= {error, send_queue_full} orelse Data#data.send_blocked,
+    {keep_state, Data#data{send_blocked = Blocked}, [{reply, From, Reply}]};
+open_inner(
+    info,
+    {quic_h3, _Conn, {send_ready, StreamId}},
+    #data{stream_id = StreamId, send_blocked = true, owner = Owner} = Data
+) ->
+    masque_client_owner:send(Owner, {masque_send_ready, self()}),
+    {keep_state, Data#data{send_blocked = false}};
 open_inner({call, From}, {recv, Timeout}, Data) ->
     handle_recv_call(From, Timeout, Data);
 open_inner({call, From}, {set_mode, Mode}, Data) ->

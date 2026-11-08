@@ -13,7 +13,8 @@ A client session sends these to its owner. `Sess` is the session pid returned by
 | Message | When |
 | --- | --- |
 | `{masque_data, Sess, Data}` | Data received, in `message` mode. CONNECT-UDP: one UDP payload (context id 0). CONNECT-TCP: a chunk of the byte stream. |
-| `{masque_capsule, Sess, Type, Value}` | A capsule the session does not consume itself (CONNECT-UDP and CONNECT-IP). Sent in both delivery modes. Never sent on CONNECT-TCP, which carries no capsules; udp-bind sessions drop unknown capsules silently. |
+| `{masque_capsule, Sess, Type, Value}` | A capsule the session does not consume itself (CONNECT-UDP and CONNECT-IP). Sent in both delivery modes, but dropped while your mailbox already holds 10,000 messages, so a proxy cannot flood it. Never sent on CONNECT-TCP, which carries no capsules; udp-bind sessions drop unknown capsules silently. |
+| `{masque_send_ready, Sess}` | CONNECT-TCP on h3: a `send/2` returned `{error, send_queue_full}` and the queue has drained; send again. Sent once per refused send. h2 has no such signal: retry `send_buffer_full` after a short wait. |
 | `{masque_closed, Sess, Reason}` | The tunnel ended from the proxy side, in `message` mode. See [close reasons](#close-reasons). |
 | `{masque_session_ticket, Sess, Ticket}` | h3 only: a ticket to resume the QUIC connection later, through `quic_opts => #{session_ticket => Ticket}`. Sent in both delivery modes. |
 
@@ -24,9 +25,9 @@ In `queue` mode, data is not sent as messages: you pull it with `masque:recv/2`,
 | Message | When |
 | --- | --- |
 | `{masque_ip_packet, Sess, Packet}` | An IP packet (context id 0) arrived, in `message` mode. |
-| `{masque_address_assign, Sess, [#ip_assignment{}]}` | The proxy sent ADDRESS_ASSIGN. |
-| `{masque_address_request, Sess, [#ip_prefix_request{}]}` | The proxy asked you for addresses (ADDRESS_REQUEST). Answer with `masque:assign_addresses/2`. |
-| `{masque_route_advertisement, Sess, [#ip_route{}]}` | The proxy sent ROUTE_ADVERTISEMENT. Each one replaces the previous set. |
+| `{masque_address_assign, Sess, [#ip_assignment{}]}` | The proxy sent ADDRESS_ASSIGN. Each one replaces the previous set; after the first, you get one only when the set changes. |
+| `{masque_address_request, Sess, [#ip_prefix_request{}]}` | The proxy asked you for addresses (ADDRESS_REQUEST). Answer with `masque:assign_addresses/2`. At most 64 requests are outstanding; the list is never empty. |
+| `{masque_route_advertisement, Sess, [#ip_route{}]}` | The proxy sent ROUTE_ADVERTISEMENT. Each one replaces the previous set; after the first, you get one only when the set changes. |
 
 The records are defined in `include/masque_ip.hrl`. The moduledoc of `masque_ip_client_session` also lists `{masque_ip_error, Sess, Reason}`; no code sends it.
 
@@ -43,7 +44,7 @@ The records are defined in `include/masque_ip.hrl`. The moduledoc of `masque_ip_
 
 | Message | When |
 | --- | --- |
-| `{masque_connection_request, Listen, Id, Service}` | Agent: the proxy asks you to accept a connection to `Service`; answer with `reverse_accept/2,3` or `reverse_decline/2`. |
+| `{masque_connection_request, Listen, Id, Service}` | Agent: the proxy asks you to accept a connection to `Service`; answer with `reverse_accept/2,3` or `reverse_decline/2`. At most `max_pending_requests` (default 64) wait for an answer; the session declines further requests itself. |
 | `{masque_closed, Listen, Reason}` | Agent: the control channel ended from the proxy side (`peer_fin`, `peer_reset`, `peer_closed`, `malformed_capsule` for a bad or reused request, `truncated_capsule`, `{control_send_failed, R}`). Not sent after `masque:close/1`. |
 | `{masque_data, Stream, Bytes}` | Proxy: bytes from the agent on an accept stream. Return credit with `consumed/2`. |
 | `{masque_closed, Stream, peer_fin}` | Proxy: the agent finished sending; you can still send. |
@@ -62,7 +63,7 @@ When `transports` lists more than one transport, the session first belongs to a 
 | `peer_fin` | The proxy ended the stream cleanly. The session sends its own FIN and stops. | UDP and IP on h2/h3 |
 | `peer_fin` | Half-close: the target finished sending. The session stays open for writing until `masque:shutdown_write/1` or `masque:close/1`. If you already shut down your side, the session stops. | TCP on h2/h3 |
 | `peer_reset` | The proxy reset the stream (handler error, target reset, capsule error on the proxy). | h2/h3 |
-| `peer_closed` | The transport connection closed (QUIC or HTTP/2 connection, or the TLS socket on h1). | all |
+| `peer_closed` | The transport connection closed (QUIC or HTTP/2 connection, or the TLS socket on h1), or it was closed under the tunnel: a reverse connect agent closed its control channel, or the pool stopped. On h1 a write that stayed blocked for 30 s also ends here. | all |
 | `goaway` | The proxy sent GOAWAY and this stream was not going to be processed (h3: stream id at or above the GOAWAY id; h2: above the last stream id). Lower streams keep running. | h2/h3 |
 | `{ssl_error, Reason}` | TLS socket error on the upgraded h1 connection. | h1 |
 | `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` | The proxy sent a bad capsule, ended the stream mid-capsule, or a capsule larger than `max_capsule_size` (default 65536). The session resets the stream. | UDP and IP on h2/h3 |
@@ -180,7 +181,7 @@ When a request is refused before the tunnel opens, the listener answers with a s
 | `bad_port` | 400 | `http_protocol_error` | port out of range; bad `ipproto` for CONNECT-IP |
 | `bad_host` | 400 | `http_protocol_error` | empty or malformed host or IP target; h1 `Host` missing or not matching the CONNECT target |
 | `resolution_failed` | 502 | `dns_error` | hostname target did not resolve; handler `init/2` failed; session could not start |
-| `upstream_timeout` | 504 | `connection_timeout` | a handler's `{reject, upstream_timeout}`; no built-in code produces it |
+| `upstream_timeout` | 504 | `connection_timeout` | a handler's `{reject, upstream_timeout}`; on h3 and h2, a handler whose `init/2` did not return within 30 s |
 | `forbidden` | 403 | `destination_ip_prohibited` | built-in handlers' `accept/1`: the `allow` fun said no (UDP, TCP, chain), or a CONNECT-IP target is `'*'` or non-public without `allow_private` |
 | `loop_detected` | 508 | `proxy_loop_detected` | `masque_chain_handler`: the `via` header already names this listener, or the upstream answered 508 |
 | `overload` | 503 | `proxy_internal_error` | listener draining; `max_tunnels_per_connection` reached |
@@ -191,7 +192,7 @@ When a request is refused before the tunnel opens, the listener answers with a s
 
 `accept/1` can return `{reject, Reason}` or `{reject, Reason, Headers}`; `Headers` are added to the response and win over the library headers of the same name (`content-type`, `content-length`, `proxy-status`).
 
-How a failed session start is mapped: an `init/2` returning `{stop, {reject, R}}` answers with `R`; `{stop, {resolution_failed, _}}` and any other stop reason answer 502 (`resolution_failed`). On h3 the router's `too_many_tunnels` becomes `overload`, and a session that does not start within 30 s becomes `resolution_failed`.
+How a failed session start is mapped: an `init/2` returning `{stop, {reject, R}}` answers with `R`; `{stop, {resolution_failed, _}}` and any other stop reason answer 502 (`resolution_failed`). On h3 the router's `too_many_tunnels` becomes `overload`. A session that does not start within 30 s becomes `upstream_timeout` (504) on h3 and h2; on h1 the session already owns the connection, so it is closed without a response.
 
 Each rejection increments `masque.tunnels.rejected` with the attribute `reason`.
 
@@ -199,7 +200,7 @@ Each rejection increments `masque.tunnels.rejected` with the attribute `reason`.
 
 These are the reasons a server session process stops with. They are passed to the handler's `terminate/2` and decide what the session puts on the wire as it goes.
 
-None of them is a crash, so the process exits with `{shutdown, {masque_quiet, Reason}}`, which OTP does not log as an error, and a monitor sees that value. Only `normal`, `{handler_crash, R}` and `{bad_init, Other}` exit as they are; a crash in masque's own code still exits with its exception and is reported. Client sessions exit the same way. `terminate/2` always gets the plain reason.
+None of them is a crash, so the process exits with `{shutdown, {masque_quiet, Reason}}`, which OTP does not log as an error, and a monitor sees that value. Only `normal` and `{bad_init, Other}` exit as they are. A handler crash is logged once, with its stack, where the session catches it, and then exits quietly like the rest, so one crash gives one report. A crash in masque's own code still exits with its exception and is reported. Client sessions exit the same way. `terminate/2` always gets the plain reason.
 
 | Reason | Meaning |
 | --- | --- |
@@ -211,7 +212,8 @@ None of them is a crash, so the process exits with `{shutdown, {masque_quiet, Re
 | `{bad_capsule, data_after_final}`, `{bad_capsule, truncated_capsule}` | CONNECT-TCP in capsule framing: the client sent `DATA` or `FINAL_DATA` after `FINAL_DATA`, or ended the stream inside a capsule. The stream is reset (`H3_CONNECT_ERROR`, `CONNECT_ERROR`, or on h1 the connection closed without `FINAL_DATA`) and the target gets an RST |
 | `stream_dead` | h3: the 2xx or the stream claim failed during finalize |
 | `idle_timeout` | no traffic in either direction for `idle_timeout_ms` in `handler_opts` (default 300000), every transport |
-| `{tunnel_send_failed, R}` | CONNECT-TCP: a write to the client failed or stayed blocked for 30 s |
+| `{tunnel_send_failed, R}` | CONNECT-TCP: a write to the client failed or stayed blocked for 30 s without progress (150 s at most in all) |
+| `abandoned` | a reverse connect accept stream whose request was already given up (declined or timed out meanwhile); the stream is reset |
 | `{handler_crash, R}` | a handler callback raised. In `init/2` this fails the handshake (502). In later callbacks only udp-bind sessions stop; the other sessions log the crash and keep running. |
 | `{bad_init, Other}` | `init/2` returned an unexpected shape; the handshake fails (502) |
 | handler reasons | whatever the handler returned in `{stop, Reason, _}`; see the built-in list below |
@@ -232,7 +234,7 @@ Reasons used by the built-in handlers:
 | `masque_chain_handler` | `{resolution_failed, {upstream, R}}` or `{reject, loop_detected}` (from `init/2`); `upstream_closed` |
 | `masque_reverse_accept_handler`, `masque_reverse_accept_udp_handler` | `{reject, unknown_request}` (from `init/2`, 404); `requester_gone` (the process that requested the connection died) |
 
-Connect-UDP-Bind sessions also end with `context_zero_datagram` (a datagram on context 0 of an unscoped bind, which aborts the stream) and `{control_send_failed, R}` (a compression capsule that could not be written within 30 s). Client sessions report them in `{masque_closed, Sess, Reason}`.
+Connect-UDP-Bind sessions also end with `context_zero_datagram` (a datagram on context 0 of an unscoped bind, which aborts the stream) and `{control_send_failed, R}` (a compression capsule that could not be written within 30 s; the capsules after it are not written). Client sessions report them in `{masque_closed, Sess, Reason}`.
 
 Reverse connect control sessions end with `normal` (the agent closed the channel), `malformed_capsule` (a bad capsule, or a DECLINED for no outstanding request), `truncated_capsule`, `capsule_buffer_overflow`, `idle_timeout`, `{control_send_failed, R}`, or the client and connection reasons above. A bad capsule resets the stream (`H3_MESSAGE_ERROR`, `PROTOCOL_ERROR`); other ends close it with FIN.
 
