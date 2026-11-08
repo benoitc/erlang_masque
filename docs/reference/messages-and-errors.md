@@ -285,7 +285,7 @@ The racer receives on an alias that it drops before returning, so none of these 
 | cast `{release, StreamId}` | session to upstream owner | give the stream back |
 | `{timeout, Ref, idle}` | timer to upstream owner | no streams for `idle_timeout_ms` (default 30000); close and stop |
 | `{quic_h3, Conn, {streams_available, bidi}}`, `{h2, Conn, stream_available}` | transport to upstream owner | after a refused request, a stream can open again; the owner restores its limit and serves waiting acquires |
-| `{timeout, Ref, {stream_wait, From}}` | timer to dedicated owner | a waiting acquire ran out of time (5 s); it gets `{error, stream_limit}` |
+| `{timeout, Ref, {stream_wait, From}}` | timer to upstream owner | an acquire held at a stream limit ran out of time (5 s); it gets `{error, stream_limit}` |
 | call `migrate` | reverse connect channel to its dedicated owner | migrate the h3 connection |
 
 ### Reverse connect

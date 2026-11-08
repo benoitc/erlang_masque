@@ -184,20 +184,29 @@ h3_max_streams_defaults_to_100_test() ->
 
 %% A transport stream-limit error marks the owner full so the pool
 %% stops handing it out.
-transport_stream_limit_marks_owner_full_test() ->
-    {Owner, Mock} = start_owner(quic_h3, #{
-        pool => self(), request_result => {error, stream_limit}
-    }),
-    ?assertEqual(
-        {error, stream_limit},
-        ?M:acquire_stream(Owner, sample_headers(), self(), #{})
-    ),
-    receive
-        {owner_capacity, Owner, true} -> ok
-    after 1000 -> ?assert(false)
-    end,
-    ok = ?M:stop(Owner),
-    ?MOCK:stop(Mock).
+%% The peer refuses a stream: the owner stops offering itself at once,
+%% and holds the acquire up to 5 s for a stream to free up before it
+%% answers `stream_limit'.
+transport_stream_limit_marks_owner_full_test_() ->
+    {timeout, 15, fun() ->
+        {Owner, Mock} = start_owner(quic_h3, #{
+            pool => self(), request_result => {error, stream_limit}
+        }),
+        Self = self(),
+        _ = spawn_link(fun() ->
+            Self ! {acquired, ?M:acquire_stream(Owner, sample_headers(), Self, #{})}
+        end),
+        receive
+            {owner_capacity, Owner, true} -> ok
+        after 1000 -> ?assert(false)
+        end,
+        receive
+            {acquired, R} -> ?assertEqual({error, stream_limit}, R)
+        after 8000 -> ?assert(false)
+        end,
+        ok = ?M:stop(Owner),
+        ?MOCK:stop(Mock)
+    end}.
 
 %%====================================================================
 %% Connection close propagation
