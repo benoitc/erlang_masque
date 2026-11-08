@@ -833,9 +833,9 @@ allocate_request_ids(N) ->
 %%====================================================================
 
 transport_send_data(#state{transport = h3, conn = C, stream_id = S}, B, F) ->
-    quic_h3:send_data(C, S, B, F);
+    masque_out:send_data(C, S, B, F);
 transport_send_data(#state{transport = h2, conn = C, stream_id = S}, B, F) ->
-    h2:send_data(C, S, B, F).
+    masque_out:h2_send_data(C, S, B, F).
 
 transport_send_datagram(
     #state{transport = h3, conn = C, stream_id = S},
@@ -843,7 +843,7 @@ transport_send_datagram(
     Payload
 ) ->
     Enc = masque_datagram:encode(Ctx, Payload),
-    quic_h3:send_datagram(C, S, Enc);
+    masque_out:send_datagram(C, S, Enc);
 transport_send_datagram(
     #state{transport = h2, conn = C, stream_id = S},
     Ctx,
@@ -851,7 +851,7 @@ transport_send_datagram(
 ) ->
     Inner = iolist_to_binary(masque_datagram:encode(Ctx, Payload)),
     Cap = iolist_to_binary(h2_capsule:encode(datagram, Inner)),
-    h2:send_data(C, S, Cap, false).
+    masque_out:h2_send_data(C, S, Cap, false).
 
 %%====================================================================
 %% Misc

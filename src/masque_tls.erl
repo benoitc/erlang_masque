@@ -117,15 +117,24 @@ to_bin(X) when is_binary(X) -> X;
 to_bin(X) when is_list(X) -> list_to_binary(X);
 to_bin(X) when is_atom(X) -> atom_to_binary(X, utf8).
 
-%% Make a blocked write on an h1 tunnel socket fail after 30 s and close
+%% Make a blocked write on an h1 tunnel socket fail after 30 s (see
+%% `send_timeout/0') and close
 %% the socket. Without it a client that stops reading holds its session
 %% forever: `ssl:send/2` blocks with no limit, and a blocked session
 %% cannot even run its idle timer.
 -spec bound_sends(ssl | gen_tcp, term()) -> ok | {error, term()}.
 bound_sends(ssl, Socket) ->
-    ssl:setopts(Socket, [{send_timeout, ?H1_SEND_TIMEOUT}, {send_timeout_close, true}]);
+    ssl:setopts(Socket, [{send_timeout, send_timeout()}, {send_timeout_close, true}]);
 bound_sends(gen_tcp, Socket) ->
-    inet:setopts(Socket, [{send_timeout, ?H1_SEND_TIMEOUT}, {send_timeout_close, true}]).
+    inet:setopts(Socket, [{send_timeout, send_timeout()}, {send_timeout_close, true}]).
+
+%% The same limit as blocked h3 and h2 writes (`masque_stream_send'):
+%% application env `stream_send_timeout_ms', 30 s by default.
+send_timeout() ->
+    case application:get_env(masque, stream_send_timeout_ms) of
+        {ok, Ms} when is_integer(Ms), Ms > 0 -> Ms;
+        _ -> ?H1_SEND_TIMEOUT
+    end.
 
 %% A failed write has closed the socket (see `bound_sends/2'), but the
 %% process reading it may never hear. Report it the way a close arrives,

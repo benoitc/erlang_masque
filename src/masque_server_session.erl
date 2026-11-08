@@ -219,6 +219,9 @@ handle_cast_inner({finalize, Router}, #state{pending_actions = Actions} = S) whe
     end;
 handle_cast_inner(connection_closed, S) ->
     {stop, connection_closed, S};
+%% A reverse connect accept stream nobody waits for any more: reset it.
+handle_cast_inner(abandon, S) ->
+    {stop, abandoned, S};
 handle_cast_inner(_Msg, S) ->
     {noreply, S}.
 
@@ -465,7 +468,7 @@ do_actions([{send, Ctx, Data} | Rest], S) ->
     %% Silent drop on oversize - RFC 9298 §5 (HTTP Datagrams are
     %% unreliable; application can resend if it cares).
     PayloadSize = iolist_size(Data),
-    Max = quic_h3:max_datagram_size(S#state.conn, S#state.stream_id),
+    Max = masque_out:max_datagram_size(S#state.conn, S#state.stream_id),
     Overhead = ctx_overhead(Ctx),
     TooBigForUDP =
         Ctx =:= ?MASQUE_CONTEXT_ID_UDP andalso
@@ -476,7 +479,7 @@ do_actions([{send, Ctx, Data} | Rest], S) ->
             do_actions(Rest, S);
         false ->
             Enc = masque_datagram:encode(Ctx, Data),
-            _ = quic_h3:send_datagram(S#state.conn, S#state.stream_id, Enc),
+            _ = masque_out:send_datagram(S#state.conn, S#state.stream_id, Enc),
             masque_metrics:bytes_out(
                 PayloadSize,
                 #{protocol => udp, transport => h3}
@@ -486,7 +489,7 @@ do_actions([{send, Ctx, Data} | Rest], S) ->
 do_actions([{send_capsule, Type, Value} | Rest], S) ->
     Enc = masque_capsule:encode(Type, Value),
     EncBin = iolist_to_binary(Enc),
-    _ = quic_h3:send_data(S#state.conn, S#state.stream_id, EncBin, false),
+    _ = masque_out:send_data(S#state.conn, S#state.stream_id, EncBin, false),
     masque_metrics:bytes_out(
         byte_size(EncBin),
         #{protocol => udp, transport => h3}

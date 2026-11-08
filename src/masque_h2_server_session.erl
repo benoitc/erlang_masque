@@ -207,6 +207,12 @@ handle_call_inner(_Req, _From, S) ->
 handle_cast(Msg, State) ->
     masque_quiet:stop(handle_cast_inner(Msg, State)).
 
+%% A write found the connection gone (`masque_out').
+handle_cast_inner(connection_closed, S) ->
+    {stop, connection_closed, S};
+%% A reverse connect accept stream nobody waits for any more: reset it.
+handle_cast_inner(abandon, S) ->
+    {stop, abandoned, S};
 handle_cast_inner(_Msg, S) ->
     {noreply, S}.
 
@@ -424,7 +430,7 @@ do_actions([{send, Ctx, Data} | Rest], S) ->
         false ->
             Inner = iolist_to_binary(masque_datagram:encode(Ctx, Data)),
             Capsule = iolist_to_binary(h2_capsule:encode(datagram, Inner)),
-            _ = h2:send_data(
+            _ = masque_out:h2_send_data(
                 S#state.conn,
                 S#state.stream_id,
                 Capsule,
@@ -434,7 +440,7 @@ do_actions([{send, Ctx, Data} | Rest], S) ->
     end;
 do_actions([{send_capsule, Type, Value} | Rest], S) ->
     Enc = iolist_to_binary(masque_capsule:encode(Type, Value)),
-    _ = h2:send_data(S#state.conn, S#state.stream_id, Enc, false),
+    _ = masque_out:h2_send_data(S#state.conn, S#state.stream_id, Enc, false),
     do_actions(Rest, S);
 do_actions([close_session | _Rest], S) ->
     {stop, normal, S};

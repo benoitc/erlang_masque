@@ -348,6 +348,10 @@ map_init_error({shutdown, {masque_quiet, _}} = Quiet) ->
     map_init_error(masque_quiet:reason(Quiet));
 map_init_error({resolution_failed, _}) ->
     resolution_failed;
+%% The handler's `init' ran past the start deadline: the target did not
+%% answer in time (504), not a name that failed to resolve.
+map_init_error({start_timeout, _}) ->
+    upstream_timeout;
 map_init_error({reject, Err}) ->
     Err;
 map_init_error(_) ->

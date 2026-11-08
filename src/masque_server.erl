@@ -364,7 +364,7 @@ spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req) ->
         exit:{timeout, _} ->
             case masque_server_connection:cancel_pending(Router, StreamId) of
                 ok ->
-                    reject(Conn, StreamId, resolution_failed);
+                    reject(Conn, StreamId, upstream_timeout);
                 {error, already_activated} ->
                     %% Session started after timeout. Tunnel is live.
                     ok
@@ -394,6 +394,13 @@ map_init_error(too_many_tunnels) ->
     overload;
 map_init_error({resolution_failed, _}) ->
     resolution_failed;
+%% The handler's `init' ran past the start deadline: the target did not
+%% answer in time (504), not a name that failed to resolve.
+map_init_error({start_timeout, _}) ->
+    upstream_timeout;
+%% `gen_server:start/3' in the router's start worker ran out of time.
+map_init_error(timeout) ->
+    upstream_timeout;
 map_init_error({reject, Err}) ->
     Err;
 map_init_error(_) ->

@@ -50,7 +50,12 @@
     %% Monitors on the QUIC connection (from `connection_handler') and
     %% the H3 connection (from `connected'). Either going down ends
     %% the router so its sessions are told the connection is gone.
-    conn_mons = [] :: [reference()]
+    conn_mons = [] :: [reference()],
+    %% StreamId -> init worker, for starts given up on (stream reset,
+    %% caller timed out) while the worker still runs. They count toward
+    %% `max_tunnels' until the worker ends, so resetting streams cannot
+    %% start more sessions than the limit allows.
+    cancelled = #{} :: #{non_neg_integer() => pid()}
 }).
 
 %%====================================================================
@@ -115,7 +120,9 @@ init([MaxTunnels, QuicConn]) ->
     {ok, #state{max_tunnels = MaxTunnels, conn_mons = [MRef]}}.
 
 handle_call({start_session, Args}, From, S) ->
-    Active = maps:size(S#state.sessions) + maps:size(S#state.pending),
+    Active =
+        maps:size(S#state.sessions) + maps:size(S#state.pending) +
+            maps:size(S#state.cancelled),
     case S#state.max_tunnels > 0 andalso Active >= S#state.max_tunnels of
         true ->
             {reply, {error, too_many_tunnels}, S};
@@ -139,8 +146,11 @@ handle_call({cancel_pending, StreamId}, _From, S) ->
         {ok, {_, {finalizing, _, _}, _}} ->
             %% The 2xx may already be on the wire: too late to reject.
             {reply, {error, already_activated}, S};
-        {ok, _} ->
-            {reply, ok, S#state{pending = maps:remove(StreamId, S#state.pending)}};
+        {ok, {_, Worker, _}} ->
+            {reply, ok, S#state{
+                pending = maps:remove(StreamId, S#state.pending),
+                cancelled = maps:put(StreamId, Worker, S#state.cancelled)
+            }};
         error ->
             case maps:is_key(StreamId, S#state.sessions) of
                 true -> {reply, {error, already_activated}, S};
@@ -186,7 +196,7 @@ handle_info({session_init_done, StreamId, {ok, Pid}}, S) ->
             %% ask the session to stop without writing to the stream
             %% and without waiting for it, so routing never stalls.
             gen_server:cast(Pid, connection_closed),
-            {noreply, S}
+            {noreply, S#state{cancelled = maps:remove(StreamId, S#state.cancelled)}}
     end;
 handle_info({masque_finalized, StreamId, Pid, Result}, S) ->
     case maps:take(StreamId, S#state.pending) of
@@ -213,7 +223,7 @@ handle_info({session_init_done, StreamId, {error, Reason}}, S) ->
             gen_server:reply(From, {error, Reason}),
             {noreply, S#state{pending = Pending2}};
         error ->
-            {noreply, S}
+            {noreply, S#state{cancelled = maps:remove(StreamId, S#state.cancelled)}}
     end;
 %% Linked worker EXIT - cleanup handled via monitor DOWN.
 handle_info({'EXIT', _Pid, _Reason}, S) ->
@@ -279,11 +289,18 @@ handle_down(MRef, DownPid, Reason, S) ->
                         pending = maps:remove(StreamId, S#state.pending)
                     }};
                 _ ->
-                    {noreply, S}
+                    %% A cancelled start's worker is gone: it no longer
+                    %% counts toward the limit.
+                    {noreply, S#state{
+                        cancelled = maps:filter(
+                            fun(_, W) -> W =/= DownPid end, S#state.cancelled
+                        )
+                    }}
             end
     end.
 
-terminate(_Reason, #state{sessions = Sessions, pending = Pending}) ->
+terminate(_Reason, #state{sessions = Sessions, pending = Pending, cancelled = Cancelled}) ->
+    maps:foreach(fun(_StreamId, WorkerPid) -> exit(WorkerPid, kill) end, Cancelled),
     maps:foreach(
         fun(_StreamId, Pid) ->
             gen_server:cast(Pid, connection_closed)
@@ -381,29 +398,31 @@ drop_stream(StreamId, S) ->
         end,
         S#state.monitors
     ),
-    Pending2 = drop_pending(StreamId, S#state.pending),
+    {Pending2, Cancelled2} = drop_pending(StreamId, S#state.pending, S#state.cancelled),
     S#state{
         sessions = Sessions2,
         monitors = Monitors2,
-        pending = Pending2
+        pending = Pending2,
+        cancelled = Cancelled2
     }.
 
 %% A stream that goes away while its session is still starting answers
 %% the waiting listener with `stream_dead' so it does not sit out the
 %% `start_session' timeout. A session already started is released and
 %% stopped; a worker still running is left to finish, and its session
-%% is stopped when `session_init_done' finds no pending entry.
-drop_pending(StreamId, Pending) ->
+%% is stopped when `session_init_done' finds no pending entry. Until
+%% then it stays in `cancelled', counted toward the tunnel limit.
+drop_pending(StreamId, Pending, Cancelled) ->
     case maps:take(StreamId, Pending) of
         {{From, {finalizing, Pid, MRef}, _Buf}, Pending2} ->
             erlang:demonitor(MRef, [flush]),
             unlink(Pid),
             gen_server:cast(Pid, connection_closed),
             gen_server:reply(From, {error, stream_dead}),
-            Pending2;
-        {{From, _WorkerPid, _Buf}, Pending2} ->
+            {Pending2, Cancelled};
+        {{From, WorkerPid, _Buf}, Pending2} ->
             gen_server:reply(From, {error, stream_dead}),
-            Pending2;
+            {Pending2, maps:put(StreamId, WorkerPid, Cancelled)};
         error ->
-            Pending
+            {Pending, Cancelled}
     end.

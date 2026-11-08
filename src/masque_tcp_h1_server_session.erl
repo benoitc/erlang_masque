@@ -244,6 +244,9 @@ handle_call_inner(_Req, _From, S) ->
 handle_cast(Msg, State) ->
     masque_quiet:stop(handle_cast_inner(Msg, State)).
 
+%% A reverse connect accept stream nobody waits for any more.
+handle_cast_inner(abandon, S) ->
+    {stop, abandoned, S};
 handle_cast_inner(_Msg, S) ->
     {noreply, S}.
 

@@ -11,9 +11,12 @@
 %%% Sessions pass their callback results through `stop/1', which turns
 %%% an explicit stop reason into `{shutdown, {masque_quiet, Reason}}', an
 %%% exit OTP does not report. `normal', `shutdown' and `{shutdown, _}'
-%%% are quiet already; a handler crash (`{handler_crash, _}',
-%%% `{bad_init, _}') stays loud. Exceptions never pass through here, so a
-%%% real crash is still reported. Everything that reads an exit reason
+%%% are quiet already. A handler crash (`{handler_crash, _}') is logged
+%%% once, with its stack, where the session catches it (`safe_apply'),
+%%% so its exit is quiet too: otherwise OTP and the supervisor report it
+%%% twice more. A handler that returns a bad value from `init'
+%%% (`{bad_init, _}') stays loud. Exceptions never pass through here, so
+%%% a real crash is still reported. Everything that reads an exit reason
 %%% (`terminate', the h3 router, callers of a session) calls `reason/1'
 %%% to get the original back.
 
@@ -41,6 +44,5 @@ reason(Reason) -> Reason.
 wrap(normal) -> normal;
 wrap(shutdown) -> shutdown;
 wrap({shutdown, _} = R) -> R;
-wrap({handler_crash, _} = R) -> R;
 wrap({bad_init, _} = R) -> R;
 wrap(Reason) -> {shutdown, {masque_quiet, Reason}}.
