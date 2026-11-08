@@ -250,12 +250,18 @@ handle_call(
                             _ = cancel_transport_stream(S, StreamId),
                             {reply, Err, S}
                     end;
-                {error, stream_limit} = Err ->
+                {error, stream_limit} = Err when S#state.pool =/= undefined ->
                     %% The peer's stream limit is lower than
                     %% `max_streams': stop handing out this owner, and
                     %% keep it at the streams it carries now, so it is
-                    %% not offered again as soon as one stream ends.
+                    %% not offered again as soon as one stream ends; the
+                    %% pool opens another connection.
                     {reply, Err, mark_full(S#state{max_streams = max(1, maps:size(Refs))})};
+                {error, stream_limit} = Err ->
+                    %% A dedicated connection has no other to fall back
+                    %% on, and QUIC returns stream credit in steps, so a
+                    %% refusal can be momentary: the limit stays as is.
+                    {reply, Err, S};
                 {error, _} = Err ->
                     {reply, Err, S}
             end
