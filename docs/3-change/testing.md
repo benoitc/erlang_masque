@@ -90,6 +90,7 @@ End-to-end behaviour pinned to a spec. Add a case here when you implement or fix
 | `masque_curl_SUITE` | real `curl` through the h1 CONNECT-TCP proxy; skipped if curl is missing |
 | `masque_load_SUITE` | busy UDP tunnels, many short tunnels, and many short reverse connect streams on one control channel; every case fails if anything logs an error report. Skipped unless `MASQUE_LOAD=1` |
 | `masque_soak_SUITE` | on h3, h2 and h1: rounds of short UDP and TCP tunnels where processes, ports, ETS rows and memory may not grow, owners killed with tunnels open, peers that hang up mid-handshake or send junk, and no process busy once idle. Fails on any error report. Skipped unless `MASQUE_LOAD=1` |
+| `masque_hostile_SUITE` | fake proxies seen from the client: an h1 proxy that answers 101 and stops reading (UDP, IP, udp-bind sessions must end), and h3 and h2 proxies that send 103 before 200 (the tunnel must open). Lowers `stream_send_timeout_ms` to 1 s |
 
 ### Property tests
 

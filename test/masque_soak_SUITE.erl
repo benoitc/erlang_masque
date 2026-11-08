@@ -13,7 +13,7 @@
 -export([init_per_suite/1, end_per_suite/1]).
 -export([init_per_group/2, end_per_group/2]).
 -export([init_per_testcase/2, end_per_testcase/2]).
--export([churn/1, owners_killed/1, abrupt_peers/1, idle_cpu/1]).
+-export([churn/1, owners_killed/1, abrupt_peers/1, reset_flood/1, request_flood/1, idle_cpu/1]).
 %% logger handler: counts error reports
 -export([log/2]).
 
@@ -31,8 +31,12 @@ suite() -> [{timetrap, {minutes, 15}}].
 all() -> [{group, h3}, {group, h2}, {group, h1}].
 
 groups() ->
-    Cases = [churn, owners_killed, abrupt_peers, idle_cpu],
-    [{h3, [sequence], Cases}, {h2, [sequence], Cases}, {h1, [sequence], Cases}].
+    Cases = [churn, owners_killed, abrupt_peers, request_flood, idle_cpu],
+    [
+        {h3, [sequence], [reset_flood | Cases]},
+        {h2, [sequence], Cases},
+        {h1, [sequence], Cases}
+    ].
 
 init_per_suite(Config) ->
     case os:getenv("MASQUE_LOAD") of
@@ -61,7 +65,11 @@ end_per_suite(Config) ->
 
 init_per_group(Transport, Config) ->
     #{cert_file := CertFile, key_file := KeyFile} = Certs = ?config(certs, Config),
-    Opts = #{handler_opts => #{allow_private => true, allow_self => true}},
+    Opts = #{
+        handler_opts => #{allow_private => true, allow_self => true},
+        accept_listen => true,
+        listen_handler => masque_listen_test_handler
+    },
     case Transport of
         h3 ->
             {ok, #{port := Port} = Srv} =
@@ -305,6 +313,124 @@ junk(I) ->
     %% Long and short header shapes, random bodies.
     First = lists:nth(1 + I rem 3, [16#C0, 16#40, 16#00]),
     <<First, (crypto:strong_rand_bytes(20 + I rem 1300))/binary>>.
+
+%% h3: requests reset right after they are sent, at line rate. A start
+%% given up on still counts toward the tunnel limit until it ends, and
+%% nothing is left once they have.
+reset_flood(Config) ->
+    Before = settle(snapshot(), 60),
+    {ok, Conn} = masque_test_helpers:h3_client_connect(?config(port, Config), #{}),
+    Headers = [
+        {<<":method">>, <<"CONNECT">>},
+        {<<":protocol">>, <<"connect-udp">>},
+        {<<":scheme">>, <<"https">>},
+        {<<":authority">>, <<"localhost">>},
+        {<<":path">>,
+            masque_uri:expand(<<"/.well-known/masque/udp/{target_host}/{target_port}/">>, #{
+                target_host => <<"127.0.0.1">>, target_port => ?config(udp_port, Config)
+            })},
+        {<<"capsule-protocol">>, <<"?1">>}
+    ],
+    Sent = reset_loop(Conn, Headers, ?ABRUPT * 10, 0),
+    ct:pal("~p requests sent and reset", [Sent]),
+    ok = quic_h3:close(Conn),
+    await_quiet(30000),
+    After = settle(snapshot(), 60),
+    ct:pal("before ~p~nafter  ~p~ngrown ~p", [
+        maps:remove(tables, Before), maps:remove(tables, After), grown(Before, After)
+    ]),
+    ?assert(Sent > ?ABRUPT),
+    ?assert(maps:get(procs, After) - maps:get(procs, Before) < 30),
+    ?assert(maps:get(ports, After) - maps:get(ports, Before) < 10).
+
+reset_loop(_Conn, _Headers, 0, Sent) ->
+    Sent;
+reset_loop(Conn, Headers, N, Sent) ->
+    case quic_h3:request(Conn, Headers, #{end_stream => false}) of
+        {ok, Sid} ->
+            _ = quic_h3:cancel(Conn, Sid),
+            reset_loop(Conn, Headers, N - 1, Sent + 1);
+        {error, _} ->
+            %% Out of stream credit until the proxy returns it.
+            timer:sleep(5),
+            reset_loop(Conn, Headers, N - 1, Sent)
+    end.
+
+%% An agent that never answers, flooded with connection requests: it
+%% holds at most `max_pending_requests', declines the rest, and nothing
+%% grows on either side.
+request_flood(Config) ->
+    Before = settle(snapshot(), 60),
+    Uri = iolist_to_binary(["https://127.0.0.1:", integer_to_list(?config(port, Config))]),
+    Self = self(),
+    Agent = spawn(fun() ->
+        {ok, Listen} = masque:reverse_listen(Uri, {local, tcp}, #{
+            transports => [?config(transport, Config)],
+            verify => verify_none,
+            request_headers => [{<<"x-identity">>, <<"soak">>}]
+        }),
+        Self ! agent_up,
+        hold_requests(Listen, Self, 0)
+    end),
+    receive
+        agent_up -> ok
+    after 10000 -> ct:fail(agent_not_up)
+    end,
+    [Control] = by_initial(fun(M) ->
+        lists:prefix("masque_listen", M) andalso lists:suffix("server_session", M)
+    end),
+    Service = #{destination => local, protocol => tcp, port => 7},
+    Results = lists:append(
+        [
+            run_requests(Control, Service, 50)
+         || _ <- lists:seq(1, 20)
+        ]
+    ),
+    Declined = length([R || {error, declined} = R <- Results]),
+    TimedOut = length([R || {error, timeout} = R <- Results]),
+    Agent ! {count, self()},
+    Held =
+        receive
+            {held, H} -> H
+        after 5000 -> ct:fail(agent_silent)
+        end,
+    ct:pal("~p requests: ~p declined, ~p timed out; the agent held ~p", [
+        length(Results), Declined, TimedOut, Held
+    ]),
+    ?assertEqual(1000, Declined + TimedOut),
+    ?assert(Held =< 64),
+    Agent ! stop,
+    await_quiet(30000),
+    After = settle(snapshot(), 60),
+    ?assert(maps:get(procs, After) - maps:get(procs, Before) < 30),
+    ?assert(maps:get(ports, After) - maps:get(ports, Before) < 10).
+
+run_requests(Control, Service, N) ->
+    Self = self(),
+    Pids = [
+        spawn(fun() ->
+            Self ! {req, self(), masque:request_connection(Control, Service, #{timeout => 200})}
+        end)
+     || _ <- lists:seq(1, N)
+    ],
+    [
+        receive
+            {req, P, R} -> R
+        after 10000 -> ct:fail(request_stuck)
+        end
+     || P <- Pids
+    ].
+
+hold_requests(Listen, Test, N) ->
+    receive
+        {masque_connection_request, Listen, _Id, _Service} ->
+            hold_requests(Listen, Test, N + 1);
+        {count, From} ->
+            From ! {held, N},
+            hold_requests(Listen, Test, N);
+        stop ->
+            masque:close(Listen)
+    end.
 
 %% Once everything is closed, no process may keep working.
 idle_cpu(_Config) ->

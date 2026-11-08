@@ -152,7 +152,7 @@ Capsule types the session itself understands (DATAGRAM, CONNECT-IP control capsu
 
 ## Accept inbound connections
 
-`masque:reverse_listen/3` opens a reverse connect control channel, so the proxy can ask you to accept connections; you answer with `masque:reverse_accept/2,3` or `masque:reverse_decline/2`. It takes one transport in `transports` and the options of `connect/3`, plus `listen_uri_template` and `accept_uri_template`. See [reverse connect](reverse-connect.md).
+`masque:reverse_listen/3` opens a reverse connect control channel, so the proxy can ask you to accept connections; you answer with `masque:reverse_accept/2,3` or `masque:reverse_decline/2`. It takes one transport in `transports` and the options of `connect/3`, plus `listen_uri_template`, `accept_uri_template` and `max_pending_requests` (default 64: requests waiting for your answer; the session declines the ones past it). See [reverse connect](reverse-connect.md).
 
 ## Close
 

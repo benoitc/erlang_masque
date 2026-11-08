@@ -174,7 +174,7 @@ Reverse connect is off unless a listener sets `accept_listen => true`. The draft
 | §4.1 | Listener template with optional `target` and `ipproto` | `target`: host name, address, prefix, `*`, `*.domain`, `.`; `ipproto`: 6, 17, `*`. A missing variable means `*`. Default `/.well-known/masque/listen/{target}/{ipproto}/`. Other variables are refused. | `masque_uri_reverse` |
 | §4.2, §4.3 | `connect-listen` over `Upgrade` (h1) or Extended CONNECT (h2, h3), capsule protocol | Listener answers 101 or 200 with `capsule-protocol: ?1`; the client requires it. | listeners, `masque_listen_*_session` |
 | §4.4 | AVAILABLE_SERVICES, a full list that replaces the previous one | Decoded and handed to `handle_services/2`; a malformed record aborts the channel. | `masque_reverse_capsule`, `masque_listen_server_session` |
-| §5.1 | CONNECTION_REQUEST with a request id unique on the channel | Ids are random 62-bit values, registered before the capsule is sent. The client aborts the channel on a reused id or a malformed request. | `masque_reverse_registry`, `masque_listen_client_session` |
+| §5.1 | CONNECTION_REQUEST with a request id unique on the channel | Ids are random 62-bit values, registered before the capsule is sent. The client aborts the channel on a reused id or a malformed request, and declines requests past `max_pending_requests` (64) unanswered ones. | `masque_reverse_registry`, `masque_listen_client_session`, `masque_reverse_ids` |
 | §5.1 | CONNECTION_REQUEST_DECLINED; one for no outstanding request is an error | The requester gets `{error, declined}`; an unknown id aborts the channel (`H3_MESSAGE_ERROR`, `PROTOCOL_ERROR`). | `masque_listen_server_session` |
 | §5.2 | Accept template with `request_id` | Default `/.well-known/masque/accept/{request_id}/`; a template without `request_id` is refused. | `masque_uri_reverse` |
 | §5.2.1, §5.2.2 | Malformed accept: 400; unknown id: 404 | `bad_request` (400) and `unknown_request` (404). An accept on another connection (h2, h3) or with another identity (h1) also gets 404. | `masque_reverse_listener` |
@@ -187,3 +187,5 @@ Reverse connect is off unless a listener sets `accept_listen => true`. The draft
 Deviations and open points:
 - The capsule codes are masque's own until the draft assigns them, so only masque peers interoperate. No other implementation of the draft is known.
 - The control channel has no idle timeout by default (`listen_idle_timeout_ms`); the draft does not set one.
+- The client checks the last 4,096 request ids of a channel for reuse, so its memory stays bounded; a reuse of an older id is accepted as new. The draft gives no limit, and the ids are random, so there is no high-water mark to keep instead.
+- Past `max_pending_requests` unanswered requests the client declines new ones itself (CONNECTION_REQUEST_DECLINED), so a proxy cannot grow the agent's memory or its owner's mailbox. The draft does not require a limit.

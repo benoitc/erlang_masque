@@ -33,6 +33,10 @@
     declined_for_unknown_id_aborts/1,
     udp_echo/1,
     udp_burst/1,
+    orphan_accept_is_stopped/1,
+    listen_close_ends_accepted_streams/1,
+    pending_requests_capped/1,
+    dead_control_rows_dropped/1,
     udp_too_big_dropped/1
 ]).
 
@@ -66,13 +70,27 @@ groups() ->
         slow_edge_holds_agent,
         off_by_default,
         udp_echo,
-        udp_burst
+        udp_burst,
+        orphan_accept_is_stopped,
+        pending_requests_capped,
+        dead_control_rows_dropped
     ],
     [
         {h3, [],
             Common ++
-                [connection_end_ends_streams, declined_for_unknown_id_aborts, udp_too_big_dropped]},
-        {h2, [], Common ++ [connection_end_ends_streams, declined_for_unknown_id_aborts]},
+                [
+                    connection_end_ends_streams,
+                    listen_close_ends_accepted_streams,
+                    declined_for_unknown_id_aborts,
+                    udp_too_big_dropped
+                ]},
+        {h2, [],
+            Common ++
+                [
+                    connection_end_ends_streams,
+                    listen_close_ends_accepted_streams,
+                    declined_for_unknown_id_aborts
+                ]},
         {h1, [], Common}
     ].
 
@@ -302,6 +320,29 @@ connection_end_ends_streams(Config) ->
     after 15000 -> ct:fail(stream_survived)
     end.
 
+%% h3 and h2: the agent closing its control channel (the connection is
+%% its own) ends every stream it accepted on it, with `masque_closed'
+%% and without a crash.
+listen_close_ends_accepted_streams(Config) ->
+    {Agent, Control} = start_agent(Config, echo),
+    {ok, Stream} = masque:request_connection(Control, service()),
+    ok = masque:send(Stream, <<"x">>),
+    <<"x">> = edge_recv(Stream, 1),
+    Agent ! close_listen,
+    receive
+        {agent_listen_closed, Agent} -> ok
+    after 5000 -> ct:fail(listen_not_closed)
+    end,
+    receive
+        {agent_stream_closed, _S, _Reason} -> ok;
+        {agent_streams_open, Left} -> ct:fail({accepted_streams_left, Left})
+    after 15000 -> ct:fail(no_stream_end)
+    end,
+    receive
+        {agent_streams_done, Agent} -> ok
+    after 15000 -> ct:fail(agent_not_done)
+    end.
+
 services_delivered(Config) ->
     {Agent, _Control} = start_agent(Config, echo),
     First = [
@@ -385,6 +426,74 @@ declined_for_unknown_id_aborts(Config) ->
 udp_service() -> #{destination => local, protocol => udp, port => 53}.
 
 %% A UDP service: each datagram comes back as it went.
+%% An accept stream whose request is gone (declined or timed out
+%% meanwhile) is stopped, so its own cleanup runs (h2 tunnel slot,
+%% gauge, a reset for the stream); it used to be killed.
+orphan_accept_is_stopped(Config) ->
+    {Agent, Control} = start_agent(Config, hold),
+    Self = self(),
+    Stream = spawn(fun() ->
+        receive
+            {'$gen_cast', abandon} -> Self ! {stream_stopped, self()}
+        after 5000 -> ok
+        end
+    end),
+    Control ! {masque_reverse_accepted, 424242, Stream},
+    receive
+        {stream_stopped, Stream} -> ok
+    after 5000 -> ct:fail(orphan_not_stopped)
+    end,
+    ?assert(is_process_alive(Control)),
+    stop_agent(Agent).
+
+%% An agent holds at most `max_pending_requests' unanswered requests;
+%% the proxy's further requests are declined at once, so a proxy cannot
+%% grow the agent's memory or its owner's mailbox.
+pending_requests_capped(Config) ->
+    {Agent, Control} = start_agent(Config, hold, #{max_pending_requests => 4}),
+    Self = self(),
+    [
+        spawn_link(fun() ->
+            Self ! {requested, masque:request_connection(Control, service(), #{timeout => 3000})}
+        end)
+     || _ <- lists:seq(1, 20)
+    ],
+    Results = [
+        receive
+            {requested, R} -> R
+        after 10000 -> ct:fail(request_stuck)
+        end
+     || _ <- lists:seq(1, 20)
+    ],
+    ?assertEqual(16, length([R || {error, declined} = R <- Results])),
+    ?assertEqual(4, length([R || {error, timeout} = R <- Results])),
+    ?assertEqual(4, count_agent_requests(0)),
+    stop_agent(Agent).
+
+count_agent_requests(N) ->
+    receive
+        {agent_request, _} -> count_agent_requests(N + 1)
+    after 0 -> N
+    end.
+
+%% Requests left behind by a control session that died without its
+%% cleanup (killed) are dropped at the next accept, which gets 404.
+dead_control_rows_dropped(Config) ->
+    Dead = spawn(fun() -> ok end),
+    MRef = erlang:monitor(process, Dead),
+    receive
+        {'DOWN', MRef, process, Dead, _} -> ok
+    end,
+    Id = masque_reverse_registry:register(#{
+        control => Dead,
+        conn => undefined,
+        identity => <<"alice">>,
+        requester => self(),
+        service => service()
+    }),
+    ?assertEqual(404, raw_accept_status(Config, Id, ?TOKEN)),
+    ?assertEqual(error, masque_reverse_registry:lookup(Id)).
+
 udp_echo(Config) ->
     {Agent, Control} = start_agent(Config, echo),
     {ok, Stream} = masque:request_connection(Control, udp_service()),
@@ -440,10 +549,13 @@ count_datagrams(Stream, N) ->
 %% The agent opens the channel and answers requests by `Mode'. Returns
 %% its pid and the control session the edge uses.
 start_agent(Config, Mode) ->
+    start_agent(Config, Mode, #{}).
+
+start_agent(Config, Mode, Extra) ->
     Self = self(),
     Agent = spawn_link(fun() ->
         {ok, Listen} = masque:reverse_listen(
-            proxy(Config), {local, tcp}, client_opts(Config, ?TOKEN)
+            proxy(Config), {local, tcp}, maps:merge(client_opts(Config, ?TOKEN), Extra)
         ),
         Self ! {agent_up, self()},
         agent_loop(Listen, Mode, Self, #{})
@@ -467,6 +579,21 @@ stop_agent(Agent) ->
     after 10000 -> ct:fail(agent_stuck)
     end.
 
+%% After `close_listen': report how each accepted stream ended, then stop.
+agent_streams_closed(Test, []) ->
+    unlink(Test),
+    Test ! {agent_streams_done, self()};
+agent_streams_closed(Test, Left) ->
+    receive
+        {masque_closed, S, Reason} ->
+            Test ! {agent_stream_closed, S, Reason},
+            agent_streams_closed(Test, lists:delete(S, Left));
+        _ ->
+            agent_streams_closed(Test, Left)
+    after 10000 ->
+        Test ! {agent_streams_open, Left}
+    end.
+
 agent_loop(Listen, Mode, Test, Streams) ->
     receive
         stop ->
@@ -474,6 +601,10 @@ agent_loop(Listen, Mode, Test, Streams) ->
             _ = masque:close(Listen);
         {masque_connection_request, Listen, Id, _Service} ->
             agent_request(Listen, Mode, Test, Streams, Id);
+        close_listen ->
+            ok = masque:close(Listen),
+            Test ! {agent_listen_closed, self()},
+            agent_streams_closed(Test, maps:keys(maps:remove(held, Streams)));
         accept_now ->
             [Id | _] = maps:get(held, Streams, []),
             Result = masque:reverse_accept(Listen, Id, #{verify => verify_none}),

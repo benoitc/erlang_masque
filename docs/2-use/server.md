@@ -64,6 +64,8 @@ Opts = #{
 | `reuseport`, `alpn`, `max_datagram_frame_size` | h3 | `false`, `[<<"h3">>]`, `65535` | QUIC listener tuning. |
 | `quic_opts` | h3 | `#{}` | QUIC listener options, merged over masque's defaults and winning over them. For example `sni_callback` to pick the certificate per name (then `cert` and `key` may be left out), `max_streams_bidi` to carry more than 100 tunnels per connection, `idle_timeout`, `keep_alive_interval`. |
 | `ssl_opts` | h2, h1 | `[]` | TLS options for the listening socket, for example `{sni_fun, Fun}` to pick the certificate per name. `cert` and `key` are still required. |
+| `handshake_timeout`, `request_timeout`, `idle_timeout` | h1 | h1 defaults (30 s, 60 s) | Limits before the upgrade: the TLS handshake, the request line and headers, an idle keep-alive connection. Lower them to drop slow clients sooner. |
+| `max_request_line_size`, `max_header_name_size`, `max_header_value_size`, `max_headers`, `max_header_block_size` | h1 | h1 defaults | Size limits on the request before the upgrade. |
 
 ### Where handler options go
 

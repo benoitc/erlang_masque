@@ -246,12 +246,13 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q18.** Settled: pooled h3 owners default to 100 streams and report full on a transport `stream_limit` error, so the pool opens another connection (see [pool](pool.md)).
 - **Q19.** The `masque_ip_proxy_handler` allocator is first-fit (its moduledoc used to say round-robin). Is round-robin wanted, so a released address is not handed out again at once?
 - **Q20.** Settled: traffic in either direction re-arms the idle timer.
-- **Q21.** `dial_single_or_pool/5` waits for the pool checkout up to `checkout_timeout_ms` (60 s), regardless of the connect `timeout`. Intended?
+- **Q21.** Settled: a pool checkout waits no longer than the caller's connect `timeout`; `checkout_timeout_ms` in `upstream_pool_opts` still overrides it.
 - **Q22.** The chain listeners set `handler`, `tcp_handler` and `ip_handler` to `masque_chain_handler` but not `bind_handler`, so udp-bind is not chained. Intended?
 - **Q23.** Settled: every listener has `fallback` and puts `peer` in the request map. `peer_cert` stays h3 only until the h2 and h1 libraries expose the client certificate. h1 needs no tunnel limit: it carries one tunnel per connection.
 - **Q24.** Settled: compression contexts are two-way on both sides (see [udp-bind internals](udp-bind-internals.md)).
 - **Q25.** Error stops end the stream differently per protocol: UDP resets with `H3_MESSAGE_ERROR`, TCP with `H3_CONNECT_ERROR`, udp-bind with `H3_INTERNAL_ERROR`, IP with a FIN. Intended?
 - **Q26.** The h1 IP session has no limit on pending ADDRESS_REQUEST ids (h3/h2 cap it at 64). Intended?
 - **Q27.** Settled: in `connecting` a call answers `{error, not_ready}` except `info` and `stop`; in `open` an unsupported call answers `{error, not_supported}`; in `closing`, `{error, closing}`.
+- **Q28.** Reverse connect agents bound what a proxy can make them hold: at most `max_pending_requests` (64) unanswered requests, the rest declined, and reuse detection over the last 4,096 request ids only (see the deviations in [conformance](../reference/conformance.md)).
 
 Next: [releasing](releasing.md).
