@@ -77,6 +77,9 @@
 }).
 
 -define(DEFAULT_H3_MAX_STREAMS, 100).
+%% How long a dedicated owner holds an acquire the peer's stream limit
+%% refused, waiting for a stream to free up.
+-define(STREAM_WAIT_MS, 5000).
 
 -record(state, {
     transport :: h2 | quic_h3,
@@ -86,6 +89,15 @@
     fingerprint :: term(),
     refs :: #{non_neg_integer() => #ref{}},
     max_streams :: pos_integer() | dynamic,
+    %% `max_streams' as configured (`default' or a number): what the
+    %% limit goes back to once the peer has room again.
+    configured_max = default :: pos_integer() | dynamic | default,
+    %% A reverse connect channel's own connection (`start_dedicated/1'):
+    %% no other connection to fall back on.
+    dedicated = false :: boolean(),
+    %% Dedicated owners: acquires refused at the peer's stream limit,
+    %% oldest first, retried when a stream can open again.
+    waiting = [] :: [{gen_server:from(), {list(), pid(), map()}, reference()}],
     idle_ms :: non_neg_integer() | infinity,
     idle_ref :: undefined | reference(),
     %% Registry told about capacity changes (self-dialed owners only).
@@ -221,6 +233,7 @@ init(#{transport := Transport, conn := Conn} = Args) ->
         fingerprint = maps:get(fingerprint, Args, undefined),
         refs = #{},
         max_streams = MaxStreams,
+        configured_max = maps:get(max_streams, Args, default),
         idle_ms = IdleMs,
         idle_ref = undefined,
         pool = maps:get(pool, Args, undefined)
@@ -231,40 +244,17 @@ init(#{transport := Transport, conn := Conn} = Args) ->
 
 handle_call({acquire, _Headers, _SessionPid, _ReqOpts}, _From, #state{draining = true} = S) ->
     {reply, {error, goaway}, S};
-handle_call(
-    {acquire, Headers, SessionPid, ReqOpts},
-    _From,
-    #state{refs = Refs, max_streams = MS} = S
-) ->
-    case at_capacity(maps:size(Refs), MS) of
-        true ->
-            {reply, {error, stream_limit}, S};
-        false ->
-            case issue_request(S, Headers, ReqOpts) of
-                {ok, StreamId} ->
-                    case register_stream(StreamId, SessionPid, S) of
-                        {ok, S1} ->
-                            S2 = report_capacity(cancel_idle(S1)),
-                            {reply, {ok, StreamId, S#state.conn}, S2};
-                        {error, _} = Err ->
-                            _ = cancel_transport_stream(S, StreamId),
-                            {reply, Err, S}
-                    end;
-                {error, stream_limit} = Err when S#state.pool =/= undefined ->
-                    %% The peer's stream limit is lower than
-                    %% `max_streams': stop handing out this owner, and
-                    %% keep it at the streams it carries now, so it is
-                    %% not offered again as soon as one stream ends; the
-                    %% pool opens another connection.
-                    {reply, Err, mark_full(S#state{max_streams = max(1, maps:size(Refs))})};
-                {error, stream_limit} = Err ->
-                    %% A dedicated connection has no other to fall back
-                    %% on, and QUIC returns stream credit in steps, so a
-                    %% refusal can be momentary: the limit stays as is.
-                    {reply, Err, S};
-                {error, _} = Err ->
-                    {reply, Err, S}
-            end
+handle_call({acquire, Headers, SessionPid, ReqOpts}, From, S) ->
+    case try_acquire({Headers, SessionPid, ReqOpts}, S) of
+        {reply, Reply, S1} ->
+            {reply, Reply, S1};
+        {refused, #state{dedicated = true} = S1} ->
+            %% A dedicated connection has no other to fall back on: wait
+            %% a while for a stream to free up (one of ours ends, or the
+            %% peer returns credit and says so).
+            {noreply, wait_for_stream(From, {Headers, SessionPid, ReqOpts}, S1)};
+        {refused, S1} ->
+            {reply, {error, stream_limit}, S1}
     end;
 handle_call(info, _From, S) ->
     {reply,
@@ -396,6 +386,24 @@ handle_info(
 %% Late / stale timer.
 handle_info({timeout, _Ref, idle}, S) ->
     {noreply, S};
+%% With `notify_stream_available' (h2) / `notify_streams_available'
+%% (quic_h3), after a refused request.
+handle_info({h2, Conn, stream_available}, #state{transport = h2, conn = Conn} = S) ->
+    {noreply, streams_available(S)};
+handle_info(
+    {quic_h3, Conn, {streams_available, bidi}},
+    #state{transport = quic_h3, conn = Conn} = S
+) ->
+    {noreply, streams_available(S)};
+%% A waiting acquire ran out of time.
+handle_info({timeout, TRef, {stream_wait, From}}, #state{waiting = W} = S) ->
+    case lists:keytake(TRef, 3, W) of
+        {value, _, W1} ->
+            gen_server:reply(From, {error, stream_limit}),
+            {noreply, S#state{waiting = W1}};
+        false ->
+            {noreply, S}
+    end;
 handle_info(_Msg, S) ->
     {noreply, S}.
 
@@ -405,6 +413,8 @@ handle_info(_Msg, S) ->
 %% dedicated user going away, `close_all/0' or a crash. (h2 tells every
 %% stream handler itself; the paths that already told them cleared
 %% `refs'.)
+terminate(Reason, #state{waiting = [_ | _]} = S) ->
+    terminate(Reason, fail_waiting({error, owner_gone}, S));
 terminate(_Reason, #state{transport = quic_h3} = S) ->
     broadcast({quic_h3, S#state.conn, {closed, owner_stopped}}, S),
     _ = close_transport(S),
@@ -419,6 +429,77 @@ code_change(_OldVsn, S, _Extra) ->
 %%====================================================================
 %% Internal
 %%====================================================================
+
+%% Open a stream for a session, or report that the stream limit (ours
+%% or the peer's) refused it. h2 says `max_streams_exceeded' where QUIC
+%% says `stream_limit'.
+try_acquire({Headers, SessionPid, ReqOpts}, #state{refs = Refs, max_streams = MS} = S) ->
+    case at_capacity(maps:size(Refs), MS) of
+        true ->
+            {refused, S};
+        false ->
+            case issue_request(S, Headers, ReqOpts) of
+                {ok, StreamId} ->
+                    case register_stream(StreamId, SessionPid, S) of
+                        {ok, S1} ->
+                            S2 = report_capacity(cancel_idle(S1)),
+                            {reply, {ok, StreamId, S#state.conn}, S2};
+                        {error, _} = Err ->
+                            _ = cancel_transport_stream(S, StreamId),
+                            {reply, Err, S}
+                    end;
+                {error, R} when
+                    (R =:= stream_limit orelse R =:= max_streams_exceeded),
+                    S#state.pool =/= undefined
+                ->
+                    %% The peer allows fewer streams than `max_streams':
+                    %% stop handing out this owner, at the streams it
+                    %% carries now, until the transport says a stream can
+                    %% open again (`streams_available/1'). The pool opens
+                    %% another connection meanwhile.
+                    {refused, mark_full(S#state{max_streams = max(1, maps:size(Refs))})};
+                {error, R} when R =:= stream_limit; R =:= max_streams_exceeded ->
+                    {refused, S};
+                {error, _} = Err ->
+                    {reply, Err, S}
+            end
+    end.
+
+wait_for_stream(From, Req, #state{waiting = W} = S) ->
+    TRef = erlang:start_timer(?STREAM_WAIT_MS, self(), {stream_wait, From}),
+    S#state{waiting = W ++ [{From, Req, TRef}]}.
+
+%% Hand waiting acquires the streams that can open now, oldest first;
+%% stop at the first one still refused.
+retry_waiting(#state{waiting = []} = S) ->
+    S;
+retry_waiting(#state{waiting = [{From, Req, TRef} | Rest]} = S) ->
+    case try_acquire(Req, S#state{waiting = Rest}) of
+        {reply, Reply, S1} ->
+            _ = erlang:cancel_timer(TRef),
+            gen_server:reply(From, Reply),
+            retry_waiting(S1);
+        {refused, S1} ->
+            S1#state{waiting = [{From, Req, TRef} | Rest]}
+    end.
+
+%% Answer every waiting acquire (the connection is draining or going).
+fail_waiting(Reply, #state{waiting = W} = S) ->
+    lists:foreach(
+        fun({From, _, TRef}) ->
+            _ = erlang:cancel_timer(TRef),
+            gen_server:reply(From, Reply)
+        end,
+        W
+    ),
+    S#state{waiting = []}.
+
+%% The transport says a stream can open again: the peer returned credit
+%% or raised its limit. Go back to the configured limit (h2 reads the
+%% peer's current SETTINGS), tell the pool, and serve waiting acquires.
+streams_available(#state{transport = T, mod = Mod, conn = Conn, configured_max = C} = S) ->
+    MS = resolve_max_streams(T, Mod, Conn, C),
+    retry_waiting(report_capacity(S#state{max_streams = MS})).
 
 at_capacity(_N, dynamic) -> false;
 at_capacity(N, Max) when is_integer(Max) -> N >= Max.
@@ -441,7 +522,7 @@ report_capacity(#state{pool = Pool, refs = Refs, max_streams = MS, full = Was} =
 %% After GOAWAY the connection stays full for good; its idle timer
 %% closes it once its last stream is gone.
 drain(S) ->
-    (mark_full(S))#state{draining = true}.
+    fail_waiting({error, goaway}, (mark_full(S))#state{draining = true}).
 
 mark_full(#state{pool = undefined} = S) ->
     S;
@@ -540,7 +621,7 @@ drop_stream(StreamId, #state{refs = Refs} = S, How) ->
                     reset -> cancel_transport_stream(S, StreamId);
                     graceful -> ok
                 end,
-            report_capacity(maybe_arm_idle(S#state{refs = Refs1}));
+            retry_waiting(report_capacity(maybe_arm_idle(S#state{refs = Refs1})));
         error ->
             S
     end.
@@ -646,7 +727,9 @@ init_dedicated(Caller, User, Tag, Opts) ->
             case extended_connect(State) of
                 ok ->
                     Caller ! {dial_result, Tag, {ok, self()}},
-                    gen_server:enter_loop(?MODULE, [], State#state{user_mon = UserMon});
+                    gen_server:enter_loop(?MODULE, [], State#state{
+                        user_mon = UserMon, dedicated = true
+                    });
                 {error, _} = Err ->
                     _ = close_conn(State),
                     Caller ! {dial_result, Tag, Err}
@@ -697,7 +780,9 @@ do_dial(h2, Mod, Opts) ->
     Host = maps:get(host, Opts),
     Port = maps:get(port, Opts),
     ConnOpts = maps:get(connect_opts, Opts, #{}),
-    case Mod:connect(Host, Port, ConnOpts#{sync => true}) of
+    %% Told when a request refused at the peer's stream limit would
+    %% open again (`streams_available/1').
+    case Mod:connect(Host, Port, ConnOpts#{sync => true, notify_stream_available => true}) of
         {ok, Conn} -> {ok, Conn};
         {error, _} = E -> E
     end;
@@ -709,6 +794,7 @@ do_dial(quic_h3, Mod, Opts) ->
     %% same conn can carry CONNECT-UDP / -IP / -TCP tunnels.
     ConnOpts = ConnOpts0#{
         sync => true,
+        notify_streams_available => true,
         h3_datagram_enabled => true,
         settings =>
             maps:merge(

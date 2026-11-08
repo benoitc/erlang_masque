@@ -153,6 +153,7 @@ agent_stream(Listen, Id, Port) ->
 
 - On HTTP/3 and HTTP/2 the channel gets a connection of its own, and every accept stream runs on it, as the draft requires. Closing the channel closes them all. On HTTP/1.1 each accept is a new TLS connection, matched to the channel by the identity `authenticate/1` returns.
 - An accept for an id the proxy did not issue, or one that comes on another connection or with another identity, gets 404.
+- On HTTP/3 and HTTP/2 the proxy limits how many streams the connection holds at once. An accept past that limit waits up to 5 s for a stream to free up, then returns `{error, stream_limit}`. Call `reverse_accept/2,3` from a process per request, as above, so a waiting accept does not hold up the streams already open.
 - The control channel has no idle timeout by default (`listen_idle_timeout_ms` sets one). QUIC keepalives keep an HTTP/3 channel up.
 - Capsule writes on the channel wait for the transport instead of being dropped, so a busy connection cannot lose a request.
 - The draft has not assigned capsule codes yet; masque uses provisional values (see [conformance](../reference/conformance.md#draft-rosomakho-masque-reverse-connect-01)). Only masque peers speak them.

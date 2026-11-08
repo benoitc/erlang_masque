@@ -35,6 +35,7 @@
     udp_burst/1,
     orphan_accept_is_stopped/1,
     listen_close_ends_accepted_streams/1,
+    accepts_wait_for_stream_limit/1,
     pending_requests_capped/1,
     dead_control_rows_dropped/1,
     udp_too_big_dropped/1
@@ -81,6 +82,7 @@ groups() ->
                 [
                     connection_end_ends_streams,
                     listen_close_ends_accepted_streams,
+                    accepts_wait_for_stream_limit,
                     declined_for_unknown_id_aborts,
                     udp_too_big_dropped
                 ]},
@@ -89,6 +91,7 @@ groups() ->
                 [
                     connection_end_ends_streams,
                     listen_close_ends_accepted_streams,
+                    accepts_wait_for_stream_limit,
                     declined_for_unknown_id_aborts
                 ]},
         {h1, [], Common}
@@ -108,10 +111,20 @@ end_per_group(_T, _Config) -> ok.
 
 init_per_testcase(Case, Config) ->
     true = register(?PROBE, self()),
-    Opts =
+    Opts0 =
         case Case of
             off_by_default -> #{};
             _ -> #{accept_listen => true, listen_handler => ?MODULE}
+        end,
+    Opts =
+        case {Case, ?config(transport, Config)} of
+            %% Three streams: the control channel and two accept streams.
+            {accepts_wait_for_stream_limit, h3} ->
+                Opts0#{quic_opts => #{max_streams_bidi => 3}};
+            {accepts_wait_for_stream_limit, h2} ->
+                Opts0#{settings => #{max_concurrent_streams => 3}};
+            _ ->
+                Opts0
         end,
     Server = start_server(?config(transport, Config), ?config(certs, Config), Opts),
     [{server, Server} | Config].
@@ -342,6 +355,38 @@ listen_close_ends_accepted_streams(Config) ->
         {agent_streams_done, Agent} -> ok
     after 15000 -> ct:fail(agent_not_done)
     end.
+
+%% h3 and h2: a proxy that allows only three streams (the control
+%% channel and two accept streams). More requests at once still succeed:
+%% the agent's accepts wait for a stream to free up instead of failing.
+accepts_wait_for_stream_limit(Config) ->
+    {Agent, Control} = start_agent(Config, concurrent),
+    Self = self(),
+    [
+        spawn_link(fun() ->
+            Result =
+                case masque:request_connection(Control, service(), #{timeout => 20000}) of
+                    {ok, Stream} ->
+                        ok = masque:send(Stream, <<"x">>),
+                        <<"x">> = edge_recv(Stream, 1),
+                        timer:sleep(500),
+                        ok = masque:close(Stream);
+                    Other ->
+                        Other
+                end,
+            Self ! {done, N, Result}
+        end)
+     || N <- lists:seq(1, 5)
+    ],
+    Results = [
+        receive
+            {done, N, R} -> R
+        after 30000 -> ct:fail({request_stuck, N})
+        end
+     || N <- lists:seq(1, 5)
+    ],
+    ?assertEqual([ok, ok, ok, ok, ok], Results),
+    stop_agent(Agent).
 
 services_delivered(Config) ->
     {Agent, _Control} = start_agent(Config, echo),
@@ -579,6 +624,15 @@ stop_agent(Agent) ->
     after 10000 -> ct:fail(agent_stuck)
     end.
 
+echo_stream(S) ->
+    receive
+        {masque_data, S, Bytes} ->
+            ok = masque:send(S, Bytes),
+            echo_stream(S);
+        {masque_closed, S, _} ->
+            ok
+    end.
+
 %% After `close_listen': report how each accepted stream ended, then stop.
 agent_streams_closed(Test, []) ->
     unlink(Test),
@@ -641,6 +695,14 @@ agent_loop(Listen, Mode, Test, Streams) ->
 agent_request(Listen, decline, Test, Streams, Id) ->
     ok = masque:reverse_decline(Listen, Id),
     agent_loop(Listen, decline, Test, Streams);
+%% Each request in its own process, as a real agent would: an accept
+%% waiting for a free stream does not hold up the others.
+agent_request(Listen, concurrent, Test, Streams, Id) ->
+    _ = spawn_link(fun() ->
+        {ok, S} = masque:reverse_accept(Listen, Id, #{verify => verify_none}),
+        echo_stream(S)
+    end),
+    agent_loop(Listen, concurrent, Test, Streams);
 agent_request(Listen, hold, Test, Streams, Id) ->
     Test ! {agent_request, Id},
     agent_loop(Listen, hold, Test, Streams#{held => [Id | maps:get(held, Streams, [])]});
