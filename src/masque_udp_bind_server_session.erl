@@ -989,20 +989,24 @@ control_send(T, C, Sid, Bytes) ->
 %%====================================================================
 
 send_response(#state{transport = h3, conn = C, stream_id = S}, Status, Hdrs) ->
-    quic_h3:send_response(C, S, Status, Hdrs);
+    masque_out:call(fun() -> quic_h3:send_response(C, S, Status, Hdrs) end);
 send_response(#state{transport = h2, conn = C, stream_id = S}, Status, Hdrs) ->
-    h2:send_response(C, S, Status, Hdrs).
+    masque_out:call(fun() -> h2:send_response(C, S, Status, Hdrs) end).
 
 %% `drain_buffer => false': bytes that arrived before the claim are
 %% replayed as `{data, _, _, Fin}' messages through the normal path.
 claim_stream(#state{transport = h3, conn = C, stream_id = Sid} = S) ->
-    case quic_h3:set_stream_handler(C, Sid, self(), #{drain_buffer => false}) of
+    case
+        masque_out:call(fun() ->
+            quic_h3:set_stream_handler(C, Sid, self(), #{drain_buffer => false})
+        end)
+    of
         {error, _} = Err -> Err;
         _ -> {ok, S}
     end;
 claim_stream(#state{transport = h2, conn = C, stream_id = Sid} = S) ->
     %% h2 replays bytes buffered before the claim as messages.
-    case h2:set_stream_handler(C, Sid, self()) of
+    case masque_out:call(fun() -> h2:set_stream_handler(C, Sid, self()) end) of
         {error, _} = Err -> Err;
         _ -> {ok, S}
     end.

@@ -77,8 +77,8 @@
 }).
 
 -define(DEFAULT_H3_MAX_STREAMS, 100).
-%% How long a dedicated owner holds an acquire the peer's stream limit
-%% refused, waiting for a stream to free up.
+%% How long an owner holds an acquire a stream limit refused, waiting
+%% for a stream to free up.
 -define(STREAM_WAIT_MS, 5000).
 
 -record(state, {
@@ -95,8 +95,8 @@
     %% A reverse connect channel's own connection (`start_dedicated/1'):
     %% no other connection to fall back on.
     dedicated = false :: boolean(),
-    %% Dedicated owners: acquires refused at the peer's stream limit,
-    %% oldest first, retried when a stream can open again.
+    %% Acquires refused at a stream limit (the peer's, or a dedicated
+    %% owner's own), oldest first, retried when a stream can open again.
     waiting = [] :: [{gen_server:from(), {list(), pid(), map()}, reference()}],
     idle_ms :: non_neg_integer() | infinity,
     idle_ref :: undefined | reference(),
@@ -248,12 +248,15 @@ handle_call({acquire, Headers, SessionPid, ReqOpts}, From, S) ->
     case try_acquire({Headers, SessionPid, ReqOpts}, S) of
         {reply, Reply, S1} ->
             {reply, Reply, S1};
-        {refused, #state{dedicated = true} = S1} ->
-            %% A dedicated connection has no other to fall back on: wait
-            %% a while for a stream to free up (one of ours ends, or the
-            %% peer returns credit and says so).
+        {Refused, S1} when Refused =:= peer_refused; S1#state.dedicated ->
+            %% The peer is out of stream credit for now (it returns it
+            %% in steps), or this is a dedicated connection with no other
+            %% to fall back on: wait a while for a stream to free up (one
+            %% of ours ends, or the transport says one can open).
             {noreply, wait_for_stream(From, {Headers, SessionPid, ReqOpts}, S1)};
         {refused, S1} ->
+            %% Our own limit on a pooled connection: the pool should not
+            %% have offered it; the caller checks out again.
             {reply, {error, stream_limit}, S1}
     end;
 handle_call(info, _From, S) ->
@@ -430,9 +433,9 @@ code_change(_OldVsn, S, _Extra) ->
 %% Internal
 %%====================================================================
 
-%% Open a stream for a session, or report that the stream limit (ours
-%% or the peer's) refused it. h2 says `max_streams_exceeded' where QUIC
-%% says `stream_limit'.
+%% Open a stream for a session, or report that a stream limit refused
+%% it: ours (`refused') or the peer's (`peer_refused'). h2 says
+%% `max_streams_exceeded' where QUIC says `stream_limit'.
 try_acquire({Headers, SessionPid, ReqOpts}, #state{refs = Refs, max_streams = MS} = S) ->
     case at_capacity(maps:size(Refs), MS) of
         true ->
@@ -457,9 +460,9 @@ try_acquire({Headers, SessionPid, ReqOpts}, #state{refs = Refs, max_streams = MS
                     %% carries now, until the transport says a stream can
                     %% open again (`streams_available/1'). The pool opens
                     %% another connection meanwhile.
-                    {refused, mark_full(S#state{max_streams = max(1, maps:size(Refs))})};
+                    {peer_refused, mark_full(S#state{max_streams = max(1, maps:size(Refs))})};
                 {error, R} when R =:= stream_limit; R =:= max_streams_exceeded ->
-                    {refused, S};
+                    {peer_refused, S};
                 {error, _} = Err ->
                     {reply, Err, S}
             end
@@ -479,7 +482,7 @@ retry_waiting(#state{waiting = [{From, Req, TRef} | Rest]} = S) ->
             _ = erlang:cancel_timer(TRef),
             gen_server:reply(From, Reply),
             retry_waiting(S1);
-        {refused, S1} ->
+        {_Refused, S1} ->
             S1#state{waiting = [{From, Req, TRef} | Rest]}
     end.
 

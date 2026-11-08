@@ -199,8 +199,10 @@ continue(Transport, Conn, StreamId, Framing, Req) ->
             ok
     end.
 
-send_interim(h3, Conn, StreamId) -> quic_h3:send_response(Conn, StreamId, 100, []);
-send_interim(h2, Conn, StreamId) -> h2:send_response(Conn, StreamId, 100, []).
+send_interim(h3, Conn, StreamId) ->
+    masque_out:call(fun() -> quic_h3:send_response(Conn, StreamId, 100, []) end);
+send_interim(h2, Conn, StreamId) ->
+    masque_out:call(fun() -> h2:send_response(Conn, StreamId, 100, []) end).
 
 %% Section 4.3 also asks for `Proxy-Status' on success.
 response_headers(#state{framing = capsule}) ->
@@ -209,7 +211,7 @@ response_headers(_) ->
     [].
 
 send_response(#state{transport = h3, conn = C, stream_id = S}, Status, Hdrs) ->
-    quic_h3:send_response(C, S, Status, Hdrs);
+    masque_out:call(fun() -> quic_h3:send_response(C, S, Status, Hdrs) end);
 send_response(#state{transport = h2, conn = C, stream_id = S}, Status, Hdrs) ->
     h2:send_response(C, S, Status, Hdrs).
 
@@ -252,9 +254,11 @@ replay_early([Msg | Rest], S) ->
 %% bytes to the target (`consume/3'), so a stalled target stops the
 %% client instead of filling this process's mailbox.
 claim_stream(#state{transport = h3, conn = C, stream_id = S}) ->
-    quic_h3:set_stream_handler(C, S, self(), #{drain_buffer => false, flow_control => manual});
+    masque_out:call(fun() ->
+        quic_h3:set_stream_handler(C, S, self(), #{drain_buffer => false, flow_control => manual})
+    end);
 claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
-    h2:set_stream_handler(C, S, self(), #{flow_control => manual}).
+    masque_out:call(fun() -> h2:set_stream_handler(C, S, self(), #{flow_control => manual}) end).
 
 %% The stream may already be gone (its FIN was the last event).
 consume(Tag, Bytes, S) ->

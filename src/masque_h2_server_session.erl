@@ -127,7 +127,11 @@ init_session(#{
                 req = Req,
                 max_cap = MaxCap
             },
-            case h2:send_response(Conn, StreamId, 200, response_headers()) of
+            case
+                masque_out:call(fun() ->
+                    h2:send_response(Conn, StreamId, 200, response_headers())
+                end)
+            of
                 ok ->
                     case claim_stream(State0) of
                         {ok, State1} ->
@@ -157,7 +161,7 @@ claim_stream(
         cap_buf = Buf
     } = S
 ) ->
-    case h2:set_stream_handler(Conn, StreamId, self()) of
+    case masque_out:call(fun() -> h2:set_stream_handler(Conn, StreamId, self()) end) of
         ok ->
             {ok, S};
         {ok, Chunks} ->

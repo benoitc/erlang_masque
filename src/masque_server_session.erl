@@ -112,9 +112,9 @@ response_headers() ->
 %% any later data, so they go through the normal decode path.
 claim_stream(#state{conn = Conn, stream_id = StreamId} = S) ->
     case
-        quic_h3:set_stream_handler(Conn, StreamId, self(), #{
-            drain_buffer => false
-        })
+        masque_out:call(fun() ->
+            quic_h3:set_stream_handler(Conn, StreamId, self(), #{drain_buffer => false})
+        end)
     of
         {error, _} = Err -> Err;
         _ -> {ok, S}
@@ -123,7 +123,9 @@ claim_stream(#state{conn = Conn, stream_id = StreamId} = S) ->
 %% Send the 2xx, claim the stream, run the handler's init actions,
 %% then replay the handler messages that arrived meanwhile.
 finalize(#state{pending_actions = Actions, conn = Conn, stream_id = StreamId} = S) ->
-    case quic_h3:send_response(Conn, StreamId, 200, response_headers()) of
+    case
+        masque_out:call(fun() -> quic_h3:send_response(Conn, StreamId, 200, response_headers()) end)
+    of
         ok ->
             case claim_stream(S#state{pending_actions = undefined}) of
                 {ok, State} ->

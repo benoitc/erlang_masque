@@ -409,7 +409,9 @@ services_delivered(Config) ->
 
 %% 500 connections, 50 at a time, on one control channel.
 many_accepts(Config) ->
-    {Agent, Control} = start_agent(Config, echo),
+    %% One process per accept, as a real agent: an accept that waits for
+    %% the proxy to return stream credit does not stop the echoes.
+    {Agent, Control} = start_agent(Config, concurrent),
     Self = self(),
     Run = fun(N) ->
         {ok, S} = masque:request_connection(Control, service()),

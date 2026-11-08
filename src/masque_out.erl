@@ -10,7 +10,7 @@
 %%% session is asked to stop with `connection_closed', as when the router
 %%% reports the close.
 
--export([send_datagram/3, send_data/4, max_datagram_size/2, h2_send_data/4]).
+-export([send_datagram/3, send_data/4, max_datagram_size/2, h2_send_data/4, call/1]).
 
 -spec send_datagram(pid(), non_neg_integer(), iodata()) -> ok | {error, term()}.
 send_datagram(Conn, StreamId, Data) ->
@@ -28,6 +28,12 @@ max_datagram_size(Conn, StreamId) ->
 -spec h2_send_data(pid(), non_neg_integer(), iodata(), boolean()) -> ok | {error, term()}.
 h2_send_data(Conn, StreamId, Data, Fin) ->
     guard(fun() -> h2:send_data(Conn, StreamId, Data, Fin) end, {error, closed}).
+
+%% Any other transport call on a session's path (the 2xx, claiming the
+%% stream): `{error, closed}' when the connection is already gone.
+-spec call(fun(() -> T)) -> T | {error, closed}.
+call(Fun) ->
+    guard(Fun, {error, closed}).
 
 guard(Fun, Gone) ->
     try

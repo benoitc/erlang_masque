@@ -209,7 +209,7 @@ claim_stream_and_buffer(
         cap_buf = Buf
     } = S
 ) ->
-    case h2:set_stream_handler(C, Sid, self()) of
+    case masque_out:call(fun() -> h2:set_stream_handler(C, Sid, self()) end) of
         ok ->
             {ok, S};
         {ok, Chunks} ->
@@ -229,16 +229,16 @@ response_headers() ->
     [{<<"capsule-protocol">>, <<"?1">>}].
 
 send_response(#state{transport = h3, conn = C, stream_id = S}, Status, Hdrs) ->
-    quic_h3:send_response(C, S, Status, Hdrs);
+    masque_out:call(fun() -> quic_h3:send_response(C, S, Status, Hdrs) end);
 send_response(#state{transport = h2, conn = C, stream_id = S}, Status, Hdrs) ->
     h2:send_response(C, S, Status, Hdrs).
 
 %% `drain_buffer => false': bytes that arrived before the claim are
 %% replayed as `{data, _, _, Fin}' messages through the normal path.
 claim_stream(#state{transport = h3, conn = C, stream_id = S}) ->
-    quic_h3:set_stream_handler(C, S, self(), #{drain_buffer => false});
+    masque_out:call(fun() -> quic_h3:set_stream_handler(C, S, self(), #{drain_buffer => false}) end);
 claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
-    h2:set_stream_handler(C, S, self()).
+    masque_out:call(fun() -> h2:set_stream_handler(C, S, self()) end).
 
 %%====================================================================
 %% Calls / casts
