@@ -89,6 +89,7 @@ End-to-end behaviour pinned to a spec. Add a case here when you implement or fix
 | `masque_interop_SUITE` | quic-go's `masque-go` and `connect-ip-go` over h3, in both roles; skipped unless `MASQUE_GO_BIN` is set |
 | `masque_curl_SUITE` | real `curl` through the h1 CONNECT-TCP proxy; skipped if curl is missing |
 | `masque_load_SUITE` | busy UDP tunnels, many short tunnels, and many short reverse connect streams on one control channel; every case fails if anything logs an error report. Skipped unless `MASQUE_LOAD=1` |
+| `masque_soak_SUITE` | on h3, h2 and h1: rounds of short UDP and TCP tunnels where processes, ports, ETS rows and memory may not grow, owners killed with tunnels open, peers that hang up mid-handshake or send junk, and no process busy once idle. Fails on any error report. Skipped unless `MASQUE_LOAD=1` |
 
 ### Property tests
 

@@ -41,7 +41,7 @@ Read the diff and answer each question with `file:line` evidence, not assumption
 Run these and report the numbers, not only pass or fail:
 
 1. The required checks in `AGENTS.md` (fmt, xref, eunit, proper, lint, dialyzer, ct).
-2. Load: `MASQUE_LOAD=1 rebar3 ct --suite test/masque_load_SUITE`. Every case fails if anything logs an error report; record tunnels per second, datagram loss, router drops, processes and ports before and after. Add a case when the change adds a new kind of session.
+2. Load and soak: `MASQUE_LOAD=1 rebar3 ct --suite test/masque_load_SUITE` and `--suite test/masque_soak_SUITE` (leaks across rounds, killed owners, abrupt peers, idle CPU). Every case fails if anything logs an error report; record tunnels per second, datagram loss, router drops, processes and ports before and after. Add a case when the change adds a new kind of session.
 3. Networks: `test/netsim/run-docker.sh` (Linux namespaces: Wi-Fi and mobile, NAT expiry, reordering, small MTU, outages). Twice before a pull request.
 4. Repetition: five full `rebar3 ct` runs before a pull request; one flaky failure is a bug to find, not to retry away.
 5. A case in `masque_lifecycle_SUITE` for any change to session start or teardown, and leak checks in every new suite.
