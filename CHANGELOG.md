@@ -52,7 +52,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Pooled HTTP/2 tunnels failed when the proxy allowed fewer concurrent
   streams than the pool expected, instead of opening another connection.
   Pooled connections, on HTTP/2 and HTTP/3, are now offered again as soon
-  as the proxy has room, which needs quic 2.6.0 and h2 0.15.0.
+  as the proxy has room, which needs quic 2.6.1 and h2 0.15.0.
 - A reverse connect agent whose proxy allows few streams at a time failed
   accepts once that many were open. An accept now waits up to five
   seconds for a stream to free up.

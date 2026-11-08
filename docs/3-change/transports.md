@@ -66,7 +66,7 @@ sequenceDiagram
 
 ## Dependency contracts
 
-These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 2.6.0, `h2` 0.15.0 and `h1` (`erlang_h1`) 0.10.0.
+These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 2.6.1, `h2` 0.15.0 and `h1` (`erlang_h1`) 0.10.0.
 
 ### quic_h3 (package `quic`)
 
