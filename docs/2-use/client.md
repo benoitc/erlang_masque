@@ -125,6 +125,7 @@ An h3 tunnel can carry on when the client's network changes. Nothing watches the
 case masque:migrate(Sess) of
     ok -> ok;
     {error, no_available_connection_id} -> retry_shortly;
+    {error, handshake_not_confirmed} -> retry_shortly;
     {error, Other} -> reconnect  %% not_supported, pooled
 end.
 ```
@@ -132,6 +133,7 @@ end.
 - Call it once the new network is up. A move made while there is no network still recovers when one returns, but the tunnel stalls until then.
 - `ok` means the move started, not that the new path is validated. Datagrams sent during the move may be lost; stream data is retransmitted.
 - `{error, no_available_connection_id}`: the proxy has not issued a spare connection id yet, which happens just after the handshake.
+- `{error, handshake_not_confirmed}`: the QUIC handshake is not confirmed yet. Try again shortly.
 - `{error, not_supported}` on h2 and h1. There, a network change ends the tunnel, so reconnect.
 - `{error, pooled}` on a tunnel with `upstream_pool => true`, because the connection is shared.
 

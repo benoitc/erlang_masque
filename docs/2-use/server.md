@@ -127,7 +127,7 @@ masque:connect(Proxy, Target, #{request_headers =>
     [{<<"authorization">>, <<"PrivateToken token=", Token/binary>>}]}).
 ```
 
-The request map carries `peer` (the client's address and port) on every transport. On h3 a listener can require client certificates with `quic_opts => #{require_client_cert => true, cacerts => TrustAnchors}`, and only certificates that chain to those anchors are accepted. The handler is meant to see the certificate as `peer_cert` (DER), but quic 2.1.4 does not return it after the handshake yet, so `peer_cert` is absent for now. The h2 and h1 libraries do not expose the client certificate either.
+The request map carries `peer` (the client's address and port) on every transport. On h3 a listener can require client certificates with `quic_opts => #{require_client_cert => true, cacerts => TrustAnchors}`, and only certificates that chain to those anchors are accepted. A client without one is refused. `cacerts` (or `cacertfile`) is required: without it the listener fails to start. The handler sees the certificate as `peer_cert` (DER). The h2 and h1 libraries do not expose the client certificate, so `peer_cert` is h3 only.
 
 ## Drain
 

@@ -342,14 +342,15 @@ change_network(Sess, Config, IP) ->
     ok = masque_path_relay:change_network(?config(relay, Config), IP),
     migrate(Sess, 100).
 
-%% The proxy issues its spare connection id just after the handshake.
+%% The proxy issues its spare connection id just after the handshake, and
+%% quic refuses to migrate until the handshake is confirmed.
 migrate(Sess, 0) ->
     ct:fail({no_spare_connection_id, cid_state(Sess)});
 migrate(Sess, N) ->
     case masque:migrate(Sess) of
         ok ->
             ok;
-        {error, no_available_connection_id} ->
+        {error, E} when E =:= no_available_connection_id; E =:= handshake_not_confirmed ->
             timer:sleep(50),
             migrate(Sess, N - 1)
     end.

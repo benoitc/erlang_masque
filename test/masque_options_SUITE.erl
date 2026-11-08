@@ -17,13 +17,12 @@
     h3_more_streams_per_connection/1,
     h3_session_ticket/1,
     h3_client_certificate/1,
+    h3_client_without_certificate_refused/1,
     h3_pool_keeps_quic_opts_apart/1,
     h2_sni_fun/1,
     h1_sni_fun/1
 ]).
 -export([accept/1, init/2, handle_data/2, terminate/2]).
-%% Kept for when erlang_quic is fixed; see `h3_client_certificate/1'.
--export([h3_client_certificate_case/1]).
 
 -define(TUNNELS, 150).
 
@@ -38,6 +37,7 @@ all() ->
         h3_more_streams_per_connection,
         h3_session_ticket,
         h3_client_certificate,
+        h3_client_without_certificate_refused,
         h3_pool_keeps_quic_opts_apart,
         h2_sni_fun,
         h1_sni_fun
@@ -147,10 +147,7 @@ h3_session_ticket(Config) ->
 
 %% Mutual TLS: the listener asks for a client certificate, and the
 %% handler sees it as `peer_cert'.
-h3_client_certificate(_Config) ->
-    {skip, "erlang_quic validates the client certificate but quic:peercert/1 returns no_peercert"}.
-
-h3_client_certificate_case(Config) ->
+h3_client_certificate(Config) ->
     #{cert := Cert, key := Key} = ?config(certs, Config),
     Port = start_h3(Config, #{
         tcp_handler => ?MODULE,
@@ -167,6 +164,27 @@ h3_client_certificate_case(Config) ->
     after 5000 -> ct:fail(no_peer_cert)
     end,
     masque:close(Sess).
+
+%% A listener that requires client certificates refuses a client without
+%% one, and the handler never runs.
+h3_client_without_certificate_refused(Config) ->
+    #{cert := Cert} = ?config(certs, Config),
+    Port = start_h3(Config, #{
+        tcp_handler => ?MODULE,
+        handler_opts => #{report_to => self()},
+        quic_opts => #{require_client_cert => true, cacerts => [Cert]}
+    }),
+    Uri = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    ?assertMatch(
+        {error, _},
+        masque:connect(Uri, {<<"127.0.0.1">>, ?config(echo_port, Config)}, #{
+            protocol => tcp, transports => [h3], verify => verify_none, timeout => 5000
+        })
+    ),
+    receive
+        {peer_cert, _} -> ct:fail(handler_ran)
+    after 0 -> ok
+    end.
 
 %% Connections with different QUIC options are never shared.
 h3_pool_keeps_quic_opts_apart(Config) ->

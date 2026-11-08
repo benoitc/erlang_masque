@@ -640,7 +640,8 @@ HTTP/3 only: other transports return `{error, not_supported}`, and a
 tunnel on a shared pool connection returns `{error, pooled}`.
 `{error, no_available_connection_id}` means the proxy has not issued a
 spare connection id yet; the first arrives just after the handshake, so
-try again shortly. `ok` means the move has started, not that the new
+try again shortly. `{error, handshake_not_confirmed}` means the handshake
+is not confirmed yet; try again shortly too. `ok` means the move has started, not that the new
 path is validated.
 """.
 -spec migrate(session()) -> ok | {error, term()}.

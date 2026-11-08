@@ -39,6 +39,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- An HTTP/3 client that changed networks several times in a row could be
+  left unable to move again, mostly on a busy machine. This comes from the
+  update to quic 2.5.0, which also fixes slow decoding of large HTTP/3
+  headers that a peer could use to tie up the proxy.
+- An HTTP/3 listener set to require client certificates let in clients
+  without one, and handlers never saw the certificate. It now refuses
+  them, and handlers get the client's certificate. Such a listener must
+  be given the trust anchors to check certificates against, or it will
+  not start. This also comes from quic 2.5.0.
 - Connect-UDP-Bind follows the latest draft (connect-udp-listen-16):
   the proxy refuses to register a compressed peer its policy would
   block, answers registrations it cannot take (too many, wrong address
