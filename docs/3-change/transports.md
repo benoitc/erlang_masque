@@ -66,7 +66,7 @@ sequenceDiagram
 
 ## Dependency contracts
 
-These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 2.5.0, `h2` 0.12.5 and `h1` (`erlang_h1`) 0.9.2.
+These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 2.5.0, `h2` 0.14.0 and `h1` (`erlang_h1`) 0.9.3.
 
 ### quic_h3 (package `quic`)
 
@@ -106,7 +106,7 @@ Known quirks: `quic_h3:connect_opts()` does not declare `sync` and `h3_datagram_
 
 ### h2
 
-Server calls: `h2:start_server/3` (`cert`, `key` as PEM paths, `handler`, `enable_connect_protocol => true`, `settings`, `acceptors`), `stop_server/1`, `send_response/4`, `send_data/4`, `send_data/5` with `#{block => Ms}`, `cancel/3` (`protocol_error`, `connect_error`, `internal_error`), `set_stream_handler/3`.
+Server calls: `h2:start_server/3` (`cert`, `key` as PEM paths, `handler`, `enable_connect_protocol => true`, `settings`, `acceptors`, `ssl_opts`), `stop_server/1`, `peername/1`, `peercert/1`, `send_response/4`, `send_data/4`, `send_data/5` with `#{block => Ms}`, `cancel/3` (`protocol_error`, `connect_error`, `internal_error`), `set_stream_handler/3`.
 
 Client calls: `h2:connect/3` (`transport => ssl`, `ssl_opts`, `sync => true`, `timeout`, `settings`), `get_peer_settings/1`, `request/3` with `#{protocol => ...}`, `send_data/4`, `cancel/2`, `close/1`, and `h2_capsule:encode/2`, `decode/1`.
 
@@ -116,14 +116,17 @@ Assumptions:
 - `set_stream_handler/3` replays events that arrived before the claim as messages and returns `ok` (`drain_buffer` defaults to `false`, the opposite of `quic_h3`). The h2 udp and ip sessions still also accept the `{ok, Chunks}` reply of `drain_buffer => true`; the tcp and udp-bind sessions ignore any chunks, which is safe only while the default stays `false`.
 - On connection teardown and on GOAWAY, `h2` sends the event to every registered stream handler as well as the owner.
 - `h2_capsule:decode/1` returns the DATAGRAM type as the atom `datagram`.
-- `send_response/4` with 100 sends an interim HEADERS frame and the stream accepts the final response after it; h2 0.12.5 has no separate call for interim responses. In client role they arrive as `{informational, Sid, Status, Headers}`.
+- `send_response/4` with 100 sends an interim HEADERS frame and the stream accepts the final response after it; h2 has no separate call for interim responses. In client role they arrive as `{informational, Sid, Status, Headers}`.
 - `get_peer_settings/1` exposes `enable_connect_protocol` and `max_concurrent_streams` (which may be `unlimited`).
+- The listener owns its listen socket (since 0.14.0): a server started from a process that exits keeps serving, and `stop_server/1` returns once it is stopped.
+- `peercert/1` returns the client's DER certificate when the listener asked for one (`ssl_opts => [{verify, verify_peer}, {cacerts, _}]`), `{error, no_peercert}` otherwise.
+- A peer that sends more than 20 SETTINGS frames a second, or makes the server reset streams faster than its cap (MadeYouReset), has its connection closed.
 
 Messages to a stream handler or owner: `{h2, C, {data, Sid, Data, Fin}}`, `{h2, C, {stream_reset, Sid, Code}}`, `{h2, C, {response, Sid, Status, Headers}}` (client), `{h2, C, {closed, Reason}}`, `{h2, C, {goaway, LastId, Code}}`.
 
 ### h1 (package `erlang_h1`)
 
-Server calls: `h1:start_server/3` (`transport => ssl`, `cert`, `key`, `handler`, `acceptors`), `stop_server/1`, `send_response/4`, `send_data/4`, `close/1` for rejects, `h1:send_informational/4` for `100 Continue` (`h1:continue/2` does not apply, since h1 does not record `Expect` on upgrade and CONNECT requests), `h1:accept_upgrade/3` returning `{ok, Socket, Buffer}` and echoing the request's `Upgrade` token in the 101, and `h1:accept_connect/3` returning `{ok, Transport, Socket, Buffer}`, then `h1_upgrade:send_capsule/4` and `h1_capsule:decode/1` on the raw socket.
+Server calls: `h1:start_server/3` (`transport => ssl`, `cert`, `key`, `handler`, `acceptors`, `ssl_opts`, and the pre-upgrade limits `handshake_timeout`, `request_timeout`, `idle_timeout`, header sizes; the listener owns its socket since 0.9.3), `stop_server/1`, `send_response/4`, `send_data/4`, `close/1` for rejects, `h1:send_informational/4` for `100 Continue` (`h1:continue/2` does not apply, since h1 does not record `Expect` on upgrade and CONNECT requests), `h1:accept_upgrade/3` returning `{ok, Socket, Buffer}` and echoing the request's `Upgrade` token in the 101, and `h1:accept_connect/3` returning `{ok, Transport, Socket, Buffer}`, then `h1_upgrade:send_capsule/4` and `h1_capsule:decode/1` on the raw socket.
 
 Client calls: `h1_client:connect/3`, `h1:wait_connected/2`, `h1:upgrade/4` returning `{ok, Sid, Socket, Buffer, RespHeaders}`.
 

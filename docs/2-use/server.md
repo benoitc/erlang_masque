@@ -129,7 +129,7 @@ masque:connect(Proxy, Target, #{request_headers =>
     [{<<"authorization">>, <<"PrivateToken token=", Token/binary>>}]}).
 ```
 
-The request map carries `peer` (the client's address and port) on every transport. On h3 a listener can require client certificates with `quic_opts => #{require_client_cert => true, cacerts => TrustAnchors}`, and only certificates that chain to those anchors are accepted. A client without one is refused. `cacerts` (or `cacertfile`) is required: without it the listener fails to start. The handler sees the certificate as `peer_cert` (DER). The h2 and h1 libraries do not expose the client certificate, so `peer_cert` is h3 only.
+The request map carries `peer` (the client's address and port) on every transport. On h3 a listener can require client certificates with `quic_opts => #{require_client_cert => true, cacerts => TrustAnchors}`, and only certificates that chain to those anchors are accepted. A client without one is refused. `cacerts` (or `cacertfile`) is required: without it the listener fails to start. The handler sees the certificate as `peer_cert` (DER). On h2 the listener asks for client certificates through `ssl_opts => [{verify, verify_peer}, {cacerts, TrustAnchors}, {fail_if_no_peer_cert, true}]`, and the handler gets `peer_cert` the same way. The h1 library does not expose the client certificate yet, so h1 requests carry no `peer_cert`.
 
 ## Drain
 

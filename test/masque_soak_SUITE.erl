@@ -87,25 +87,10 @@ init_per_group(Transport, Config) ->
                     h2 -> {start_listener_h2, stop_listener_h2};
                     h1 -> {start_listener_h1, stop_listener_h1}
                 end,
-            %% An h2 or h1 listener lives as long as the process that
-            %% started it, and init_per_group's process exits.
-            Parent = self(),
-            Keeper = spawn(fun() ->
-                {ok, {_, _, P}} = masque:Start(Name, Opts#{
-                    port => 0, cert => CertFile, key => KeyFile
-                }),
-                Parent ! {listening, P},
-                receive
-                    stop -> masque:Stop(Name)
-                end
-            end),
-            Port =
-                receive
-                    {listening, P} -> P
-                after 10000 -> ct:fail(no_listener)
-                end,
+            {ok, Ref} = masque:Start(Name, Opts#{port => 0, cert => CertFile, key => KeyFile}),
+            Port = element(3, Ref),
             [
-                {stop, fun() -> Keeper ! stop end},
+                {stop, fun() -> masque:Stop(Name) end},
                 {port, Port},
                 {transport, Transport}
                 | Config

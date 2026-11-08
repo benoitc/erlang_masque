@@ -25,7 +25,9 @@
     h3_tcp_send_ready_after_full_queue/1,
     h2_sni_fun/1,
     h1_sni_fun/1,
-    h1_handshake_timeout/1
+    h1_handshake_timeout/1,
+    h2_client_certificate/1,
+    h2_client_without_certificate_refused/1
 ]).
 -export([accept/1, init/2, handle_data/2, terminate/2]).
 
@@ -50,7 +52,9 @@ all() ->
         h3_tcp_send_ready_after_full_queue,
         h2_sni_fun,
         h1_sni_fun,
-        h1_handshake_timeout
+        h1_handshake_timeout,
+        h2_client_certificate,
+        h2_client_without_certificate_refused
     ].
 
 init_per_suite(Config) ->
@@ -474,3 +478,83 @@ h1_handshake_timeout(Config) ->
     {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, h1:server_port(Ref), [binary, {active, false}]),
     ?assertEqual({error, closed}, gen_tcp:recv(Sock, 0, 3000)),
     gen_tcp:close(Sock).
+
+%% h2 mutual TLS: the listener asks for client certificates through
+%% `ssl_opts', and the handler sees the client's as `peer_cert'.
+h2_client_certificate(Config) ->
+    #{cert := ClientCert, cert_file := CF, key_file := KF, root := Chain} = client_cert(),
+    Port = start_h2_mtls(Config, Chain),
+    Sess = connect(<<"127.0.0.1">>, Port, Config, #{
+        transports => [h2], ssl_opts => [{certfile, CF}, {keyfile, KF}]
+    }),
+    receive
+        {peer_cert, PeerCert} -> ?assertEqual(ClientCert, PeerCert)
+    after 5000 -> ct:fail(no_peer_cert)
+    end,
+    masque:close(Sess).
+
+h2_client_without_certificate_refused(Config) ->
+    #{root := Chain} = client_cert(),
+    Port = start_h2_mtls(Config, Chain),
+    Uri = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    ?assertMatch(
+        {error, _},
+        masque:connect(Uri, {<<"127.0.0.1">>, ?config(echo_port, Config)}, #{
+            protocol => tcp, transports => [h2], verify => verify_none, timeout => 5000
+        })
+    ),
+    receive
+        {peer_cert, _} -> ct:fail(handler_ran)
+    after 0 -> ok
+    end.
+
+start_h2_mtls(Config, ClientChain) ->
+    #{cert_file := CertFile, key_file := KeyFile} = ?config(certs, Config),
+    {ok, {_, _, Port}} = masque:start_listener_h2(?config(name, Config), #{
+        port => 0,
+        cert => CertFile,
+        key => KeyFile,
+        tcp_handler => ?MODULE,
+        handler_opts => #{report_to => self(), allow_private => true, allow_self => true},
+        ssl_opts => [{verify, verify_peer}, {cacerts, ClientChain}, {fail_if_no_peer_cert, true}]
+    }),
+    Port.
+
+%% A client certificate for client auth, signed by a test CA the
+%% listener trusts.
+client_cert() ->
+    Dir = filename:join(
+        "/tmp", "masque_client_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
+    ok = filelib:ensure_dir(filename:join(Dir, "x")),
+    F = fun(Name) -> filename:join(Dir, Name) end,
+    ok = file:write_file(
+        F("ext.cnf"), <<"extendedKeyUsage=clientAuth\nkeyUsage=digitalSignature\n">>
+    ),
+    Run = fun(Fmt, Args) ->
+        _ = os:cmd(lists:flatten(io_lib:format(Fmt, Args)) ++ " 2>/dev/null")
+    end,
+    Run(
+        "openssl req -x509 -newkey rsa:2048 -nodes -keyout ~s -out ~s -days 1 -subj '/CN=test-ca'",
+        [
+            F("ca.key"), F("ca.pem")
+        ]
+    ),
+    Run("openssl req -newkey rsa:2048 -nodes -keyout ~s -out ~s -subj '/CN=client'", [
+        F("client.key"), F("client.csr")
+    ]),
+    Run(
+        "openssl x509 -req -in ~s -CA ~s -CAkey ~s -CAcreateserial -out ~s -days 1 -extfile ~s",
+        [F("client.csr"), F("ca.pem"), F("ca.key"), F("client.pem"), F("ext.cnf")]
+    ),
+    Der = fun(File) ->
+        {ok, Pem} = file:read_file(File),
+        [{'Certificate', D, _} | _] = public_key:pem_decode(Pem),
+        D
+    end,
+    #{
+        cert => Der(F("client.pem")),
+        cert_file => F("client.pem"),
+        key_file => F("client.key"),
+        root => [Der(F("ca.pem"))]
+    }.
