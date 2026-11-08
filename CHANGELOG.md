@@ -51,7 +51,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 - An HTTP/2 or HTTP/1.1 listener started from a short-lived process
   stopped accepting connections as soon as that process exited. It now
-  keeps serving until you stop it. This comes from the update to h2 0.14.0
+  keeps serving until you stop it. This comes from the update to h2 0.15.0
   and h1 0.10.0; h2 0.13.0 and 0.12.7 also close connections of peers that
   flood SETTINGS frames or force stream resets (CVE-2019-9515,
   CVE-2025-8671).
