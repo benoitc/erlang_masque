@@ -93,8 +93,8 @@
     full = false :: boolean(),
     %% The peer sent GOAWAY: no new streams on this connection.
     draining = false :: boolean(),
-    %% Dedicated owners: the process using the connection; the owner
-    %% stops when it goes.
+    %% Dedicated owners: the process using the connection; pooled
+    %% owners: the pool. The owner stops when it goes.
     user_mon :: reference() | undefined
 }).
 
@@ -252,8 +252,10 @@ handle_call(
                     end;
                 {error, stream_limit} = Err ->
                     %% The peer's stream limit is lower than
-                    %% `max_streams': stop handing out this owner.
-                    {reply, Err, mark_full(S)};
+                    %% `max_streams': stop handing out this owner, and
+                    %% keep it at the streams it carries now, so it is
+                    %% not offered again as soon as one stream ends.
+                    {reply, Err, mark_full(S#state{max_streams = max(1, maps:size(Refs))})};
                 {error, _} = Err ->
                     {reply, Err, S}
             end
@@ -343,13 +345,13 @@ handle_info(
     #state{transport = h2} = S
 ) ->
     broadcast(Evt, S),
-    {stop, normal, S};
+    {stop, normal, S#state{refs = #{}}};
 handle_info(
     {quic_h3, _Conn, {closed, _Reason}} = Evt,
     #state{transport = quic_h3} = S
 ) ->
     broadcast(Evt, S),
-    {stop, normal, S};
+    {stop, normal, S#state{refs = #{}}};
 %% quic_h3 reports GOAWAY to the connection owner only; each session
 %% decides from its own stream id whether it is affected. (h2 already
 %% tells every stream handler.)
@@ -369,8 +371,9 @@ handle_info(
     #state{conn_mon = Ref} = S
 ) ->
     broadcast({tagged_closed(S), S#state.conn, {closed, Reason}}, S),
-    {stop, normal, S};
-%% A dedicated owner's user is gone: so is the connection.
+    {stop, normal, S#state{refs = #{}}};
+%% A dedicated owner's user, or a pooled owner's pool, is gone: so is
+%% the connection.
 handle_info({'DOWN', Ref, process, _Pid, _Reason}, #state{user_mon = Ref} = S) ->
     {stop, normal, S};
 %% A registered session died. Release its slot.
@@ -390,6 +393,16 @@ handle_info({timeout, _Ref, idle}, S) ->
 handle_info(_Msg, S) ->
     {noreply, S}.
 
+%% quic_h3 tells only the connection owner that the connection closed,
+%% so sessions still on it (pooled tunnels, reverse connect accept
+%% streams) are told here when the owner itself stops: on `stop/1', its
+%% dedicated user going away, `close_all/0' or a crash. (h2 tells every
+%% stream handler itself; the paths that already told them cleared
+%% `refs'.)
+terminate(_Reason, #state{transport = quic_h3} = S) ->
+    broadcast({quic_h3, S#state.conn, {closed, owner_stopped}}, S),
+    _ = close_transport(S),
+    ok;
 terminate(_Reason, S) ->
     _ = close_transport(S),
     ok.
@@ -607,10 +620,14 @@ maybe_arm_idle(S) ->
 
 init_for_pool(RegistryPid, Tag, Opts) ->
     process_flag(trap_exit, true),
+    %% A pool that restarts no longer knows its owners: each one ends
+    %% with the pool that started it, even when the pool died while it
+    %% was still dialing.
+    PoolMon = erlang:monitor(process, RegistryPid),
     case safe_dial(RegistryPid, Tag, Opts) of
         {ok, State} ->
             RegistryPid ! {dial_result, Tag, {ok, self()}},
-            gen_server:enter_loop(?MODULE, [], State);
+            gen_server:enter_loop(?MODULE, [], State#state{user_mon = PoolMon});
         {error, Reason} ->
             RegistryPid ! {dial_result, Tag, {error, Reason}}
     end.

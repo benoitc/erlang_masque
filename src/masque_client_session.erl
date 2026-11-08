@@ -191,6 +191,16 @@ connecting_inner({call, From}, shutdown_write, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
 connecting_inner({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
+%% Interim responses (1xx, such as 103 Early Hints) come before the
+%% final one and are skipped (RFC 9110 section 15.2).
+connecting_inner(
+    info,
+    {Tag, _Conn, {response, StreamId, Status, _Headers}},
+    #data{stream_id = StreamId}
+) when
+    (Tag =:= quic_h3 orelse Tag =:= h2), Status >= 100, Status < 200
+->
+    keep_state_and_data;
 connecting_inner(
     info,
     {quic_h3, _Conn, {response, StreamId, Status, Headers}},
@@ -508,7 +518,7 @@ drain_client_capsules(Buf, Fin, #data{owner = Owner} = Data) ->
             %% RFC 9297 sec 3.5: a DATAGRAM capsule is an HTTP datagram.
             drain_client_capsules(Rest, Fin, capsule_datagram(Value, Data#data{cap_buf = <<>>}));
         {ok, {Type, Value, Rest}} ->
-            masque_client_owner:send(Owner, {masque_capsule, self(), Type, Value}),
+            masque_client_owner:send_bounded(Owner, {masque_capsule, self(), Type, Value}),
             drain_client_capsules(Rest, Fin, Data#data{cap_buf = <<>>});
         {more, _} when Fin, Buf =/= <<>> ->
             %% Stream closed mid-capsule.

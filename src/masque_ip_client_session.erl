@@ -80,6 +80,10 @@
     %% Most recent server-advertised state.
     assigned = [] :: [masque_ip_capsule:address_entry()],
     routes = [] :: [masque_ip_capsule:route_entry()],
+    %% Whether the owner was told of an ADDRESS_ASSIGN / ROUTE_ADVERTISEMENT
+    %% yet: later ones reach it only when they change.
+    assign_told = false :: boolean(),
+    routes_told = false :: boolean(),
     %% Extra request headers prepended to the CONNECT-IP request.
     extra_headers = [] :: [{binary(), binary()}],
     %% When set, the conn is owned by a `masque_upstream_owner';
@@ -254,6 +258,16 @@ connecting_inner(
 ) when is_integer(StreamId), StreamId > LastId ->
     reply_handshake(Data, {error, goaway}),
     {stop, goaway};
+%% Interim responses (1xx, such as 103 Early Hints) come before the
+%% final one and are skipped (RFC 9110 section 15.2).
+connecting_inner(
+    info,
+    {Tag, _Conn, {response, StreamId, Status, _Headers}},
+    #data{stream_id = StreamId}
+) when
+    (Tag =:= quic_h3 orelse Tag =:= h2), Status >= 100, Status < 200
+->
+    keep_state_and_data;
 connecting_inner(
     info,
     {Tag, _Conn, {response, StreamId, Status, Headers}},
@@ -815,8 +829,13 @@ deliver_capsule(
 ) ->
     case masque_ip_capsule:decode_address_assign(Inner) of
         {ok, Entries} ->
-            masque_client_owner:send(Owner, {masque_address_assign, self(), Entries}),
-            Data#data{assigned = Entries};
+            %% ADDRESS_ASSIGN replaces the whole set (RFC 9484 section
+            %% 4.7.1): tell the owner only when it changes, so a proxy
+            %% repeating it cannot flood the owner's mailbox.
+            _ =
+                (Entries =/= Data#data.assigned orelse not Data#data.assign_told) andalso
+                    masque_client_owner:send(Owner, {masque_address_assign, self(), Entries}),
+            Data#data{assigned = Entries, assign_told = true};
         {error, _} ->
             {abort, malformed_capsule}
     end;
@@ -831,7 +850,9 @@ deliver_capsule(
             %% floods them gets the rest ignored.
             Room = max(0, ?MAX_PEER_PENDING - map_size(Pend)),
             Entries = lists:sublist(Entries0, Room),
-            masque_client_owner:send(Owner, {masque_address_request, self(), Entries}),
+            _ =
+                Entries =/= [] andalso
+                    masque_client_owner:send(Owner, {masque_address_request, self(), Entries}),
             Pend1 = lists:foldl(
                 fun(R, Acc) ->
                     %% #ip_prefix_request.request_id
@@ -852,15 +873,18 @@ deliver_capsule(
 ) ->
     case masque_ip_capsule:decode_route_advertisement(Inner) of
         {ok, Entries} ->
-            masque_client_owner:send(Owner, {masque_route_advertisement, self(), Entries}),
-            Data#data{routes = Entries};
+            %% Also a full replacement (section 4.7.3): only changes.
+            _ =
+                (Entries =/= Data#data.routes orelse not Data#data.routes_told) andalso
+                    masque_client_owner:send(Owner, {masque_route_advertisement, self(), Entries}),
+            Data#data{routes = Entries, routes_told = true};
         {error, _} ->
             {abort, malformed_capsule}
     end;
 deliver_capsule(Type, Inner, #data{owner = Owner} = Data) when
     is_integer(Type)
 ->
-    masque_client_owner:send(Owner, {masque_capsule, self(), Type, Inner}),
+    masque_client_owner:send_bounded(Owner, {masque_capsule, self(), Type, Inner}),
     Data.
 
 %%====================================================================

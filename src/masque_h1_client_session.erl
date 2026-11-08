@@ -239,7 +239,7 @@ open_inner({call, From}, shutdown_write, Data) ->
 open_inner({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 open_inner({call, From}, {send_capsule, Type, Value}, #data{socket = Socket} = Data) ->
-    Reply = h1_upgrade:send_capsule(ssl, Socket, Type, Value),
+    Reply = socket_capsule(Socket, Type, Value),
     {keep_state, Data, [{reply, From, Reply}]};
 open_inner({call, From}, stop, Data) ->
     {next_state, closing, Data, [
@@ -377,6 +377,12 @@ do_connect(Data, Opts) ->
             {error, {connect, Reason}}
     end.
 
+%% Writes on the upgraded socket: bounded (`masque_tls:bound_sends/2'),
+%% and a failed one ends the session the way a close does, so a proxy
+%% that stops reading cannot pin it.
+socket_capsule(Socket, Type, Value) ->
+    masque_tls:send_failed(h1_upgrade:send_capsule(ssl, Socket, Type, Value), ssl, Socket).
+
 %% Milliseconds left before the overall handshake deadline.
 remaining(Deadline) ->
     max(0, Deadline - erlang:monotonic_time(millisecond)).
@@ -387,6 +393,7 @@ do_upgrade(Conn, Data, Timeout) ->
         {ok, _StreamId, Socket, Buffer, RespHeaders} ->
             case validate_response(RespHeaders, Data) of
                 ok ->
+                    _ = masque_tls:bound_sends(ssl, Socket),
                     {ok, Socket, Buffer};
                 {error, _} = Err ->
                     _ =
@@ -488,7 +495,7 @@ send_out(#data{socket = Socket}, Ctx, Payload) when
         false ->
             InnerIoData = masque_datagram:encode(Ctx, Payload),
             Inner = iolist_to_binary(InnerIoData),
-            h1_upgrade:send_capsule(ssl, Socket, datagram, Inner)
+            socket_capsule(Socket, datagram, Inner)
     end.
 
 %%====================================================================
@@ -517,7 +524,7 @@ deliver_capsule(datagram, Inner, Data) ->
 deliver_capsule(Type, Inner, #data{owner = Owner} = Data) when
     is_integer(Type)
 ->
-    masque_client_owner:send(Owner, {masque_capsule, self(), Type, Inner}),
+    masque_client_owner:send_bounded(Owner, {masque_capsule, self(), Type, Inner}),
     Data.
 
 abort(Reason, #data{socket = Socket} = Data) ->

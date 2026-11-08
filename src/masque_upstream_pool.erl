@@ -245,6 +245,8 @@ terminate(_Reason, S) ->
      || {_FP, Entries} <- maps:to_list(S#state.cache),
         E <- Entries
     ],
+    %% Owners still dialing too: nobody would hand out their connection.
+    _ = [exit(D#dial.owner, shutdown) || D <- maps:values(S#state.dialing)],
     ok.
 
 code_change(_, S, _) -> {ok, S}.
