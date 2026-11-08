@@ -92,11 +92,8 @@
     %% `max_streams' as configured (`default' or a number): what the
     %% limit goes back to once the peer has room again.
     configured_max = default :: pos_integer() | dynamic | default,
-    %% A reverse connect channel's own connection (`start_dedicated/1'):
-    %% no other connection to fall back on.
-    dedicated = false :: boolean(),
-    %% Acquires refused at a stream limit (the peer's, or a dedicated
-    %% owner's own), oldest first, retried when a stream can open again.
+    %% Acquires refused at a stream limit (the peer's or ours), oldest
+    %% first, retried when a stream can open again.
     waiting = [] :: [{gen_server:from(), {list(), pid(), map()}, reference()}],
     idle_ms :: non_neg_integer() | infinity,
     idle_ref :: undefined | reference(),
@@ -248,16 +245,13 @@ handle_call({acquire, Headers, SessionPid, ReqOpts}, From, S) ->
     case try_acquire({Headers, SessionPid, ReqOpts}, S) of
         {reply, Reply, S1} ->
             {reply, Reply, S1};
-        {Refused, S1} when Refused =:= peer_refused; S1#state.dedicated ->
-            %% The peer is out of stream credit for now (it returns it
-            %% in steps), or this is a dedicated connection with no other
-            %% to fall back on: wait a while for a stream to free up (one
-            %% of ours ends, or the transport says one can open).
-            {noreply, wait_for_stream(From, {Headers, SessionPid, ReqOpts}, S1)};
-        {refused, S1} ->
-            %% Our own limit on a pooled connection: the pool should not
-            %% have offered it; the caller checks out again.
-            {reply, {error, stream_limit}, S1}
+        {_Refused, S1} ->
+            %% At a stream limit: the peer's (out of credit for now, it
+            %% returns it in steps) or ours (the pool handed this owner out
+            %% before it heard the owner was full). Wait a while for a
+            %% stream to free up, one of ours ending or the transport
+            %% saying one can open, rather than fail the tunnel.
+            {noreply, wait_for_stream(From, {Headers, SessionPid, ReqOpts}, S1)}
     end;
 handle_call(info, _From, S) ->
     {reply,
@@ -730,9 +724,7 @@ init_dedicated(Caller, User, Tag, Opts) ->
             case extended_connect(State) of
                 ok ->
                     Caller ! {dial_result, Tag, {ok, self()}},
-                    gen_server:enter_loop(?MODULE, [], State#state{
-                        user_mon = UserMon, dedicated = true
-                    });
+                    gen_server:enter_loop(?MODULE, [], State#state{user_mon = UserMon});
                 {error, _} = Err ->
                     _ = close_conn(State),
                     Caller ! {dial_result, Tag, Err}

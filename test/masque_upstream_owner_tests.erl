@@ -157,24 +157,47 @@ h2_reads_peer_settings_for_max_streams_test() ->
     ok = ?M:stop(Owner),
     ?MOCK:stop(Mock).
 
-acquire_over_limit_rejects_test() ->
-    {Owner, Mock} = start_owner(
-        h2,
-        #{peer_settings => #{max_concurrent_streams => 1}}
-    ),
-    {ok, _Sid, _} =
-        ?M:acquire_stream(Owner, sample_headers(), self(), #{}),
-    ?assertEqual(
-        {error, stream_limit},
-        ?M:acquire_stream(
-            Owner,
-            sample_headers(),
-            self(),
-            #{}
-        )
-    ),
-    ok = ?M:stop(Owner),
-    ?MOCK:stop(Mock).
+%% At its stream limit the owner holds a new acquire until a stream ends
+%% (or 5 s pass, then `stream_limit').
+acquire_over_limit_waits_for_a_stream_test_() ->
+    {timeout, 15, fun() ->
+        {Owner, Mock} = start_owner(
+            h2,
+            #{peer_settings => #{max_concurrent_streams => 1}}
+        ),
+        {ok, Sid, _} = ?M:acquire_stream(Owner, sample_headers(), self(), #{}),
+        Self = self(),
+        _ = spawn_link(fun() ->
+            Self ! {second, ?M:acquire_stream(Owner, sample_headers(), Self, #{})}
+        end),
+        receive
+            {second, Early} -> ?assert({early, Early} =:= false)
+        after 300 -> ok
+        end,
+        ok = ?M:release_stream(Owner, Sid),
+        receive
+            {second, R} -> ?assertMatch({ok, _, _}, R)
+        after 3000 -> ?assert(false)
+        end,
+        ok = ?M:stop(Owner),
+        ?MOCK:stop(Mock)
+    end}.
+
+%% Nobody frees a stream: the held acquire gets `stream_limit' after 5 s.
+acquire_over_limit_times_out_test_() ->
+    {timeout, 15, fun() ->
+        {Owner, Mock} = start_owner(
+            h2,
+            #{peer_settings => #{max_concurrent_streams => 1}}
+        ),
+        {ok, _Sid, _} = ?M:acquire_stream(Owner, sample_headers(), self(), #{}),
+        ?assertEqual(
+            {error, stream_limit},
+            ?M:acquire_stream(Owner, sample_headers(), self(), #{})
+        ),
+        ok = ?M:stop(Owner),
+        ?MOCK:stop(Mock)
+    end}.
 
 h3_max_streams_defaults_to_100_test() ->
     {Owner, Mock} = start_owner(quic_h3),
