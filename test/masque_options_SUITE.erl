@@ -27,7 +27,9 @@
     h1_sni_fun/1,
     h1_handshake_timeout/1,
     h2_client_certificate/1,
-    h2_client_without_certificate_refused/1
+    h2_client_without_certificate_refused/1,
+    h1_client_certificate/1,
+    h1_client_without_certificate_refused/1
 ]).
 -export([accept/1, init/2, handle_data/2, terminate/2]).
 
@@ -54,7 +56,9 @@ all() ->
         h1_sni_fun,
         h1_handshake_timeout,
         h2_client_certificate,
-        h2_client_without_certificate_refused
+        h2_client_without_certificate_refused,
+        h1_client_certificate,
+        h1_client_without_certificate_refused
     ].
 
 init_per_suite(Config) ->
@@ -479,13 +483,16 @@ h1_handshake_timeout(Config) ->
     ?assertEqual({error, closed}, gen_tcp:recv(Sock, 0, 3000)),
     gen_tcp:close(Sock).
 
-%% h2 mutual TLS: the listener asks for client certificates through
+%% h2 and h1 mutual TLS: the listener asks for client certificates through
 %% `ssl_opts', and the handler sees the client's as `peer_cert'.
-h2_client_certificate(Config) ->
+h2_client_certificate(Config) -> client_certificate(Config, h2).
+h1_client_certificate(Config) -> client_certificate(Config, h1).
+
+client_certificate(Config, T) ->
     #{cert := ClientCert, cert_file := CF, key_file := KF, root := Chain} = client_cert(),
-    Port = start_h2_mtls(Config, Chain),
+    Port = start_mtls(Config, T, Chain),
     Sess = connect(<<"127.0.0.1">>, Port, Config, #{
-        transports => [h2], ssl_opts => [{certfile, CF}, {keyfile, KF}]
+        transports => [T], ssl_opts => [{certfile, CF}, {keyfile, KF}]
     }),
     receive
         {peer_cert, PeerCert} -> ?assertEqual(ClientCert, PeerCert)
@@ -493,14 +500,17 @@ h2_client_certificate(Config) ->
     end,
     masque:close(Sess).
 
-h2_client_without_certificate_refused(Config) ->
+h2_client_without_certificate_refused(Config) -> client_without_certificate_refused(Config, h2).
+h1_client_without_certificate_refused(Config) -> client_without_certificate_refused(Config, h1).
+
+client_without_certificate_refused(Config, T) ->
     #{root := Chain} = client_cert(),
-    Port = start_h2_mtls(Config, Chain),
+    Port = start_mtls(Config, T, Chain),
     Uri = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
     ?assertMatch(
         {error, _},
         masque:connect(Uri, {<<"127.0.0.1">>, ?config(echo_port, Config)}, #{
-            protocol => tcp, transports => [h2], verify => verify_none, timeout => 5000
+            protocol => tcp, transports => [T], verify => verify_none, timeout => 5000
         })
     ),
     receive
@@ -508,17 +518,24 @@ h2_client_without_certificate_refused(Config) ->
     after 0 -> ok
     end.
 
-start_h2_mtls(Config, ClientChain) ->
+start_mtls(Config, T, ClientChain) ->
     #{cert_file := CertFile, key_file := KeyFile} = ?config(certs, Config),
-    {ok, {_, _, Port}} = masque:start_listener_h2(?config(name, Config), #{
+    Opts = #{
         port => 0,
         cert => CertFile,
         key => KeyFile,
         tcp_handler => ?MODULE,
         handler_opts => #{report_to => self(), allow_private => true, allow_self => true},
         ssl_opts => [{verify, verify_peer}, {cacerts, ClientChain}, {fail_if_no_peer_cert, true}]
-    }),
-    Port.
+    },
+    case T of
+        h2 ->
+            {ok, {_, _, Port}} = masque:start_listener_h2(?config(name, Config), Opts),
+            Port;
+        h1 ->
+            {ok, Ref} = masque:start_listener_h1(?config(name, Config), Opts),
+            h1:server_port(Ref)
+    end.
 
 %% A client certificate for client auth, signed by a test CA the
 %% listener trusts.

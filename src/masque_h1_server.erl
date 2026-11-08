@@ -273,11 +273,20 @@ dispatch_masque(Conn, StreamId, Method, Path, Headers, Dispatch) ->
 
 %% The client address, as h3 and h2 give it in the request map.
 add_peer(Conn, Req) ->
-    try h1:peername(Conn) of
-        {ok, Peer} -> Req#{peer => Peer};
-        _ -> Req
+    Req1 =
+        try h1:peername(Conn) of
+            {ok, Peer} -> Req#{peer => Peer};
+            _ -> Req
+        catch
+            _:_ -> Req
+        end,
+    %% Present when the listener asks for client certificates
+    %% (`ssl_opts => [{verify, verify_peer}, {cacerts, Anchors}]').
+    try h1:peercert(Conn) of
+        {ok, Cert} -> Req1#{peer_cert => Cert};
+        _ -> Req1
     catch
-        _:_ -> Req
+        _:_ -> Req1
     end.
 
 spawn_session(Conn, StreamId, Protocol, Handler, HOpts, Req) ->

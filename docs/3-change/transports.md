@@ -66,7 +66,7 @@ sequenceDiagram
 
 ## Dependency contracts
 
-These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 2.5.0, `h2` 0.14.0 and `h1` (`erlang_h1`) 0.9.3.
+These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 2.5.0, `h2` 0.14.0 and `h1` (`erlang_h1`) 0.10.0.
 
 ### quic_h3 (package `quic`)
 
@@ -126,7 +126,7 @@ Messages to a stream handler or owner: `{h2, C, {data, Sid, Data, Fin}}`, `{h2, 
 
 ### h1 (package `erlang_h1`)
 
-Server calls: `h1:start_server/3` (`transport => ssl`, `cert`, `key`, `handler`, `acceptors`, `ssl_opts`, and the pre-upgrade limits `handshake_timeout`, `request_timeout`, `idle_timeout`, header sizes; the listener owns its socket since 0.9.3), `stop_server/1`, `send_response/4`, `send_data/4`, `close/1` for rejects, `h1:send_informational/4` for `100 Continue` (`h1:continue/2` does not apply, since h1 does not record `Expect` on upgrade and CONNECT requests), `h1:accept_upgrade/3` returning `{ok, Socket, Buffer}` and echoing the request's `Upgrade` token in the 101, and `h1:accept_connect/3` returning `{ok, Transport, Socket, Buffer}`, then `h1_upgrade:send_capsule/4` and `h1_capsule:decode/1` on the raw socket.
+Server calls: `h1:start_server/3` (`transport => ssl`, `cert`, `key`, `handler`, `acceptors`, `ssl_opts`, and the pre-upgrade limits `handshake_timeout`, `request_timeout`, `idle_timeout`, header sizes; the listener owns its socket since 0.9.3), `peername/1`, `peercert/1` (0.10.0: the client's DER certificate when the listener asked for one), `stop_server/1`, `send_response/4`, `send_data/4`, `close/1` for rejects, `h1:send_informational/4` for `100 Continue` (`h1:continue/2` does not apply, since h1 does not record `Expect` on upgrade and CONNECT requests), `h1:accept_upgrade/3` returning `{ok, Socket, Buffer}` and echoing the request's `Upgrade` token in the 101, and `h1:accept_connect/3` returning `{ok, Transport, Socket, Buffer}`, then `h1_upgrade:send_capsule/4` and `h1_capsule:decode/1` on the raw socket.
 
 Client calls: `h1_client:connect/3`, `h1:wait_connected/2`, `h1:upgrade/4` returning `{ok, Sid, Socket, Buffer, RespHeaders}`.
 

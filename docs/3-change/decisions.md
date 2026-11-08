@@ -248,7 +248,7 @@ Questions Q1 to Q12 come from the documentation plan; the rest were found while 
 - **Q20.** Settled: traffic in either direction re-arms the idle timer.
 - **Q21.** Settled: a pool checkout waits no longer than the caller's connect `timeout`; `checkout_timeout_ms` in `upstream_pool_opts` still overrides it.
 - **Q22.** The chain listeners set `handler`, `tcp_handler` and `ip_handler` to `masque_chain_handler` but not `bind_handler`, so udp-bind is not chained. Intended?
-- **Q23.** Settled: every listener has `fallback` and puts `peer` in the request map. `peer_cert` is filled on h3 and h2; h1 waits until the h1 library exposes the client certificate. h1 needs no tunnel limit: it carries one tunnel per connection.
+- **Q23.** Settled: every listener has `fallback` and puts `peer` in the request map. `peer_cert` is filled on every transport. h1 needs no tunnel limit: it carries one tunnel per connection.
 - **Q24.** Settled: compression contexts are two-way on both sides (see [udp-bind internals](udp-bind-internals.md)).
 - **Q25.** Error stops end the stream differently per protocol: UDP resets with `H3_MESSAGE_ERROR`, TCP with `H3_CONNECT_ERROR`, udp-bind with `H3_INTERNAL_ERROR`, IP with a FIN. Intended?
 - **Q26.** The h1 IP session has no limit on pending ADDRESS_REQUEST ids (h3/h2 cap it at 64). Intended?
