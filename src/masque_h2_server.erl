@@ -505,11 +505,20 @@ match_ip_path(Path, Headers, Template) ->
 
 %% The client address, as the h3 listener gives it in the request map.
 add_peer(Conn, Req) ->
-    try h2:peername(Conn) of
-        {ok, Peer} -> Req#{peer => Peer};
-        _ -> Req
+    Req1 =
+        try h2:peername(Conn) of
+            {ok, Peer} -> Req#{peer => Peer};
+            _ -> Req
+        catch
+            _:_ -> Req
+        end,
+    %% Present when the listener asks for client certificates
+    %% (`ssl_opts => [{verify, verify_peer}, {cacerts, Anchors}]').
+    try h2:peercert(Conn) of
+        {ok, Cert} -> Req1#{peer_cert => Cert};
+        _ -> Req1
     catch
-        _:_ -> Req
+        _:_ -> Req1
     end.
 
 accept_request(HandlerMod, Req) ->

@@ -8,6 +8,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- HTTP/2 and HTTP/1.1 handlers now see the client's certificate as
+  `peer_cert` when the listener asks for client certificates, as HTTP/3
+  handlers already do.
 - HTTP/1.1 listeners take h1's own limits before the upgrade (TLS
   handshake, request and idle timeouts, header sizes), so slow or
   oversized clients can be dropped sooner.
@@ -46,6 +49,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- An HTTP/2 or HTTP/1.1 listener started from a short-lived process
+  stopped accepting connections as soon as that process exited. It now
+  keeps serving until you stop it. This comes from the update to h2 0.15.0
+  and h1 0.10.0; h2 0.13.0 and 0.12.7 also close connections of peers that
+  flood SETTINGS frames or force stream resets (CVE-2019-9515,
+  CVE-2025-8671).
 - A client could get past the per-connection tunnel limit on HTTP/3 by
   resetting streams while their tunnels were starting, and so hold far
   more sockets and lookups on the proxy than the limit allows.

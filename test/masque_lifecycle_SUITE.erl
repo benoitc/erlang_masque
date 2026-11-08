@@ -29,6 +29,8 @@
     h3_client_fin_ends_server_session/1,
     h2_client_fin_ends_server_session/1,
     h1_close_leaves_no_server_session/1,
+    h2_listener_outlives_its_caller/1,
+    h1_listener_outlives_its_caller/1,
     slow_init_is_504/1,
     h3_server_fin_notifies_client/1,
     h2_server_fin_notifies_client/1,
@@ -111,6 +113,8 @@ all() ->
         h3_client_fin_ends_server_session,
         h2_client_fin_ends_server_session,
         h1_close_leaves_no_server_session,
+        h2_listener_outlives_its_caller,
+        h1_listener_outlives_its_caller,
         slow_init_is_504,
         h3_server_fin_notifies_client,
         h2_server_fin_notifies_client,
@@ -736,6 +740,54 @@ h3_idle_tunnel_ends(Config) ->
     after 3000 -> ct:fail(not_idled_out)
     end,
     await_closed(Sess).
+
+%% An h2 or h1 listener started from a process that exits right after
+%% keeps serving (it used to close with its caller, h2 0.14.0 and h1
+%% 0.9.3 fixed it).
+h2_listener_outlives_its_caller(Config) -> listener_outlives_its_caller(Config, h2).
+h1_listener_outlives_its_caller(Config) -> listener_outlives_its_caller(Config, h1).
+
+listener_outlives_its_caller(Config, T) ->
+    #{cert_file := Cert, key_file := Key} = ?config(certs, Config),
+    Name = list_to_atom("outlives_" ++ atom_to_list(T)),
+    Self = self(),
+    {Caller, MRef} = spawn_monitor(fun() ->
+        {ok, Ref} =
+            case T of
+                h2 -> masque:start_listener_h2(Name, #{port => 0, cert => Cert, key => Key});
+                h1 -> masque:start_listener_h1(Name, #{port => 0, cert => Cert, key => Key})
+            end,
+        Self ! {port, element(3, Ref)}
+    end),
+    Port =
+        receive
+            {port, P} -> P
+        after 5000 -> ct:fail(no_listener)
+        end,
+    receive
+        {'DOWN', MRef, process, Caller, _} -> ok
+    end,
+    try
+        Alpn =
+            case T of
+                h2 -> <<"h2">>;
+                h1 -> <<"http/1.1">>
+            end,
+        {ok, S} = ssl:connect(
+            {127, 0, 0, 1},
+            Port,
+            [
+                binary, {verify, verify_none}, {alpn_advertised_protocols, [Alpn]}
+            ],
+            5000
+        ),
+        ssl:close(S)
+    after
+        case T of
+            h2 -> masque:stop_listener_h2(Name);
+            h1 -> masque:stop_listener_h1(Name)
+        end
+    end.
 
 %% A handler whose `init' runs past the 30 s start deadline: on h3 and
 %% h2 the client is told the target did not answer in time (504), not
