@@ -66,7 +66,7 @@ sequenceDiagram
 
 ## Dependency contracts
 
-These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 2.1.4, `h2` 0.12.5 and `h1` (`erlang_h1`) 0.9.2.
+These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 2.4.1, `h2` 0.12.5 and `h1` (`erlang_h1`) 0.9.2.
 
 ### quic_h3 (package `quic`)
 
@@ -82,6 +82,10 @@ Assumptions:
 - In server role, body bytes of a stream nobody claimed are buffered by `quic_h3` (bounded by `max_buffered_body`; overflow resets that stream with `H3_EXCESSIVE_LOAD`). `set_stream_handler/4` with `drain_buffer => false` replays them to the new handler as messages. The default, `drain_buffer => true`, returns them in the reply instead.
 - `send_data/4` returns `{error, send_queue_full}` when the stream's queue is full.
 - `send_response/4` with a 1xx status sends it at once as an interim response, and the final response can follow (CONNECT-TCP `100 Continue`). In client role, interim responses arrive as `{response, Sid, Status, Headers}` with `Status` below 200, followed by the final one.
+- `quic:migrate/1` returns `{error, handshake_not_confirmed}` until the handshake is confirmed, and `{error, no_available_connection_id}` until the peer has issued a spare id. Both are temporary; `masque:migrate/1` passes them through.
+- `{closed, Reason}` carries `{peer_closed, application, Code, Phrase}` when the peer closes with an error code, `normal` otherwise. masque only matches `{closed, _}`.
+- A listener refuses a client that offers none of its ALPN protocols, so every masque client offers `h3`.
+- `require_client_cert => true` in a listener's `quic_opts` asks for a client certificate, refuses a client without one, and needs `cacerts` or `cacertfile` to start. `quic:peercert/1` then returns the DER leaf (`add_peer_info/2`).
 - QUIC closes a connection after 30 s without received packets (`idle_timeout`). Every masque client and listener sets `keep_alive_interval => auto`, so a tunnel lasts until the session idle timer ends it. Only received packets restart the QUIC timer, so a vanished peer still times out.
 
 Messages to the connection owner (router, pooled upstream owner, or client session):

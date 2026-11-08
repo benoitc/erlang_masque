@@ -462,7 +462,7 @@ migrate(Sess, N) ->
     case Result of
         ok ->
             ok;
-        {error, no_available_connection_id} ->
+        {error, E} when E =:= no_available_connection_id; E =:= handshake_not_confirmed ->
             timer:sleep(100),
             migrate(Sess, N - 1);
         Other ->
