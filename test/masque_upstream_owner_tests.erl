@@ -157,24 +157,47 @@ h2_reads_peer_settings_for_max_streams_test() ->
     ok = ?M:stop(Owner),
     ?MOCK:stop(Mock).
 
-acquire_over_limit_rejects_test() ->
-    {Owner, Mock} = start_owner(
-        h2,
-        #{peer_settings => #{max_concurrent_streams => 1}}
-    ),
-    {ok, _Sid, _} =
-        ?M:acquire_stream(Owner, sample_headers(), self(), #{}),
-    ?assertEqual(
-        {error, stream_limit},
-        ?M:acquire_stream(
-            Owner,
-            sample_headers(),
-            self(),
-            #{}
-        )
-    ),
-    ok = ?M:stop(Owner),
-    ?MOCK:stop(Mock).
+%% At its stream limit the owner holds a new acquire until a stream ends
+%% (or 5 s pass, then `stream_limit').
+acquire_over_limit_waits_for_a_stream_test_() ->
+    {timeout, 15, fun() ->
+        {Owner, Mock} = start_owner(
+            h2,
+            #{peer_settings => #{max_concurrent_streams => 1}}
+        ),
+        {ok, Sid, _} = ?M:acquire_stream(Owner, sample_headers(), self(), #{}),
+        Self = self(),
+        _ = spawn_link(fun() ->
+            Self ! {second, ?M:acquire_stream(Owner, sample_headers(), Self, #{})}
+        end),
+        receive
+            {second, Early} -> ?assert({early, Early} =:= false)
+        after 300 -> ok
+        end,
+        ok = ?M:release_stream(Owner, Sid),
+        receive
+            {second, R} -> ?assertMatch({ok, _, _}, R)
+        after 3000 -> ?assert(false)
+        end,
+        ok = ?M:stop(Owner),
+        ?MOCK:stop(Mock)
+    end}.
+
+%% Nobody frees a stream: the held acquire gets `stream_limit' after 5 s.
+acquire_over_limit_times_out_test_() ->
+    {timeout, 15, fun() ->
+        {Owner, Mock} = start_owner(
+            h2,
+            #{peer_settings => #{max_concurrent_streams => 1}}
+        ),
+        {ok, _Sid, _} = ?M:acquire_stream(Owner, sample_headers(), self(), #{}),
+        ?assertEqual(
+            {error, stream_limit},
+            ?M:acquire_stream(Owner, sample_headers(), self(), #{})
+        ),
+        ok = ?M:stop(Owner),
+        ?MOCK:stop(Mock)
+    end}.
 
 h3_max_streams_defaults_to_100_test() ->
     {Owner, Mock} = start_owner(quic_h3),
@@ -184,20 +207,29 @@ h3_max_streams_defaults_to_100_test() ->
 
 %% A transport stream-limit error marks the owner full so the pool
 %% stops handing it out.
-transport_stream_limit_marks_owner_full_test() ->
-    {Owner, Mock} = start_owner(quic_h3, #{
-        pool => self(), request_result => {error, stream_limit}
-    }),
-    ?assertEqual(
-        {error, stream_limit},
-        ?M:acquire_stream(Owner, sample_headers(), self(), #{})
-    ),
-    receive
-        {owner_capacity, Owner, true} -> ok
-    after 1000 -> ?assert(false)
-    end,
-    ok = ?M:stop(Owner),
-    ?MOCK:stop(Mock).
+%% The peer refuses a stream: the owner stops offering itself at once,
+%% and holds the acquire up to 5 s for a stream to free up before it
+%% answers `stream_limit'.
+transport_stream_limit_marks_owner_full_test_() ->
+    {timeout, 15, fun() ->
+        {Owner, Mock} = start_owner(quic_h3, #{
+            pool => self(), request_result => {error, stream_limit}
+        }),
+        Self = self(),
+        _ = spawn_link(fun() ->
+            Self ! {acquired, ?M:acquire_stream(Owner, sample_headers(), Self, #{})}
+        end),
+        receive
+            {owner_capacity, Owner, true} -> ok
+        after 1000 -> ?assert(false)
+        end,
+        receive
+            {acquired, R} -> ?assertEqual({error, stream_limit}, R)
+        after 8000 -> ?assert(false)
+        end,
+        ok = ?M:stop(Owner),
+        ?MOCK:stop(Mock)
+    end}.
 
 %%====================================================================
 %% Connection close propagation

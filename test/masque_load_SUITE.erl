@@ -314,7 +314,13 @@ reverse_agent(Listen) ->
         stop ->
             _ = masque:close(Listen);
         {masque_connection_request, Listen, Id, _} ->
-            {ok, _} = masque:reverse_accept(Listen, Id, #{verify => verify_none}),
+            %% One process per accept, as a real agent: an accept that
+            %% waits for the proxy to return stream credit does not stop
+            %% the echoes on the streams already open.
+            _ = spawn_link(fun() ->
+                {ok, S} = masque:reverse_accept(Listen, Id, #{verify => verify_none}),
+                agent_stream(S)
+            end),
             reverse_agent(Listen);
         {masque_data, S, Bytes} ->
             _ = masque:send(S, Bytes),
@@ -329,6 +335,23 @@ reverse_agent(Listen) ->
             reverse_agent(Listen);
         _ ->
             reverse_agent(Listen)
+    end.
+
+agent_stream(S) ->
+    receive
+        {masque_data, S, Bytes} ->
+            _ = masque:send(S, Bytes),
+            agent_stream(S);
+        {masque_closed, S, peer_fin} ->
+            _ =
+                try
+                    masque:shutdown_write(S)
+                catch
+                    exit:_ -> ok
+                end,
+            ok;
+        {masque_closed, S, _} ->
+            ok
     end.
 
 connect(Config, Target, Opts) ->

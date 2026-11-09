@@ -1150,7 +1150,10 @@ h3_reset_while_starting_still_counts(_Config) ->
 
 %% Same, once the session has started and waits for its finalize.
 h3_reset_while_finalizing_answers_listener(_Config) ->
-    {Router, Caller} = start_pending_session(#{}),
+    %% The handler's `init' reports the session, then sleeps: the suspend
+    %% below reaches the session while it is still starting, so it is
+    %% queued ahead of the router's finalize cast, whatever the load.
+    {Router, Caller} = start_pending_session(#{init_delay => 200}),
     Pid = await_session(),
     %% Queued ahead of the router's finalize cast: the session stays
     %% started but unfinalized until it is resumed.

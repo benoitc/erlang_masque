@@ -39,13 +39,15 @@ sequenceDiagram
   O-->>S: ok StreamId Conn, or error stream_limit
 ```
 
-- **Single flight.** At most one dial per fingerprint is in flight; later callers for the same key join its waiter list, including callers that arrived because every cached owner was full. All waiters get the same new owner, so if more of them arrive than the owner's `max_streams`, the extra ones get `{error, stream_limit}` from `acquire_stream/4`.
+- **Single flight.** At most one dial per fingerprint is in flight; later callers for the same key join its waiter list, including callers that arrived because every cached owner was full. All waiters get the same new owner, so if more of them arrive than the owner's `max_streams`, the extra ones wait in the owner for a stream (see below).
 - **Self-dial.** `start_for_pool/3` spawns the owner, which dials in its own process and then enters the `gen_server` loop. The comment in `masque_upstream_owner` gives the reason: the transport connection is then owned by the owner from the start, and `quic_h3` has no public `controlling_process` equivalent to transfer it.
 - **Timeout.** `checkout/2` waits up to `checkout_timeout_ms` (default 60 s) and returns `{error, timeout}`. This is independent of the connect `timeout`.
 
 ## Capacity reporting
 
-An owner's stream limit is `max_streams` from `upstream_pool_opts`, or by default: h2 reads the peer's `max_concurrent_streams` (100 when absent or 0, `dynamic` when `unlimited`); h3 uses 100, because `quic_h3` does not expose the peer's MAX_STREAMS. A `dynamic` owner is never full. An owner whose transport refuses a new stream with `{error, stream_limit}` (the peer's QUIC limit is lower than `max_streams`) also reports itself full.
+An owner's stream limit is `max_streams` from `upstream_pool_opts`, or by default: h2 reads the peer's `max_concurrent_streams` (100 when absent or 0, `dynamic` when `unlimited`); h3 uses 100, because `quic_h3` does not expose the peer's MAX_STREAMS. A `dynamic` owner is never full. An owner whose transport refuses a new stream (`{error, stream_limit}` from QUIC, `{error, max_streams_exceeded}` from h2: the peer allows fewer streams than `max_streams`) reports itself full, at the streams it carries now, so later checkouts go to another connection. The refused acquire itself is held, since the peer returns QUIC stream credit in steps and a refusal is often momentary (see below). Owners dial with `notify_streams_available` (quic_h3) and `notify_stream_available` (h2): when the transport says a stream can open again (the peer returned credit or raised its limit), the owner goes back to its configured limit and reports itself not full.
+
+An acquire refused at a stream limit, the peer's or the owner's own (the pool can hand an owner out before it hears the owner is full), waits in the owner, oldest first, up to 5 s. It is retried when the transport says a stream can open or one of the owner's streams ends; past 5 s it gets `{error, stream_limit}` and the caller checks out again once. A reverse connect agent's dedicated connection relies on this, since it has no other connection to fall back on.
 
 Whenever an owner crosses its limit it sends `{owner_capacity, Self, Full}` to the registry, which flags the cache entry. `pick_owner/2` skips full entries and dead pids; when none is left the next checkout dials another connection.
 

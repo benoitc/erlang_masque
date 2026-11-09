@@ -66,7 +66,7 @@ sequenceDiagram
 
 ## Dependency contracts
 
-These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 2.5.0, `h2` 0.15.0 and `h1` (`erlang_h1`) 0.10.0.
+These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 2.6.1, `h2` 0.15.0 and `h1` (`erlang_h1`) 0.10.0.
 
 ### quic_h3 (package `quic`)
 
@@ -83,6 +83,7 @@ Assumptions:
 - `send_data/4` returns `{error, send_queue_full}` when the stream's queue is full.
 - `send_response/4` with a 1xx status sends it at once as an interim response, and the final response can follow (CONNECT-TCP `100 Continue`). In client role, interim responses arrive as `{response, Sid, Status, Headers}` with `Status` below 200, followed by the final one.
 - `quic:migrate/1` returns `{error, handshake_not_confirmed}` until the handshake is confirmed, and `{error, no_available_connection_id}` until the peer has issued a spare id. Both are temporary; `masque:migrate/1` passes them through.
+- With `notify_streams_available => true` (since 2.6.0), a request refused with `{error, stream_limit}` is followed, once a stream can open again, by `{quic_h3, C, {streams_available, bidi}}` to the connection owner. The upstream owner sets it on every dial.
 - `{closed, Reason}` carries `{peer_closed, application, Code, Phrase}` when the peer closes with an error code, `normal` otherwise. masque only matches `{closed, _}`.
 - A listener refuses a client that offers none of its ALPN protocols, so every masque client offers `h3`.
 - `require_client_cert => true` in a listener's `quic_opts` asks for a client certificate, refuses a client without one, and needs `cacerts` or `cacertfile` to start. `quic:peercert/1` then returns the DER leaf (`add_peer_info/2`).
@@ -118,6 +119,7 @@ Assumptions:
 - `h2_capsule:decode/1` returns the DATAGRAM type as the atom `datagram`.
 - `send_response/4` with 100 sends an interim HEADERS frame and the stream accepts the final response after it; h2 has no separate call for interim responses. In client role they arrive as `{informational, Sid, Status, Headers}`.
 - `get_peer_settings/1` exposes `enable_connect_protocol` and `max_concurrent_streams` (which may be `unlimited`).
+- A client request past the peer's `max_concurrent_streams` is refused with `{error, max_streams_exceeded}`. With `notify_stream_available => true` (since 0.15.0) the owner then gets `{h2, C, stream_available}` once a request fits again. The upstream owner sets it on every dial.
 - The listener owns its listen socket (since 0.14.0): a server started from a process that exits keeps serving, and `stop_server/1` returns once it is stopped.
 - `peercert/1` returns the client's DER certificate when the listener asked for one (`ssl_opts => [{verify, verify_peer}, {cacerts, _}]`), `{error, no_peercert}` otherwise.
 - A peer that sends more than 20 SETTINGS frames a second, or makes the server reset streams faster than its cap (MadeYouReset), has its connection closed.

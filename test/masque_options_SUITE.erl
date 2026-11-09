@@ -25,6 +25,7 @@
     h3_tcp_send_ready_after_full_queue/1,
     h2_sni_fun/1,
     h1_sni_fun/1,
+    h2_pool_learns_proxy_stream_limit/1,
     h1_handshake_timeout/1,
     h2_client_certificate/1,
     h2_client_without_certificate_refused/1,
@@ -54,6 +55,7 @@ all() ->
         h3_tcp_send_ready_after_full_queue,
         h2_sni_fun,
         h1_sni_fun,
+        h2_pool_learns_proxy_stream_limit,
         h1_handshake_timeout,
         h2_client_certificate,
         h2_client_without_certificate_refused,
@@ -575,3 +577,26 @@ client_cert() ->
         key_file => F("client.key"),
         root => [Der(F("ca.pem"))]
     }.
+
+%% h2: a proxy that allows 2 streams while the pool was told 10. h2
+%% refuses the third request (`max_streams_exceeded'); the pool stops
+%% offering that connection and opens others, so every tunnel connects.
+h2_pool_learns_proxy_stream_limit(Config) ->
+    #{cert_file := Cert, key_file := Key} = ?config(certs, Config),
+    {ok, {_, _, Port}} = masque:start_listener_h2(?config(name, Config), #{
+        port => 0,
+        cert => Cert,
+        key => Key,
+        handler_opts => #{allow_private => true, allow_self => true},
+        settings => #{max_concurrent_streams => 2}
+    }),
+    Opts = #{
+        protocol => tcp,
+        transports => [h2],
+        upstream_pool => true,
+        upstream_pool_opts => #{max_streams => 10}
+    },
+    Sessions = [connect(<<"127.0.0.1">>, Port, Config, Opts) || _ <- lists:seq(1, 6)],
+    [ok = echo(S) || S <- Sessions],
+    [masque:close(S) || S <- Sessions],
+    ok.

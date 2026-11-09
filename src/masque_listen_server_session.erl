@@ -175,13 +175,19 @@ open(#state{transport = T, conn = C, stream_id = Sid} = S) ->
             {error, S}
     end.
 
-send_response(h3, C, Sid) -> quic_h3:send_response(C, Sid, 200, response_headers());
-send_response(h2, C, Sid) -> h2:send_response(C, Sid, 200, response_headers()).
+send_response(h3, C, Sid) ->
+    masque_out:call(fun() -> quic_h3:send_response(C, Sid, 200, response_headers()) end);
+send_response(h2, C, Sid) ->
+    masque_out:call(fun() -> h2:send_response(C, Sid, 200, response_headers()) end).
 
 response_headers() -> [{<<"capsule-protocol">>, <<"?1">>}].
 
-claim(h3, C, Sid) -> quic_h3:set_stream_handler(C, Sid, self(), #{drain_buffer => false});
-claim(h2, C, Sid) -> h2:set_stream_handler(C, Sid, self()).
+claim(h3, C, Sid) ->
+    masque_out:call(fun() ->
+        quic_h3:set_stream_handler(C, Sid, self(), #{drain_buffer => false})
+    end);
+claim(h2, C, Sid) ->
+    masque_out:call(fun() -> h2:set_stream_handler(C, Sid, self()) end).
 
 %% H3: the router's finalize, after which the stream is ours.
 finalize(#state{early = Early, early_calls = Calls} = S) ->
