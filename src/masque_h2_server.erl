@@ -48,8 +48,14 @@ start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
     end.
 
 start_h2_listener(Name, Opts0) ->
-    persistent_term:erase({masque_drain, Name}),
     Opts = defaults(Opts0),
+    case masque_listener_auth:check_start(Opts) of
+        ok -> start_h2_listener_1(Name, Opts);
+        {error, _} = Err -> Err
+    end.
+
+start_h2_listener_1(Name, Opts) ->
+    persistent_term:erase({masque_drain, Name}),
     Port = maps:get(port, Opts),
     #{handler := Handler} = h2_handlers(Opts#{drain_key => Name}),
     ServerOpts = #{
@@ -70,7 +76,13 @@ start_h2_listener(Name, Opts0) ->
             {ok, SslOpts} -> ServerOpts1#{ssl_opts => SslOpts};
             error -> ServerOpts1
         end,
-    case h2:start_server(Name, Port, ServerOpts2) of
+    %% `ip' binds the listening socket to one address.
+    ServerOpts3 =
+        case maps:find(ip, Opts) of
+            {ok, IP} -> ServerOpts2#{ip => IP};
+            error -> ServerOpts2
+        end,
+    case h2:start_server(Name, Port, ServerOpts3) of
         {ok, Ref} ->
             persistent_term:put({masque_h2_ref, Name}, Ref),
             persistent_term:put({masque_h2_name, Ref}, Name),
@@ -176,6 +188,7 @@ build_dispatch(Opts) ->
         fallback => maps:get(fallback, Opts, undefined),
         max_tunnels => maps:get(max_tunnels_per_connection, Opts, ?MASQUE_DEFAULT_MAX_TUNNELS),
         name => maps:get(drain_key, Opts, undefined),
+        authenticate => maps:get(authenticate, Opts, undefined),
         reverse => masque_reverse_listener:config(Opts)
     }.
 
@@ -255,7 +268,7 @@ dispatch_masque(Conn, StreamId, Method, Path, Headers, Dispatch) ->
                     udp_bind -> BindHandler
                 end,
             Req1 = add_peer(Conn, Req0#{handler_opts => HandlerOpts}),
-            case masque_ip:resolve_target(Protocol, Req1, Resolver) of
+            case masque_listener_auth:resolve(Dispatch, Protocol, Req1, Resolver) of
                 {ok, Req} ->
                     case accept_request(HandlerMod, Req) of
                         accept ->

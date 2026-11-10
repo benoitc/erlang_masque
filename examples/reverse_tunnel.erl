@@ -123,6 +123,9 @@ stop_edge() ->
 listener_opts() ->
     #{
         port => 0,
+        %% A demo: this listener relays to any public host its clients
+        %% name. A real one needs `authenticate' (or `ip' on loopback).
+        public_relay => true,
         accept_listen => true,
         listen_handler => ?MODULE
     }.

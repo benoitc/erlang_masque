@@ -66,8 +66,14 @@ start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
     end.
 
 start_h3_listener(Name, Opts0) ->
-    persistent_term:erase({masque_drain, Name}),
     Opts = defaults(Opts0),
+    case masque_listener_auth:check_start(Opts) of
+        ok -> start_h3_listener_1(Name, Opts);
+        {error, _} = Err -> Err
+    end.
+
+start_h3_listener_1(Name, Opts) ->
+    persistent_term:erase({masque_drain, Name}),
     Port = maps:get(port, Opts),
     #{
         handler := Handler,
@@ -110,8 +116,14 @@ build_quic_opts(Opts) ->
             true -> Base#{reuseport => true};
             false -> Base
         end,
+    %% `ip' binds the listening socket to one address.
+    Base2 =
+        case maps:get(ip, Opts, undefined) of
+            undefined -> Base1;
+            IP -> Base1#{extra_socket_opts => [{ip, IP}]}
+        end,
     %% The caller's `quic_opts' come last, so they override the defaults.
-    maps:merge(Base1, maps:get(quic_opts, Opts, #{})).
+    maps:merge(Base2, maps:get(quic_opts, Opts, #{})).
 
 %% Stop a MASQUE listener.
 -spec stop_listener(listener_name()) -> ok | {error, term()}.
@@ -163,6 +175,7 @@ h3_handlers(Opts0) ->
         handler_opts => HandlerOpts,
         fallback => Fallback,
         name => DrainKey,
+        authenticate => maps:get(authenticate, Opts, undefined),
         reverse => masque_reverse_listener:config(Opts)
     },
     MaxTunnels = maps:get(max_tunnels_per_connection, Opts, ?MASQUE_DEFAULT_MAX_TUNNELS),
@@ -311,7 +324,7 @@ dispatch_masque(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
                 end,
             Req1 = add_peer_info(Conn, Req0),
             Req2 = Req1#{handler_opts => HandlerOpts},
-            case masque_ip:resolve_target(Protocol, Req2, Resolver) of
+            case masque_listener_auth:resolve(Dispatch, Protocol, Req2, Resolver) of
                 {ok, Req3} ->
                     case accept_request(HandlerMod, Req3) of
                         accept ->
