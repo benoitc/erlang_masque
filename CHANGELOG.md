@@ -6,6 +6,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- masque now uses `instrument` 2.0.0. Its metrics export to Prometheus under
+  their own names with the attributes as labels; dashboards using the older
+  combined names must be updated. `instrument` now also starts
+  `hackney`. h2 0.15.1 notices a vanished peer at once instead of after
+  about five seconds.
+
 ### Added
 
 - HTTP/2 and HTTP/1.1 handlers now see the client's certificate as

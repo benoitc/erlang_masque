@@ -4,7 +4,7 @@ This page is for running `masque` in production: what the metrics mean and which
 
 ## Metrics
 
-`masque_metrics` creates `instrument_meter` instruments on the `masque` meter when the application starts (the `instrument` application is a dependency and starts with it). Export them with any `instrument` exporter (OTLP, Prometheus).
+`masque_metrics` creates `instrument_meter` instruments on the `masque` meter when the application starts (the `instrument` application is a dependency and starts with it; since `instrument` 2.0.0 it also starts `hackney`). Export them with any `instrument` exporter (OTLP, Prometheus). In Prometheus each instrument exports under its own name with its attributes as labels (no longer one series name per attribute combination), and an instrument exports nothing before its first write.
 
 | Instrument | Kind | Attributes | Meaning |
 |---|---|---|---|
