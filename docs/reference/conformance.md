@@ -37,6 +37,7 @@ This table replaces the compliance map from the former `docs/connect_ip.md`. Eac
 
 | Section | Requirement | Behaviour in masque | Module |
 | --- | --- | --- | --- |
+| §4.6, erratum 8444 (verified) | A wildcard `target` or `ipproto` MUST be percent-encoded, sent as `%2A` | The client sends `%2A`; the proxy accepts `%2A` and also a bare `*` from older clients. | `masque_uri_template`, `masque_uri_ip` |
 | §3 | Absolute URI template with `target` and `ipproto` (path or query form) | The client requires an absolute template (`masque_uri_ip:parse_client_template/1`); the server matches path and query forms (`parse_server_template/1`). IP templates only allow `target` and `ipproto`. Prefix targets must be canonical (host bits zero). | `masque_uri_ip`, `masque_uri_template` |
 | §4 | Request carries `:protocol = connect-ip` and `capsule-protocol: ?1` | `connect/3` forces `capsule_protocol => true` for `protocol => ip` and refuses `false` (`{invalid_opts, capsule_protocol_required_for_ip}`). | `masque`, `masque_ip_client_session` |
 | §4 | 2xx carries `capsule-protocol: ?1`, no `content-length` / `content-type` | The client refuses other responses (`capsule_protocol_missing`, `malformed_response`). | `masque_ip_client_session`, `masque_ip_h1_client_session` |
@@ -56,7 +57,8 @@ This table replaces the compliance map from the former `docs/connect_ip.md`. Eac
 
 Deviations and additions:
 - `'*'` and private targets are refused with 403 unless the listener sets `allow_private` (local policy, not required by the RFC).
-- The h2/h3 server session keeps at most 64 unanswered ADDRESS_REQUEST ids per session and rejects the rest at once. The h1 server session has no such bound.
+- Every server session (h3, h2 and h1) keeps at most 64 unanswered ADDRESS_REQUEST ids per session and rejects the rest at once.
+- The proxy accepts a bare `*` wildcard as well as `%2A` (erratum 8444 makes the bare form invalid), so clients written before the erratum keep working. The client sends `%2A`.
 - The default handler forwards accepted packets to a user `forward_fun`; without one, packets are dropped. The RFC leaves the data plane to the implementation.
 
 ## RFC 9209: The Proxy-Status HTTP response header
@@ -140,7 +142,7 @@ masque implements draft -16 (August 2026, submitted for publication). Codes, hea
 | Requirement | Behaviour in masque | Module |
 | --- | --- | --- |
 | §6: `Connect-UDP-Bind: ?1` (RFC 9651 Boolean) on request and response enables the extension | Listeners only look at the header with `accept_bind => true`; an invalid value is treated as absent and the request stays plain CONNECT-UDP. Unknown parameters are ignored (`?1;x` enables it); a field sent more than once, or a list, is ignored. The client refuses a 2xx without it (`missing_bind_response_header`). | `masque_uri_udp_bind`, listeners, udp-bind client sessions |
-| §2: same URI template as CONNECT-UDP; `*` for an unscoped bind; only one `*` is malformed (4xx, SHOULD be 400) | The bind matcher accepts `%2A` for both host and port; one alone gets 400. The plain CONNECT-UDP matcher still refuses `*`. | `masque_uri_udp_bind` |
+| §2: same URI template as CONNECT-UDP; `*` for an unscoped bind, percent-encoded as `%2A`; only one `*` is malformed (4xx, SHOULD be 400) | The client sends `%2A` for both; the bind matcher accepts `%2A` (and a bare `*`) for both host and port; one alone gets 400. The plain CONNECT-UDP matcher still refuses `*`. | `masque_uri_udp_bind`, `masque_uri_template` |
 | `Proxy-Public-Address` on the response (list of `"ip:port"` strings) | The default handler sets it from `public_addresses`, `public_address_fun` or the bound socket address, and refuses a wildcard bind without one. The client refuses a 2xx without it (`missing_proxy_public_address`). | `masque_udp_bind_proxy_handler`, `masque_uri_udp_bind` |
 | Payload formats (sections 4 and 5): compressed = UDP payload only; uncompressed = family, address, port, payload | As stated. | `masque_udp_bind_payload` |
 | §3: context id 0 | Scoped bind: raw UDP to the scoped peer, as in RFC 9298. Unscoped bind: the request stream is aborted (`context_zero_datagram`), on the proxy and on the client. | udp-bind sessions |

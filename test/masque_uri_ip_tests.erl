@@ -139,7 +139,8 @@ parse_ipproto_not_int_test() ->
 expand_wildcard_path_test() ->
     {ok, T} = masque_uri_ip:parse_client_template(?ABS_PATH_TPL),
     ?assertEqual(
-        <<"https://proxy.example:4443/.well-known/masque/ip/*/*/">>,
+        %% RFC 9484 erratum 8444: the wildcard is sent as `%2A'.
+        <<"https://proxy.example:4443/.well-known/masque/ip/%2A/%2A/">>,
         masque_uri_ip:expand(T, #{target => '*', ipproto => '*'})
     ).
 
@@ -173,6 +174,15 @@ expand_v6_literal_escapes_colons_test() ->
         )
     ).
 
+%% Erratum 8444: the wildcard arrives as `%2A'.
+match_wildcard_pct_encoded_test() ->
+    {ok, T} = masque_uri_ip:parse_server_template(?SERVER_PATH_TPL),
+    ?assertEqual(
+        {ok, #{target => '*', ipproto => '*'}},
+        masque_uri_ip:match(T, <<"/.well-known/masque/ip/%2A/%2A/">>)
+    ).
+
+%% A bare `*' from clients written before the erratum is still accepted.
 match_wildcard_test() ->
     {ok, T} = masque_uri_ip:parse_server_template(?SERVER_PATH_TPL),
     ?assertEqual(
@@ -237,7 +247,7 @@ match_bad_ipproto_test() ->
 expand_query_form_test() ->
     {ok, T} = masque_uri_ip:parse_client_template(?ABS_QUERY_TPL),
     ?assertEqual(
-        <<"https://proxy.example:4443/masque?target=*&ipproto=*">>,
+        <<"https://proxy.example:4443/masque?target=%2A&ipproto=%2A">>,
         masque_uri_ip:expand(T, #{target => '*', ipproto => '*'})
     ).
 
