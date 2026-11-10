@@ -15,7 +15,7 @@
 -module(masque_client_owner).
 -moduledoc false.
 
--export([init/1, send/2, send_bounded/2, release/1]).
+-export([init/1, send/2, send_bounded/2, send_datagram/2, release/1]).
 
 -define(HELD_KEY, {?MODULE, held}).
 %% Owner mailbox length past which `send_bounded/2' drops, as the h3
@@ -50,6 +50,17 @@ send(Owner, Msg) ->
 send_bounded(Owner, Msg) ->
     case get(?HELD_KEY) =:= undefined andalso erlang:process_info(Owner, message_queue_len) of
         {message_queue_len, N} when N >= ?OWNER_BACKLOG -> ok;
+        _ -> send(Owner, Msg)
+    end.
+
+%% Deliver a datagram (UDP payload, IP packet, bind packet) in `message'
+%% mode. Datagrams are unreliable, so while the owner already has
+%% `?OWNER_BACKLOG' messages waiting this one is dropped and counted
+%% (`masque_metrics:owner_drop_count/0') rather than grow its mailbox.
+-spec send_datagram(pid(), term()) -> ok.
+send_datagram(Owner, Msg) ->
+    case get(?HELD_KEY) =:= undefined andalso erlang:process_info(Owner, message_queue_len) of
+        {message_queue_len, N} when N >= ?OWNER_BACKLOG -> masque_metrics:owner_drop_inc();
         _ -> send(Owner, Msg)
     end.
 

@@ -59,12 +59,15 @@ token_version(?MASQUE_CONNECT_TCP_07_PROTOCOL) -> {capsule, provisional};
 token_version(_) -> unknown.
 
 %% What a client sends, from its `tcp_framing' and `tcp_protocol'
-%% options: the framing, the protocol token and the capsule codes. In
+%% options: the framing, the protocol token and the capsule codes. The
+%% default is capsule framing (draft -18, about to be published); on h1
+%% a proxy that refuses the upgrade (426, 501) is tried again with a
+%% classic CONNECT. `raw' is for h3 and h2 proxies of older drafts. In
 %% capsule framing the token defaults to `connect-tcp', the protocol's
 %% registered name; `connect-tcp-12' is the draft's interop token.
 -spec client_protocol(map()) -> {raw | capsule, binary(), version()}.
 client_protocol(Opts) ->
-    case maps:get(tcp_framing, Opts, raw) of
+    case maps:get(tcp_framing, Opts, capsule) of
         raw ->
             {raw, ?MASQUE_CONNECT_TCP_PROTOCOL, final};
         capsule ->

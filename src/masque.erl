@@ -185,8 +185,9 @@ versions.
         %% (for example `session_ticket', `idle_timeout',
         %% `keep_alive_interval').
         quic_opts => map(),
-        %% CONNECT-TCP framing: `raw' (earlier drafts, the default) or
-        %% `capsule' (draft-ietf-httpbis-connect-tcp-18).
+        %% CONNECT-TCP framing: `capsule' (draft-ietf-httpbis-connect-tcp-18,
+        %% the default; on h1 a proxy that refuses it gets a classic
+        %% CONNECT) or `raw' (earlier drafts, for older h3 and h2 proxies).
         tcp_framing => raw | capsule,
         %% CONNECT-TCP in capsule framing: the protocol token, which also
         %% picks the capsule codes. `<<"connect-tcp">>' (the default, the
@@ -227,6 +228,15 @@ versions.
 -type listener_opts() ::
     #{
         port := inet:port_number(),
+        %% Bind the listening socket to one address (all by default).
+        ip => inet:ip_address(),
+        %% Called for every tunnel request before the handler's
+        %% `accept/1'; `{ok, Identity}' puts `identity' in the request.
+        authenticate => fun((map()) -> ok | {ok, term()} | {reject, term()}),
+        %% With the built-in relaying handlers, a listener on a
+        %% non-loopback address needs `authenticate' or this set to
+        %% `true' (or the application env `public_relay').
+        public_relay => boolean(),
         %% DER binaries for H3, PEM paths for H2 — both listeners
         %% read these same keys.
         cert => term(),
