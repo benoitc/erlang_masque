@@ -542,9 +542,10 @@ reject(Conn, StreamId, Reason, ExtraHeaders) ->
         {<<"proxy-status">>, proxy_status_field(Reason)}
     ],
     Headers = merge_extra_headers(Base, ExtraHeaders),
-    %% The stream may already be gone (client reset): nothing to do.
-    _ = h2:send_response(Conn, StreamId, Status, Headers),
-    _ = h2:send_data(Conn, StreamId, Body, true),
+    %% The stream, or the whole connection, may already be gone (client
+    %% reset or vanished): nothing to answer, and nothing to report.
+    _ = masque_out:call(fun() -> h2:send_response(Conn, StreamId, Status, Headers) end),
+    _ = masque_out:call(fun() -> h2:send_data(Conn, StreamId, Body, true) end),
     ok.
 
 merge_extra_headers(Base, []) ->
