@@ -13,9 +13,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   anyone who could reach it. Give it an `authenticate` fun, bind it to a
   loopback address with the new `ip` option, or set `public_relay => true`
   when an open relay is what you want.
-- CONNECT-TCP clients use the draft -18 capsule framing by default. On
-  HTTP/1.1 a proxy that refuses it is tried again with a classic CONNECT;
-  set `tcp_framing => raw` for HTTP/3 and HTTP/2 proxies of older drafts.
+- CONNECT-TCP clients on HTTP/3 and HTTP/2 use the draft -18 capsule
+  framing by default; set `tcp_framing => raw` for proxies of older drafts.
+  On HTTP/1.1 nothing changes: a classic CONNECT first, and the capsule
+  upgrade when the proxy asks for it.
 - The wildcard target of CONNECT-IP and Connect-UDP-Bind is sent as `%2A`,
   as RFC 9484 erratum 8444 and the Connect-UDP-Bind draft require. Proxies
   still accept a bare `*`.

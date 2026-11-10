@@ -1574,7 +1574,8 @@ h2_tcp_rejects_capsule_protocol_response(Config) ->
         {error, _} = masque:connect(
             iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
             {<<"192.0.2.6">>, 443},
-            #{verify => verify_none, transports => [h2], protocol => tcp}
+            %% Raw framing: a 2xx switching to capsules is refused.
+            #{verify => verify_none, transports => [h2], protocol => tcp, tcp_framing => raw}
         )
     after
         h2:stop_server(Ref)

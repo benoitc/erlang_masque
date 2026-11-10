@@ -18,6 +18,9 @@
 start(#{cert := Cert, key := Key, log := Log} = Opts) ->
     ok = logger:add_handler(netsim_file, logger_std_h, #{config => #{file => Log}}),
     {ok, _} = application:ensure_all_started(masque),
+    %% This peer node does not read test/test.config: the test proxy
+    %% relays for the simulated clients on purpose.
+    ok = application:set_env(masque, public_relay, true),
     {ok, _} = masque:start_listener(netsim, #{
         port => ?PORT,
         cert => Cert,

@@ -29,7 +29,7 @@ This page covers everything you do on the client side of a tunnel: open it with 
 | `ssl_opts` | `[]` | Extra `ssl` client options, merged over the defaults. h2 and h1 only; h3 ignores it. An IPv6 literal proxy (`https://[::1]:443`) gets `inet6` by default. |
 | `owner` | caller | Application owner: the process that gets the session's messages. The session monitors it and closes when it exits. |
 | `mode` | `message` | Delivery mode, `message` or `queue`. Change later with `masque:set_mode/2`. |
-| `tcp_framing` | `capsule` | CONNECT-TCP framing: `capsule` (draft-ietf-httpbis-connect-tcp-18; on h1 a proxy that refuses it is tried again with a classic CONNECT), or `raw` for h3 and h2 proxies of earlier drafts. See [connect-tcp](connect-tcp.md#two-framings). |
+| `tcp_framing` | `capsule` on h3 and h2 | CONNECT-TCP framing: `capsule` (draft-ietf-httpbis-connect-tcp-18), or `raw` for h3 and h2 proxies of earlier drafts. On h1 the client sends a classic CONNECT first and switches to the capsule upgrade when the proxy asks for it with 426 or 501. See [connect-tcp](connect-tcp.md#two-framings). |
 | `tcp_protocol` | `<<"connect-tcp">>` | CONNECT-TCP token in capsule framing, which also picks the capsule codes. See [connect-tcp](connect-tcp.md#tokens-and-capsule-codes). |
 | `rx_queue_limit` | `1000` | Items a queue-mode session buffers. |
 | `request_headers` | `[]` | Extra headers on the CONNECT (or h1 Upgrade) request, for example an `authorization` token. |

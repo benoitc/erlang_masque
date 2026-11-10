@@ -186,8 +186,9 @@ versions.
         %% `keep_alive_interval').
         quic_opts => map(),
         %% CONNECT-TCP framing: `capsule' (draft-ietf-httpbis-connect-tcp-18,
-        %% the default; on h1 a proxy that refuses it gets a classic
-        %% CONNECT) or `raw' (earlier drafts, for older h3 and h2 proxies).
+        %% the default on h3 and h2) or `raw' (earlier drafts). On h1 the
+        %% default is a classic CONNECT, switched to the capsule upgrade
+        %% when the proxy answers 426 or 501 asking for it.
         tcp_framing => raw | capsule,
         %% CONNECT-TCP in capsule framing: the protocol token, which also
         %% picks the capsule codes. `<<"connect-tcp">>' (the default, the

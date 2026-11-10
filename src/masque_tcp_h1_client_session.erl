@@ -120,7 +120,12 @@ init({Target, Opts, Owner}) ->
     ok = masque_client_owner:init(Opts),
     Mode = maps:get(mode, Opts, message),
     ProxyAuth = maps:get(proxy_authorization, Opts, undefined),
-    {Framing, Token, Version} = masque_tcp_capsule:client_protocol(Opts),
+    %% On h1 a classic CONNECT goes first: every proxy understands it, and
+    %% one that wants the capsule upgrade says so with 426 or 501, which
+    %% switches this proxy to the upgrade (see the fallback below).
+    {Framing, Token, Version} = masque_tcp_capsule:client_protocol(
+        maps:merge(#{tcp_framing => raw}, Opts)
+    ),
     ok = validate_proxy_auth(ProxyAuth),
     Data = #data{
         owner = Owner,
