@@ -6,6 +6,20 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- A listener with the built-in relaying handlers no longer starts on a
+  public address without authentication: it relayed to any public host for
+  anyone who could reach it. Give it an `authenticate` fun, bind it to a
+  loopback address with the new `ip` option, or set `public_relay => true`
+  when an open relay is what you want.
+- CONNECT-TCP clients use the draft -18 capsule framing by default. On
+  HTTP/1.1 a proxy that refuses it is tried again with a classic CONNECT;
+  set `tcp_framing => raw` for HTTP/3 and HTTP/2 proxies of older drafts.
+- The wildcard target of CONNECT-IP and Connect-UDP-Bind is sent as `%2A`,
+  as RFC 9484 erratum 8444 and the Connect-UDP-Bind draft require. Proxies
+  still accept a bare `*`.
+
 ### Changed
 
 - masque now uses `instrument` 2.0.0. Its metrics export to Prometheus under
@@ -16,6 +30,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Listeners take an `authenticate` fun, called for every tunnel request
+  with its headers, peer and certificate; what it returns reaches handlers
+  as `identity`. Listeners also take `ip` to bind one address.
 - HTTP/2 and HTTP/1.1 handlers now see the client's certificate as
   `peer_cert` when the listener asks for client certificates, as HTTP/3
   handlers already do.
@@ -57,6 +74,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A client that stopped reading could make its session hold every datagram
+  the proxy sent until memory ran out. In message mode, datagrams are now
+  dropped and counted while the owner has 10 000 messages waiting.
+- A crashing handler logged the request in its error report, headers and
+  tokens included, and a peer able to make it crash could flood the logs.
+  The report now names the callback and the error without values, and at
+  most ten are written a second.
+- Reverse connect request ids came from a predictable random source; they
+  now come from a cryptographic one.
+- A proxy that refused a tunnel just as the client went away logged a crash
+  report.
 - Pooled HTTP/2 tunnels failed when the proxy allowed fewer concurrent
   streams than the pool expected, instead of opening another connection.
   Pooled connections, on HTTP/2 and HTTP/3, are now offered again as soon

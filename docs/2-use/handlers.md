@@ -107,6 +107,7 @@ Actions run in list order. Unknown actions are ignored. A closing action ends th
 | `resolved_addresses` | IP | The listener resolver's answer for a host name target, the address itself for an address target, `[]` otherwise. |
 | `peer` | all | `{Address, Port}` of the client. |
 | `peer_cert` | every transport, with a client certificate | DER leaf certificate, checked against the listener's trust anchors. |
+| `identity` | every transport, when the listener's `authenticate` returned `{ok, Identity}` | Whatever `authenticate` returned. |
 
 ## init runs before the 2xx
 

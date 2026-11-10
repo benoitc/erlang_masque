@@ -16,9 +16,9 @@ receive {masque_data, Sess, Chunk} -> Chunk end.
 
 ## Two framings
 
-masque speaks two framings of draft-ietf-httpbis-connect-tcp. Pick one with the client option `tcp_framing`; a listener answers both.
+masque speaks two framings of draft-ietf-httpbis-connect-tcp. Clients use `capsule` unless you set the option `tcp_framing`; a listener answers both. On HTTP/1.1, a proxy that refuses the capsule upgrade (426, 501) is tried again with a classic CONNECT, so you do not need to know which framing it speaks. On HTTP/3 and HTTP/2, set `tcp_framing => raw` only for a proxy of an earlier draft.
 
-| | `raw` (default) | `capsule` |
+| | `raw` | `capsule` (default) |
 |---|---|---|
 | Draft | earlier revisions | draft-ietf-httpbis-connect-tcp-18 |
 | Bytes on the stream | as they are | in `DATA` capsules; `FINAL_DATA` carries the last bytes and the FIN |

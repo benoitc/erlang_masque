@@ -21,7 +21,7 @@ Every server session reports `masque.tunnels.total`, `masque.tunnels.active` and
 
 ## Counters
 
-Plain `counters` sit beside the meters. `masque_metrics:backlog_drop_count/0` counts the HTTP/3 datagrams the router dropped because their session had 10 000 unprocessed messages. They are node-wide totals, cheap to read, and meant for scrapers and tests.
+Plain `counters` sit beside the meters. `masque_metrics:backlog_drop_count/0` counts the HTTP/3 datagrams the router dropped because their session had 10 000 unprocessed messages. `masque_metrics:owner_drop_count/0` counts the datagrams client sessions dropped because their owner, in `message` mode, had 10 000 messages waiting. They are node-wide totals, cheap to read, and meant for scrapers and tests.
 
 ### Drop counters
 
@@ -92,6 +92,6 @@ Clients that race transports reconnect to whichever instance your DNS or load ba
 
 ## Logs
 
-`masque` itself logs one thing: an exception raised by a handler callback in a server session, at error level through `logger`, with the module, function, arity, class, reason and stack. Refused requests are not logged; they are counted in `masque.tunnels.rejected`. What the handler crash does to the tunnel is described in [handlers](handlers.md#what-a-crash-does). The transport libraries (`quic`, `h2`, `h1`) log on their own.
+`masque` itself logs one thing: an exception raised by a handler callback (or a listener's `authenticate`) in a server session, at error level through `logger`. The line names the callback, the exception class and the shape of the reason (`badmatch`, `function_clause`, ...), and lists the stack as `Module:Function/Arity (file:line)`: no values, since a reason or an argument can hold request headers such as `authorization`. Set the application env `{masque, [{handler_crash_detail, true}]}` to log the full reason while you debug. At most ten such lines are written a second; the next one says how many were left out. Refused requests are not logged; they are counted in `masque.tunnels.rejected`. What the handler crash does to the tunnel is described in [handlers](handlers.md#what-a-crash-does). The transport libraries (`quic`, `h2`, `h1`) log on their own.
 
 Next: [debugging](../3-change/debugging.md), or back to [concepts](../1-understand/concepts.md) for the map of the code.
