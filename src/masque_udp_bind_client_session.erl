@@ -862,7 +862,7 @@ deliver_bind_packet(
             {T, scoped} -> T;
             T -> T
         end,
-    masque_client_owner:send(Owner, {masque_bind_packet, self(), Peer, Bytes}),
+    masque_client_owner:send_datagram(Owner, {masque_bind_packet, self(), Peer, Bytes}),
     Data;
 deliver_bind_packet(
     PeerOrTagged,

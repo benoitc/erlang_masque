@@ -562,7 +562,10 @@ udp_echo(Config) ->
 udp_burst(Config) ->
     {Agent, Control} = start_agent(Config, echo),
     {ok, Stream} = masque:request_connection(Control, udp_service()),
-    [ok = masque:send(Stream, <<N:32, 0:(996 * 8)>>) || N <- lists:seq(1, 200)],
+    %% QUIC refuses a datagram it has no congestion window for. UDP may
+    %% drop, so that counts as loss, not a failure (as in the load suite).
+    Sent = [masque:send(Stream, <<N:32, 0:(996 * 8)>>) || N <- lists:seq(1, 200)],
+    [] = [R || R <- Sent, R =/= ok, R =/= {error, congestion_limited}],
     Got = count_datagrams(Stream, 0),
     ct:log("~p of 200 datagrams came back", [Got]),
     ?assert(Got >= 150),

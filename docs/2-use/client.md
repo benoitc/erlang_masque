@@ -29,7 +29,7 @@ This page covers everything you do on the client side of a tunnel: open it with 
 | `ssl_opts` | `[]` | Extra `ssl` client options, merged over the defaults. h2 and h1 only; h3 ignores it. An IPv6 literal proxy (`https://[::1]:443`) gets `inet6` by default. |
 | `owner` | caller | Application owner: the process that gets the session's messages. The session monitors it and closes when it exits. |
 | `mode` | `message` | Delivery mode, `message` or `queue`. Change later with `masque:set_mode/2`. |
-| `tcp_framing` | `raw` | CONNECT-TCP framing: `raw`, or `capsule` for draft-ietf-httpbis-connect-tcp-18. See [connect-tcp](connect-tcp.md#two-framings). |
+| `tcp_framing` | `capsule` on h3 and h2 | CONNECT-TCP framing: `capsule` (draft-ietf-httpbis-connect-tcp-18), or `raw` for h3 and h2 proxies of earlier drafts. On h1 the client sends a classic CONNECT first and switches to the capsule upgrade when the proxy asks for it with 426 or 501. See [connect-tcp](connect-tcp.md#two-framings). |
 | `tcp_protocol` | `<<"connect-tcp">>` | CONNECT-TCP token in capsule framing, which also picks the capsule codes. See [connect-tcp](connect-tcp.md#tokens-and-capsule-codes). |
 | `rx_queue_limit` | `1000` | Items a queue-mode session buffers. |
 | `request_headers` | `[]` | Extra headers on the CONNECT (or h1 Upgrade) request, for example an `authorization` token. |
@@ -81,7 +81,7 @@ ok = masque:send(Sess, ContextId, Payload), %% UDP, explicit context id
 
 `send/2,3` blocks until the session accepted the data. On CONNECT-TCP over h3 and h2 a full send queue returns `{error, send_queue_full}` (h3) or `{error, send_buffer_full}` (h2): nothing was written, so send the same bytes again shortly. Over h1, `send/2` waits instead, and fails after 30 s if the proxy stops reading. On UDP, a payload above 65527 bytes, or above what the h3 connection can carry in a datagram, returns an error instead of being sent. Under load on h3, `{error, congestion_limited}` means QUIC had no congestion window for this datagram: it was not sent, and you can drop it, as UDP may, or send it again. `send/2,3` exits if the session process is gone.
 
-In `message` mode the owner gets `{masque_data, Sess, Data}` for every payload:
+In `message` mode the owner gets `{masque_data, Sess, Data}` for every payload. Datagram tunnels (UDP, IP, udp-bind) drop a payload while your mailbox already holds 10 000 messages, and count it in `masque_metrics:owner_drop_count/0`; CONNECT-TCP never drops. With an untrusted or fast peer, use `queue` mode (below), which bounds what is held:
 
 ```erlang
 handle_info({masque_data, Sess, Data}, #{sess := Sess} = State) ->

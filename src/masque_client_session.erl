@@ -480,7 +480,7 @@ handle_recv_call(From, Timeout, #data{rx_buf = Buf, rx_waiters = Ws} = Data) ->
     end.
 
 deliver_packet(UdpBytes, #data{mode = message, owner = Owner} = Data) ->
-    masque_client_owner:send(Owner, {masque_data, self(), UdpBytes}),
+    masque_client_owner:send_datagram(Owner, {masque_data, self(), UdpBytes}),
     Data;
 deliver_packet(
     UdpBytes,

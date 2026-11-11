@@ -71,6 +71,13 @@ When `transports` lists more than one transport, the session first belongs to a 
 
 udp-bind sessions report differently: they send `{masque_closed, Sess, Reason}` from `terminate/3` whenever they stop in `message` mode, with the process exit reason. A clean end (the proxy's FIN, or your own `masque:close/1`) arrives as `normal`; other values include `peer_reset`, `peer_closed`, `goaway`, `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` and `{ssl_error, _}`. A failed handshake is only reported as the `{error, _}` returned by `bind_connect/3`; no `masque_closed` follows it.
 
+## Starting a listener
+
+| Result | Meaning |
+| --- | --- |
+| `{error, {unauthenticated_relay, Protocols}}` | The listener uses built-in relaying handlers for `Protocols` (`udp`, `tcp`, `ip`, `udp_bind`) on a non-loopback address with neither `authenticate` nor `public_relay => true`. See [public listeners](../2-use/server.md#public-listeners). |
+| `{error, {bad_option, authenticate}}` | `authenticate` is not a fun of arity 1. |
+
 ## Results of client calls
 
 ### `connect/3` and `bind_connect/3`

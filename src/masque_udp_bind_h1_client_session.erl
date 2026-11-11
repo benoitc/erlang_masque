@@ -779,7 +779,7 @@ deliver_bind_packet(
     Bytes,
     #data{mode = message, owner = Owner} = Data
 ) ->
-    masque_client_owner:send(Owner, {masque_bind_packet, self(), Peer, Bytes}),
+    masque_client_owner:send_datagram(Owner, {masque_bind_packet, self(), Peer, Bytes}),
     Data;
 deliver_bind_packet(
     Peer,

@@ -562,10 +562,7 @@ safe_apply(M, F, A) ->
         apply(M, F, A)
     catch
         Class:Reason:Stack ->
-            logger:error(
-                "masque tcp-h1 handler ~p:~p/~p failed: ~p:~p~n~p",
-                [M, F, length(A), Class, Reason, Stack]
-            ),
+            masque_crash_log:handler("tcp-h1", M, F, length(A), Class, Reason, Stack),
             {stop, {handler_crash, Reason}}
     end.
 

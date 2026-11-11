@@ -81,14 +81,12 @@ match_bad_port_test() ->
 %%====================================================================
 
 %% `expand/2' returns the path-and-query portion only, mirroring the
-%% existing `masque_uri:expand/2'. The template engine preserves a
-%% literal `*' on the wire (it is reserved-but-allowed in the
-%% existing `masque_uri_template' codebase, used by CONNECT-IP);
-%% callers that need the percent-encoded form supply it as
-%% `<<"%2A">>' explicitly.
+%% existing `masque_uri:expand/2'. The wildcard is percent-encoded as
+%% `%2A' (draft -16 section 2, RFC 6570 section 3.2.2); the proxy
+%% accepts a bare `*' too.
 expand_unscoped_test() ->
     Got = masque_uri_udp_bind:expand(?TPL, unscoped),
-    ?assertEqual(<<"/.well-known/masque/udp/*/*/">>, Got).
+    ?assertEqual(<<"/.well-known/masque/udp/%2A/%2A/">>, Got).
 
 expand_scoped_test() ->
     Got = masque_uri_udp_bind:expand(?TPL, {<<"192.0.2.6">>, 443}),

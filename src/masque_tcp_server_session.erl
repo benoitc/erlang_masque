@@ -28,6 +28,11 @@
 
 -define(DEFAULT_IDLE_MS, 300000).
 
+%% h2 receive credit is returned in steps of at least one full frame
+%% (`consume_bytes/3').
+-define(H2_MIN_CREDIT, 16384).
+-define(H2_CREDIT_KEY, {?MODULE, h2_credit}).
+
 -record(state, {
     conn :: pid(),
     stream_id :: non_neg_integer(),
@@ -52,6 +57,11 @@
     hold = false :: boolean(),
     %% Bytes whose credit the handler has yet to release.
     held = 0 :: non_neg_integer(),
+    %% Capsule mode: credit for capsule header bytes, returned with the
+    %% next payload credit rather than on its own. On h2 every `consume'
+    %% is a WINDOW_UPDATE, and a few header bytes back alone let a
+    %% blocked client send a few-byte DATA frame each time.
+    hdr_credit = 0 :: non_neg_integer(),
     %% `raw' bytes (older connect-tcp drafts) or `capsule' framing
     %% (draft-ietf-httpbis-connect-tcp-18), chosen by the request.
     framing = raw :: raw | capsule,
@@ -266,17 +276,37 @@ consume(Tag, Bytes, S) ->
 
 consume_bytes(_Tag, 0, _S) ->
     ok;
+%% h2 sends a WINDOW_UPDATE for every `consume'. Capsules do not line up
+%% with h2 frames, so credit would come back in few-byte pieces and a
+%% blocked client would answer each with a few-byte DATA frame (silly
+%% window). Credit is returned once a full frame's worth has built up;
+%% with the 64 KB default stream window the client always keeps room to
+%% go on meanwhile.
 consume_bytes(h2, N, #state{conn = C, stream_id = Sid}) ->
-    try
-        h2:consume(C, Sid, N)
-    catch
-        exit:_ -> ok
+    Pending = get_h2_credit() + N,
+    case Pending >= ?H2_MIN_CREDIT of
+        true ->
+            put(?H2_CREDIT_KEY, 0),
+            try
+                h2:consume(C, Sid, Pending)
+            catch
+                exit:_ -> ok
+            end;
+        false ->
+            put(?H2_CREDIT_KEY, Pending),
+            ok
     end;
 consume_bytes(quic_h3, N, #state{conn = C, stream_id = Sid}) ->
     try
         quic_h3:consume(C, Sid, N)
     catch
         exit:_ -> ok
+    end.
+
+get_h2_credit() ->
+    case get(?H2_CREDIT_KEY) of
+        undefined -> 0;
+        N -> N
     end.
 
 %%====================================================================
@@ -300,8 +330,8 @@ capsule_in(Tag, Bytes, Fin, #state{dec = Dec} = S) ->
             {stop, {bad_capsule, Reason}, S};
         {ok, Items, Dec2} ->
             Payload = lists:sum([byte_size(P) || {_, P} <- Items]),
-            _ = consume_tag(Tag, byte_size(Bytes) - Payload, S),
-            case capsule_items(Tag, Items, S#state{dec = Dec2}) of
+            S1 = header_credit(Tag, byte_size(Bytes) - Payload, Payload, S),
+            case capsule_items(Tag, Items, S1#state{dec = Dec2}) of
                 {noreply, #state{final_in = false} = S2} when Fin ->
                     {stop, peer_reset, S2};
                 {noreply, S2} when Fin ->
@@ -340,26 +370,36 @@ capsule_payload(Tag, Payload, S) ->
     Result = dispatch(handle_data, [Payload], count_in(Payload, S)),
     settle_credit(Tag, Payload, Result, S).
 
-consume_tag(none, _N, _S) -> ok;
-consume_tag(Tag, N, S) -> consume_bytes(Tag, N, S).
+%% Header bytes of a chunk wait for the payload credit of the same
+%% capsules; a chunk with no payload at all returns them at once.
+header_credit(none, _N, _Payload, S) ->
+    S;
+header_credit(Tag, N, 0, #state{hdr_credit = H} = S) ->
+    _ = consume_bytes(Tag, N + H, S),
+    S#state{hdr_credit = 0};
+header_credit(_Tag, N, _Payload, #state{hdr_credit = H} = S) ->
+    S#state{hdr_credit = H + N}.
 
 %% Credit goes back now, unless the handler keeps it until it has
 %% finished with the bytes.
 settle_credit(_Tag, Bytes, {noreply, #state{hold = true, held = Held} = S2}, _S) ->
     {noreply, S2#state{hold = false, held = Held + byte_size(Bytes)}};
+settle_credit(Tag, Bytes, {noreply, #state{hdr_credit = H} = S2}, S) ->
+    _ = consume_bytes(Tag, byte_size(Bytes) + H, S),
+    {noreply, S2#state{hdr_credit = 0}};
 settle_credit(Tag, Bytes, Result, S) ->
     _ = consume(Tag, Bytes, S),
     Result.
 
-release_credit(N, #state{held = Held, transport = T} = S) ->
+release_credit(N, #state{held = Held, transport = T, hdr_credit = H} = S) ->
     Release = min(N, Held),
     Tag =
         case T of
             h3 -> quic_h3;
             h2 -> h2
         end,
-    _ = consume_bytes(Tag, Release, S),
-    S#state{held = Held - Release}.
+    _ = consume_bytes(Tag, Release + H, S),
+    S#state{held = Held - Release, hdr_credit = 0}.
 
 handle_call(Request, From, State) ->
     masque_quiet:stop(handle_call_inner(Request, From, State)).
@@ -710,10 +750,7 @@ safe_apply(M, F, A) ->
         apply(M, F, A)
     catch
         Class:Reason:Stack ->
-            logger:error(
-                "masque tcp handler ~p:~p/~p failed: ~p:~p~n~p",
-                [M, F, length(A), Class, Reason, Stack]
-            ),
+            masque_crash_log:handler("tcp", M, F, length(A), Class, Reason, Stack),
             {stop, {handler_crash, Reason}}
     end.
 

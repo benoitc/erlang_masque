@@ -468,12 +468,11 @@ pct_encode_byte(B, _Ctx) when
     B =:= $~
 ->
     <<B>>;
-%% RFC 9484 uses `*` as the literal wildcard value for both
-%% `target' and `ipproto'; keep it unencoded in both path and
-%% query contexts. Every other reserved character follows RFC 6570
-%% Level-1 "simple string expansion" and is percent-encoded.
-pct_encode_byte($*, _Ctx) ->
-    <<"*">>;
+%% Every reserved character, the `*' wildcard included, follows RFC 6570
+%% Level-1 "simple string expansion" and is percent-encoded: RFC 9484
+%% erratum 8444 (CONNECT-IP `target' and `ipproto') and
+%% draft-ietf-masque-connect-udp-listen-16 section 2 (udp-bind
+%% `target_host' and `target_port') require the wildcard as `%2A'.
 pct_encode_byte(B, _Ctx) ->
     Hi = hex_digit(B bsr 4),
     Lo = hex_digit(B band 16#0F),

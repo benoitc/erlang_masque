@@ -2,7 +2,7 @@
 
 This page maps the specifications masque implements to the behaviour in the code and the module that owns it, and lists the places where masque deviates or adds its own policy. Use it when you review a change that touches the wire, when you check whether a requirement is covered, or when an interop peer disagrees with masque. It is a reference; read the table for the spec you care about. For the messages and reasons mentioned here, see [messages-and-errors](messages-and-errors.md). The compliance suites that pin these rows are listed in [testing](../3-change/testing.md).
 
-Open question: section numbers below come from the code comments and the earlier compliance map. Those sources are not always consistent with each other (for example RFC 9484 capsule rules are cited as both §4.6 and §4.7), so check a number against the RFC text before quoting it elsewhere.
+Section numbers in the RFC 9484 table were checked against the RFC's table of contents (November 2026). Section numbers in code comments are not always kept in step; quote the ones here.
 
 ## RFC 9298: Proxying UDP in HTTP
 
@@ -37,26 +37,28 @@ This table replaces the compliance map from the former `docs/connect_ip.md`. Eac
 
 | Section | Requirement | Behaviour in masque | Module |
 | --- | --- | --- | --- |
+| §4.6, erratum 8444 (verified) | A wildcard `target` or `ipproto` MUST be percent-encoded, sent as `%2A` | The client sends `%2A`; the proxy accepts `%2A` and also a bare `*` from older clients. | `masque_uri_template`, `masque_uri_ip` |
 | §3 | Absolute URI template with `target` and `ipproto` (path or query form) | The client requires an absolute template (`masque_uri_ip:parse_client_template/1`); the server matches path and query forms (`parse_server_template/1`). IP templates only allow `target` and `ipproto`. Prefix targets must be canonical (host bits zero). | `masque_uri_ip`, `masque_uri_template` |
-| §4 | Request carries `:protocol = connect-ip` and `capsule-protocol: ?1` | `connect/3` forces `capsule_protocol => true` for `protocol => ip` and refuses `false` (`{invalid_opts, capsule_protocol_required_for_ip}`). | `masque`, `masque_ip_client_session` |
-| §4 | 2xx carries `capsule-protocol: ?1`, no `content-length` / `content-type` | The client refuses other responses (`capsule_protocol_missing`, `malformed_response`). | `masque_ip_client_session`, `masque_ip_h1_client_session` |
-| HTTP/1.1 | Upgrade with `Upgrade: connect-ip` | Supported on h1, same checks as CONNECT-UDP. | `masque_h1_server`, `masque_ip_h1_*` |
-| scope | Proxy limits traffic to the requested `target` / `ipproto` | The default handler drops packets outside the scope (`scope_target`, `scope_ipproto`); a hostname target only reaches its advertised routes; a prefix target drops non-public destinations unless `allow_private`. | `masque_ip_proxy_handler`, `masque_ip_packet` |
-| ADDRESS_ASSIGN | Non-zero Request ID answers a prior ADDRESS_REQUEST; ID 0 is unprompted | Both sides track pending ids. The client's `assign_addresses/2` returns `{no_such_pending_request, Id}`; on the server an `{assign, Entries}` action containing an unmatched id is skipped as a whole. | `masque_ip_client_session`, `masque_ip_server_session`, `masque_ip_h1_server_session` |
-| ADDRESS_ASSIGN | Hostname targets are resolved before the 2xx and advertised | All three listeners run the `resolver` through `masque_ip:resolve_target/3` before `accept/1`; the result is in `resolved_addresses` and the default handler advertises it. | `masque_ip`, listeners |
-| ADDRESS_REQUEST | At least one entry; Request IDs non-zero and unique per sender | Enforced on encode and decode (`empty_address_request`, `duplicate_request_id`). | `masque_ip_capsule` |
-| ADDRESS_REQUEST | Proxy answers requests it cannot satisfy | With no pool, or when the pool is exhausted, entries are answered with the all-zero "reject" assignment. | `masque_ip`, `masque_ip_proxy_handler` |
-| ROUTE_ADVERTISEMENT | Ordered by (version, protocol, start); disjoint within (version, protocol); protocol-0 ranges do not overlap other protocols; start <= end | All four checks in `validate_routes_result/1`. | `masque_ip_capsule` |
-| §5 / §8.2 | Both endpoints may send every capsule | Client API: `request_addresses/2`, `assign_addresses/2`, `advertise_routes/2`. Server actions: `{request_addresses, _}`, `{assign, _}`, `{advertise, _}`. | `masque`, IP sessions |
-| §6 | Datagram payload: context id 0 is a full IP packet; unknown contexts dropped | As stated, on every transport. | `masque_datagram`, IP sessions |
-| MTU | The tunnel must carry 1280-byte IPv6 packets | On h3 the client aborts the handshake with `{mtu_too_low, Got, 1280}` if the datagram size is too small. h2 and h1 carry datagrams in capsules and are not checked. | `masque_ip_client_session` |
-| forwarding | Router duties: decrement TTL / Hop Limit, report errors with ICMP | The default handler decrements, answers Time Exceeded, and Packet Too Big / Fragmentation Needed above `mtu` (default 1500). No ICMP error is sent in reply to an ICMP error. ICMP payloads are truncated to 548 bytes (v4) and 1232 bytes (v6). | `masque_ip_proxy_handler`, `masque_ip_packet`, `masque_icmp` |
-| security | Drop packets with spoofed source addresses | The default handler drops packets whose source is outside the assigned prefixes, and every packet before an assignment unless `allow_private` (`bcp38` drop counter). | `masque_ip_proxy_handler` |
-| errors | Malformed capsule is a stream error; rejections carry Proxy-Status | Reset with `H3_MESSAGE_ERROR` / `PROTOCOL_ERROR`; see RFC 9209 below. | IP sessions, listeners |
+| §4.2, §4.4 | Request carries `:protocol = connect-ip` and `capsule-protocol: ?1` | `connect/3` forces `capsule_protocol => true` for `protocol => ip` and refuses `false` (`{invalid_opts, capsule_protocol_required_for_ip}`). | `masque`, `masque_ip_client_session` |
+| §4.3, §4.5 | 2xx carries `capsule-protocol: ?1`, no `content-length` / `content-type` | The client refuses other responses (`capsule_protocol_missing`, `malformed_response`). | `masque_ip_client_session`, `masque_ip_h1_client_session` |
+| §4.2 | Upgrade with `Upgrade: connect-ip` | Supported on h1, same checks as CONNECT-UDP. | `masque_h1_server`, `masque_ip_h1_*` |
+| §4.6 | Proxy limits traffic to the requested `target` / `ipproto` | The default handler drops packets outside the scope (`scope_target`, `scope_ipproto`); a hostname target only reaches its advertised routes; a prefix target drops non-public destinations unless `allow_private`. | `masque_ip_proxy_handler`, `masque_ip_packet` |
+| §4.7.1 | Non-zero Request ID answers a prior ADDRESS_REQUEST; ID 0 is unprompted | Both sides track pending ids. The client's `assign_addresses/2` returns `{no_such_pending_request, Id}`; on the server an `{assign, Entries}` action containing an unmatched id is skipped as a whole. | `masque_ip_client_session`, `masque_ip_server_session`, `masque_ip_h1_server_session` |
+| §4.7.1 | Hostname targets are resolved before the 2xx and advertised | All three listeners run the `resolver` through `masque_ip:resolve_target/3` before `accept/1`; the result is in `resolved_addresses` and the default handler advertises it. | `masque_ip`, listeners |
+| §4.7.2 | At least one entry; Request IDs non-zero and unique per sender | Enforced on encode and decode (`empty_address_request`, `duplicate_request_id`). | `masque_ip_capsule` |
+| §4.7.2 | Proxy answers requests it cannot satisfy | With no pool, or when the pool is exhausted, entries are answered with the all-zero "reject" assignment. | `masque_ip`, `masque_ip_proxy_handler` |
+| §4.7.3 | Ordered by (version, protocol, start); disjoint within (version, protocol); protocol-0 ranges do not overlap other protocols; start <= end | All four checks in `validate_routes_result/1`. | `masque_ip_capsule` |
+| §4.7 (example in §8.2) | Both endpoints may send every capsule | Client API: `request_addresses/2`, `assign_addresses/2`, `advertise_routes/2`. Server actions: `{request_addresses, _}`, `{assign, _}`, `{advertise, _}`. | `masque`, IP sessions |
+| §5, §6 | Datagram payload: context id 0 is a full IP packet; unknown contexts dropped | As stated, on every transport. | `masque_datagram`, IP sessions |
+| §10.1 | The tunnel must carry 1280-byte IPv6 packets | On h3 the client aborts the handshake with `{mtu_too_low, Got, 1280}` if the datagram size is too small. h2 and h1 carry datagrams in capsules and are not checked. | `masque_ip_client_session` |
+| §7 | Router duties: decrement TTL / Hop Limit, report errors with ICMP | The default handler decrements, answers Time Exceeded, and Packet Too Big / Fragmentation Needed above `mtu` (default 1500). No ICMP error is sent in reply to an ICMP error. ICMP payloads are truncated to 548 bytes (v4) and 1232 bytes (v6). | `masque_ip_proxy_handler`, `masque_ip_packet`, `masque_icmp` |
+| §11 | Drop packets with spoofed source addresses | The default handler drops packets whose source is outside the assigned prefixes, and every packet before an assignment unless `allow_private` (`bcp38` drop counter). | `masque_ip_proxy_handler` |
+| §4.7 | Malformed capsule is a stream error; rejections carry Proxy-Status | Reset with `H3_MESSAGE_ERROR` / `PROTOCOL_ERROR`; see RFC 9209 below. | IP sessions, listeners |
 
 Deviations and additions:
 - `'*'` and private targets are refused with 403 unless the listener sets `allow_private` (local policy, not required by the RFC).
-- The h2/h3 server session keeps at most 64 unanswered ADDRESS_REQUEST ids per session and rejects the rest at once. The h1 server session has no such bound.
+- Every server session (h3, h2 and h1) keeps at most 64 unanswered ADDRESS_REQUEST ids per session and rejects the rest at once.
+- The proxy accepts a bare `*` wildcard as well as `%2A` (erratum 8444 makes the bare form invalid), so clients written before the erratum keep working. The client sends `%2A`.
 - The default handler forwards accepted packets to a user `forward_fun`; without one, packets are dropped. The RFC leaves the data plane to the implementation.
 
 ## RFC 9209: The Proxy-Status HTTP response header
@@ -140,7 +142,7 @@ masque implements draft -16 (August 2026, submitted for publication). Codes, hea
 | Requirement | Behaviour in masque | Module |
 | --- | --- | --- |
 | §6: `Connect-UDP-Bind: ?1` (RFC 9651 Boolean) on request and response enables the extension | Listeners only look at the header with `accept_bind => true`; an invalid value is treated as absent and the request stays plain CONNECT-UDP. Unknown parameters are ignored (`?1;x` enables it); a field sent more than once, or a list, is ignored. The client refuses a 2xx without it (`missing_bind_response_header`). | `masque_uri_udp_bind`, listeners, udp-bind client sessions |
-| §2: same URI template as CONNECT-UDP; `*` for an unscoped bind; only one `*` is malformed (4xx, SHOULD be 400) | The bind matcher accepts `%2A` for both host and port; one alone gets 400. The plain CONNECT-UDP matcher still refuses `*`. | `masque_uri_udp_bind` |
+| §2: same URI template as CONNECT-UDP; `*` for an unscoped bind, percent-encoded as `%2A`; only one `*` is malformed (4xx, SHOULD be 400) | The client sends `%2A` for both; the bind matcher accepts `%2A` (and a bare `*`) for both host and port; one alone gets 400. The plain CONNECT-UDP matcher still refuses `*`. | `masque_uri_udp_bind`, `masque_uri_template` |
 | `Proxy-Public-Address` on the response (list of `"ip:port"` strings) | The default handler sets it from `public_addresses`, `public_address_fun` or the bound socket address, and refuses a wildcard bind without one. The client refuses a 2xx without it (`missing_proxy_public_address`). | `masque_udp_bind_proxy_handler`, `masque_uri_udp_bind` |
 | Payload formats (sections 4 and 5): compressed = UDP payload only; uncompressed = family, address, port, payload | As stated. | `masque_udp_bind_payload` |
 | §3: context id 0 | Scoped bind: raw UDP to the scoped peer, as in RFC 9298. Unscoped bind: the request stream is aborted (`context_zero_datagram`), on the proxy and on the client. | udp-bind sessions |

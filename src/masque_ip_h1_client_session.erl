@@ -819,7 +819,7 @@ handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
     end.
 
 deliver_packet(Pkt, #data{mode = message, owner = Owner} = Data) ->
-    masque_client_owner:send(Owner, {masque_ip_packet, self(), Pkt}),
+    masque_client_owner:send_datagram(Owner, {masque_ip_packet, self(), Pkt}),
     Data;
 deliver_packet(
     Pkt,
