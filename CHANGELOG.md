@@ -75,6 +75,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- CONNECT-TCP over HTTP/2 in capsule framing moved data far more slowly
+  than it should (a large upload took minutes instead of under a second):
+  the proxy returned flow-control credit in pieces of a few bytes, so the
+  client sent few-byte frames. Credit now goes back a full frame at a time.
 - A client that stopped reading could make its session hold every datagram
   the proxy sent until memory ran out. In message mode, datagrams are now
   dropped and counted while the owner has 10 000 messages waiting.
