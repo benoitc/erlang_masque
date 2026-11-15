@@ -323,3 +323,86 @@ listener_token_scopes_loop_test() ->
         handler_opts => #{via_token => Token}
     },
     ?assertEqual(accept, ?M:accept(Other)).
+
+%%====================================================================
+%% CONNECT-TCP: bytes the upstream refuses
+%%====================================================================
+
+%% An h3 upstream reports room with `masque_send_ready': the handler
+%% waits for it instead of polling.
+tcp_h3_full_waits_for_send_ready_test() ->
+    Up = scripted_upstream([{error, send_queue_full}, ok]),
+    S = ?M:test_state(Up, tcp),
+    {ok, S1, [hold_credit]} = ?M:handle_data(<<"abc">>, S),
+    ?assertEqual(none, next_timer(chain_retry, 100)),
+    ?assertMatch({ok, _, [{release_credit, 3}]}, ?M:handle_info({masque_send_ready, Up}, S1)),
+    exit(Up, kill).
+
+%% An h2 upstream has no ready event: retries back off.
+tcp_h2_full_retries_back_off_test() ->
+    Up = scripted_upstream(lists:duplicate(1000, {error, send_buffer_full})),
+    S = ?M:test_state(Up, tcp),
+    {ok, S1, [hold_credit]} = ?M:handle_data(<<"abc">>, S),
+    End = erlang:monotonic_time(millisecond) + 500,
+    N = count_retries(S1, End, 0),
+    %% 5, 10, 20, 40, 80, 160 ms...: a handful, not one every 5 ms.
+    ?assert(N >= 3),
+    ?assert(N =< 8),
+    exit(Up, kill).
+
+%% An upstream that takes nothing for the send timeout ends the tunnel.
+tcp_full_upstream_hits_deadline_test() ->
+    application:set_env(masque, stream_send_timeout_ms, 100),
+    try
+        Up = scripted_upstream([{error, send_queue_full}]),
+        S = ?M:test_state(Up, tcp),
+        {ok, S1, [hold_credit]} = ?M:handle_data(<<"abc">>, S),
+        {deadline, _} = next_timer(chain_deadline, 1000),
+        ?assertMatch(
+            {stop, {upstream_send_failed, send_timeout}, _},
+            ?M:handle_info({masque_timer, chain_deadline}, S1)
+        ),
+        exit(Up, kill)
+    after
+        application:unset_env(masque, stream_send_timeout_ms)
+    end.
+
+%% Answers each `send' call with the next scripted reply (the last one
+%% repeats).
+scripted_upstream(Replies) ->
+    spawn(fun() -> scripted(Replies) end).
+
+scripted([R | Rest]) ->
+    receive
+        {'$gen_call', From, {send, _}} ->
+            gen:reply(From, R),
+            scripted(
+                case Rest of
+                    [] -> [R];
+                    _ -> Rest
+                end
+            );
+        {'$gen_call', From, _} ->
+            gen:reply(From, ok),
+            scripted([R | Rest])
+    end.
+
+next_timer(chain_retry, Ms) ->
+    receive
+        {masque_timer, chain_retry} -> retry
+    after Ms -> none
+    end;
+next_timer(chain_deadline, Ms) ->
+    receive
+        {masque_timer, chain_deadline} -> {deadline, ok}
+    after Ms -> none
+    end.
+
+count_retries(S, End, N) ->
+    Left = max(0, End - erlang:monotonic_time(millisecond)),
+    receive
+        {masque_timer, chain_retry} ->
+            {ok, S1, _} = ?M:handle_info({masque_timer, chain_retry}, S),
+            count_retries(S1, End, N + 1)
+    after Left -> N
+    end.

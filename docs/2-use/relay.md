@@ -58,6 +58,8 @@ The chain handler relays UDP, TCP (half-close included) and IP (see [connect-ip]
 
 ## Loop detection
 
+A CONNECT-TCP chain hop never drops bytes. What the egress refuses waits on the ingress with its flow-control credit held, so the client slows down. An h3 egress tells the hop when it has room; an h2 egress is retried, backing off from 5 ms to 200 ms. An egress that takes nothing for `stream_send_timeout_ms` (application env, default 30 s) ends the tunnel with `{upstream_send_failed, send_timeout}`. In the other direction the ingress reads from the egress only while it keeps up writing to the client.
+
 Each chain hop appends `1.1 <via_token>` to the `via` header of its upstream request and refuses a request whose `via` already contains its own token with 508 and `proxy-status: masque; error=proxy_loop_detected`. An upstream 508 is passed back to the client as 508. The chain listeners create one token per listener; pass the same `via_token` to the h3, h2 and h1 listeners of one ingress so they count as one hop. Without any `via_token`, the node-wide `masque_chain_handler:node_token/0` is used.
 
 ## Authentication on the ingress

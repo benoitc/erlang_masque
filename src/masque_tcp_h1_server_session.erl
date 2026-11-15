@@ -57,7 +57,11 @@
     %% Capsule mode: FINAL_DATA received and sent. Capsules carry the FIN,
     %% so unlike raw mode each direction can end on its own.
     final_in = false :: boolean(),
-    fin_sent = false :: boolean()
+    fin_sent = false :: boolean(),
+    %% Writes of handler calls (`masque_session_writer') and, per call,
+    %% whether they end the stream and the actions to run after them.
+    writer :: pid() | undefined,
+    writes = #{} :: #{reference() => {boolean(), [term()]}}
 }).
 
 %%====================================================================
@@ -226,11 +230,12 @@ handle_call_inner(Req, From, #state{handler = Handler, h_state = HS} = S) ->
                 {reply, Reply, HS2} ->
                     {reply, Reply, S#state{h_state = HS2}};
                 {reply, Reply, HS2, Actions} ->
-                    case do_actions(Actions, S#state{h_state = HS2}) of
-                        {ok, S2} -> {reply, Reply, S2};
-                        %% The actions ended the stream cleanly.
-                        {stop, normal, S2} -> {stop, normal, Reply, S2};
-                        {stop, Reason, S2} -> {stop, Reason, {error, closed}, S2}
+                    case split_writes(Actions) of
+                        {[], _} ->
+                            call_actions(Reply, Actions, S#state{h_state = HS2});
+                        {Writes, Rest} ->
+                            {noreply,
+                                write_async(From, Reply, Writes, Rest, S#state{h_state = HS2})}
                     end;
                 {stop, Reason, Reply, HS2} ->
                     {stop, Reason, Reply, S#state{h_state = HS2}};
@@ -240,6 +245,78 @@ handle_call_inner(Req, From, #state{handler = Handler, h_state = HS} = S) ->
     end;
 handle_call_inner(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
+
+call_actions(Reply, Actions, S) ->
+    case do_actions(Actions, S) of
+        {ok, S2} -> {reply, Reply, S2};
+        %% The actions ended the stream cleanly.
+        {stop, normal, S2} -> {stop, normal, Reply, S2};
+        {stop, Reason, S2} -> {stop, Reason, {error, closed}, S2}
+    end.
+
+%% The writes a handler call starts with go to the writer (see
+%% `masque_session_writer'), so the session keeps reading while they
+%% wait for the transport; the caller gets its reply once they landed.
+split_writes(Actions) ->
+    lists:splitwith(
+        fun
+            ({send_data, _}) -> true;
+            ({send_data, _, _}) -> true;
+            (_) -> false
+        end,
+        Actions
+    ).
+
+write_async(From, Reply, Writes, Rest, #state{writes = Pending} = S) ->
+    S1 = ensure_writer(S),
+    Items = [write_item(W) || W <- Writes],
+    lists:foreach(fun({Bytes, _}) -> ok = count_out(Bytes, S1) end, Items),
+    Ref = make_ref(),
+    Fin = lists:any(fun({_, F}) -> F end, Items),
+    ok = masque_session_writer:write(S1#state.writer, Ref, From, Reply, Items),
+    S1#state{writes = Pending#{Ref => {Fin, Rest}}}.
+
+write_item({send_data, Bytes}) -> {Bytes, false};
+write_item({send_data, Bytes, Fin}) -> {Bytes, Fin}.
+
+%% The writer's result for a handler call: run the call's other actions.
+writer_done(Ref, Result, #state{writes = Pending} = S) ->
+    case maps:take(Ref, Pending) of
+        error ->
+            {noreply, S};
+        {{_Fin, _Rest}, Pending2} when Result =/= ok ->
+            {error, Reason} = Result,
+            {stop, {tunnel_send_failed, Reason}, S#state{writes = Pending2}};
+        {{Fin, Rest}, Pending2} ->
+            after_write(Fin, Rest, S#state{writes = Pending2})
+    end.
+
+%% As `do_actions/2' after a `send_data' with `Fin': OTP `ssl' cannot
+%% half-close, so a FIN in raw framing ends the tunnel.
+after_write(true, _Rest, #state{framing = capsule, final_in = true} = S) ->
+    {stop, normal, S#state{fin_sent = true}};
+after_write(true, Rest, #state{framing = capsule} = S) ->
+    run_rest(Rest, S#state{fin_sent = true});
+after_write(true, _Rest, S) ->
+    {stop, normal, S};
+after_write(false, Rest, S) ->
+    run_rest(Rest, S).
+
+run_rest(Rest, S) ->
+    case do_actions(Rest, S) of
+        {ok, S2} -> {noreply, S2};
+        {stop, Reason, S2} -> {stop, Reason, S2}
+    end.
+
+ensure_writer(#state{writer = undefined} = S) ->
+    Write =
+        case S#state.framing of
+            capsule -> fun(Bytes, Fin) -> proxy_send(S, frame(S, Bytes, Fin)) end;
+            _ -> fun(Bytes, _Fin) -> proxy_send(S, Bytes) end
+        end,
+    S#state{writer = masque_session_writer:start_link(Write)};
+ensure_writer(S) ->
+    S.
 
 handle_cast(Msg, State) ->
     masque_quiet:stop(handle_cast_inner(Msg, State)).
@@ -253,6 +330,8 @@ handle_cast_inner(_Msg, S) ->
 handle_info(Msg, State) ->
     masque_quiet:stop(handle_info_inner(Msg, State)).
 
+handle_info_inner({masque_writer_done, Ref, Result}, S) ->
+    writer_done(Ref, Result, S);
 handle_info_inner({ssl, Sock, Bytes}, #state{socket = Sock} = S) ->
     handle_proxy_bytes(Bytes, arm_idle(S));
 handle_info_inner({tcp, Sock, Bytes}, #state{socket = Sock} = S) ->
@@ -273,6 +352,10 @@ handle_info_inner({tcp_error, Sock, Reason}, #state{socket = Sock} = S) ->
 handle_info_inner({'EXIT', _Pid, _Reason}, S) ->
     {noreply, S};
 %% Target-side traffic counts for the idle timer too.
+%% A handler's own timer (`{masque_timer, _}') is not traffic: a retry
+%% that gets nowhere must not keep the tunnel from idling out.
+handle_info_inner({masque_timer, _} = Msg, S) ->
+    dispatch(handle_info, [Msg], S);
 handle_info_inner(Msg, S) ->
     dispatch(handle_info, [Msg], arm_idle(S)).
 
@@ -281,6 +364,9 @@ terminate(Reason, State) ->
 
 terminate_inner(_Reason, {starting, Args}) ->
     masque_session_start:abandon(Args);
+terminate_inner(Reason, #state{writer = W} = S) when is_pid(W) ->
+    ok = masque_session_writer:stop(W),
+    terminate_inner(Reason, S#state{writer = undefined});
 terminate_inner(
     Reason,
     #state{

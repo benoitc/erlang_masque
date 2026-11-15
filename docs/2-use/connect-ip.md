@@ -117,6 +117,8 @@ handler_opts => #{address_pool => [{4, {10,200,0,0}, 16}, {6, {16#2001,16#db8,0,
                   min_assignable_prefix => #{4 => 32, 6 => 64}}
 ```
 
+Each ADDRESS_ASSIGN the handler sends is the full set the client holds (RFC 9484 section 4.7.1): the entries answering this request, under their request ids, then every address assigned earlier, with request id 0. Asking for IPv6 after IPv4 gives back both, so treat each `masque_address_assign` as the new complete list.
+
 Assignments are registered in `masque_ip_session_registry`, which also keeps sessions that share a pool from getting the same block. An exhausted pool answers with the RFC 9484 "no address" entry, and so does a pool where no free block turns up within a bounded number of probes. A tunnel holds at most `max_assignments` blocks per version (1 by default), so one client cannot drain a shared pool. The server session keeps at most 64 unanswered request ids per tunnel on every transport; extra requests are answered with "no address" at once.
 
 ### Target scoping

@@ -68,6 +68,7 @@ When `transports` lists more than one transport, the session first belongs to a 
 | `{ssl_error, Reason}` | TLS socket error on the upgraded h1 connection. | h1 |
 | `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` | The proxy sent a bad capsule, ended the stream mid-capsule, or a capsule larger than `max_capsule_size` (default 65536). The session resets the stream. | UDP and IP on h2/h3 |
 | `{bad_capsule, data_after_final}`, `{bad_capsule, truncated_capsule}` | CONNECT-TCP in capsule framing: the proxy sent `DATA` or `FINAL_DATA` after `FINAL_DATA`, or ended the stream inside a capsule. The tunnel is aborted. | TCP, all |
+| `udp_payload_too_large` | The proxy sent a context-zero UDP payload over 65527 bytes (RFC 9298 section 5). The session aborts the stream. | UDP, all |
 
 udp-bind sessions report differently: they send `{masque_closed, Sess, Reason}` from `terminate/3` whenever they stop in `message` mode, with the process exit reason. A clean end (the proxy's FIN, or your own `masque:close/1`) arrives as `normal`; other values include `peer_reset`, `peer_closed`, `goaway`, `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` and `{ssl_error, _}`. A failed handshake is only reported as the `{error, _}` returned by `bind_connect/3`; no `masque_closed` follows it.
 
@@ -144,7 +145,7 @@ When several transports race, the reason you get is the last attempt's reason, n
 | Call | Result | Meaning |
 | --- | --- | --- |
 | `send/2,3` | `{error, {payload_too_large, Size, 65527}}` | UDP payload above the RFC 9298 limit |
-| `send/2,3` | `{error, {datagram_too_large, Size, Max}}` | h3: payload does not fit the negotiated datagram size |
+| `send/2,3` | `{error, {datagram_too_large, Size, Max}}` | h3: payload does not fit a datagram on the path now (the peer's limit, or the confirmed path MTU when that is smaller) |
 | `send/2` | `{error, write_closed}` | CONNECT-TCP after `shutdown_write/1` |
 | `send_ip_packet/2` | `{error, {packet_too_large, Size, Mtu}}` | packet larger than the session `mtu` |
 | `request_addresses/2`, `assign_addresses/2` | `{error, bad_prefix}`, `{error, {bad_prefix_length, P, V}}` | malformed prefix |
@@ -216,6 +217,7 @@ None of them is a crash, so the process exits with `{shutdown, {masque_quiet, Re
 | `router_gone` | the h3 router died |
 | `peer_reset`, `peer_closed` | the client reset the stream or closed the connection |
 | `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` | bad capsule from the client; the stream was reset (`H3_MESSAGE_ERROR` on h3, `PROTOCOL_ERROR` on h2) before stopping |
+| `udp_payload_too_large` | CONNECT-UDP: the client sent a context-zero payload over 65527 bytes (RFC 9298 section 5); the stream was reset (`H3_DATAGRAM_ERROR` on h3, `PROTOCOL_ERROR` on h2, the connection closed on h1) |
 | `{bad_capsule, data_after_final}`, `{bad_capsule, truncated_capsule}` | CONNECT-TCP in capsule framing: the client sent `DATA` or `FINAL_DATA` after `FINAL_DATA`, or ended the stream inside a capsule. The stream is reset (`H3_CONNECT_ERROR`, `CONNECT_ERROR`, or on h1 the connection closed without `FINAL_DATA`) and the target gets an RST |
 | `stream_dead` | h3: the 2xx or the stream claim failed during finalize |
 | `idle_timeout` | no traffic in either direction for `idle_timeout_ms` in `handler_opts` (default 300000), every transport |
@@ -238,7 +240,7 @@ Reasons used by the built-in handlers:
 | `masque_udp_proxy_handler` | `{resolution_failed, private_address}`, `{resolution_failed, {resolve, R}}`, `{resolution_failed, {connect, R}}`, `{resolution_failed, {udp_open, R}}` (from `init/2`); `{target_socket_lost, R}`, `{target_socket_error, R}`, `target_socket_closed` |
 | `masque_tcp_proxy_handler` | `{resolution_failed, private_address}`, `{resolution_failed, {resolve, R}}`, `{resolution_failed, {tcp_connect, R}}` (from `init/2`, all 502); in capsule framing a policy refusal is `{reject, forbidden}` (403) and a connect timeout `{reject, upstream_timeout}` (504) instead; `target_closed`, `{target_error, R}`, `eof_timeout` (a half-closed tunnel idle for 30 s) |
 | `masque_udp_bind_proxy_handler` | `{udp_open, R}` (from `init/2`); `{bind_socket_error, R}`, `bind_socket_closed` |
-| `masque_chain_handler` | `{resolution_failed, {upstream, R}}` or `{reject, loop_detected}` (from `init/2`); `upstream_closed` |
+| `masque_chain_handler` | `{resolution_failed, {upstream, R}}` or `{reject, loop_detected}` (from `init/2`); `upstream_closed`; `{upstream_send_failed, send_timeout}` (CONNECT-TCP: the upstream took none of the waiting bytes for `stream_send_timeout_ms`, default 30 s), `{upstream_send_failed, R}` (a write to the upstream failed) |
 | `masque_reverse_accept_handler`, `masque_reverse_accept_udp_handler` | `{reject, unknown_request}` (from `init/2`, 404); `requester_gone` (the process that requested the connection died) |
 
 Connect-UDP-Bind sessions also end with `context_zero_datagram` (a datagram on context 0 of an unscoped bind, which aborts the stream) and `{control_send_failed, R}` (a compression capsule that could not be written within 30 s; the capsules after it are not written). Client sessions report them in `{masque_closed, Sess, Reason}`.

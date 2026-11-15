@@ -21,9 +21,14 @@ send_data(Conn, StreamId, Data, Fin) ->
     guard(fun() -> quic_h3:send_data(Conn, StreamId, Data, Fin) end, {error, closed}).
 
 %% 0 means "no limit known", as `quic_h3' reports when datagrams are off.
+%% Since quic 3.0 the size is what fits the confirmed path MTU now, and a
+%% connection that is gone answers `{error, closed}'.
 -spec max_datagram_size(pid(), non_neg_integer()) -> non_neg_integer().
 max_datagram_size(Conn, StreamId) ->
-    guard(fun() -> quic_h3:max_datagram_size(Conn, StreamId) end, 0).
+    case guard(fun() -> quic_h3:max_datagram_size(Conn, StreamId) end, 0) of
+        N when is_integer(N), N >= 0 -> N;
+        _ -> 0
+    end.
 
 -spec h2_send_data(pid(), non_neg_integer(), iodata(), boolean()) -> ok | {error, term()}.
 h2_send_data(Conn, StreamId, Data, Fin) ->

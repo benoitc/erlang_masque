@@ -59,7 +59,7 @@
     %% Dial error parked in the `failed' state.
     failure :: term(),
     mode :: message | queue,
-    rx_buf = queue:new() :: queue:queue(binary()),
+    rx_buf = masque_client_rx:new() :: masque_client_rx:buf(),
     rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
     %% Bound on `rx_buf' (`rx_queue_limit') and datagrams dropped past it.
     rx_limit = ?MASQUE_DEFAULT_RX_QUEUE_LIMIT :: pos_integer(),
@@ -505,21 +505,22 @@ send_out(#data{socket = Socket}, Ctx, Payload) when
 drain_capsules(Buf, #data{socket = Socket} = Data) ->
     case h1_capsule:decode(Buf) of
         {ok, {Type, Inner}, Rest} ->
-            Data2 = deliver_capsule(Type, Inner, Data),
-            drain_capsules(Rest, Data2#data{cap_buf = <<>>});
+            case deliver_capsule(Type, Inner, Data) of
+                {abort, Reason} -> abort(Reason, Data);
+                Data2 -> drain_capsules(Rest, Data2#data{cap_buf = <<>>})
+            end;
         {more, _} ->
             _ = setopts_active_once(Socket),
             {keep_state, Data#data{cap_buf = Buf}}
     end.
 
+%% RFC 9298 section 5: a context-zero payload over 65527 bytes aborts
+%% the stream; an unknown context is dropped.
 deliver_capsule(datagram, Inner, Data) ->
-    case masque_datagram:decode(Inner) of
-        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} when
-            byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD
-        ->
-            deliver_packet(UdpBytes, Data);
-        _ ->
-            Data
+    case masque_datagram:udp_payload(Inner) of
+        {ok, UdpBytes} -> deliver_packet(UdpBytes, Data);
+        too_large -> {abort, udp_payload_too_large};
+        drop -> Data
     end;
 deliver_capsule(Type, Inner, #data{owner = Owner} = Data) when
     is_integer(Type)
@@ -582,7 +583,7 @@ ci_eq(A, B) ->
 %%====================================================================
 
 handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
-    case queue:out(Buf) of
+    case masque_client_rx:out(Buf) of
         {{value, Bytes}, Buf2} ->
             {keep_state, Data#data{rx_buf = Buf2}, [{reply, From, {ok, Bytes}}]};
         {empty, _} ->
@@ -611,7 +612,7 @@ deliver_packet(
             Data#data{rx_waiters = Ws2};
         {empty, _} ->
             case masque_client_rx:is_full(Buf, Data#data.rx_limit) of
-                false -> Data#data{rx_buf = queue:in(UdpBytes, Buf)};
+                false -> Data#data{rx_buf = masque_client_rx:in(UdpBytes, Buf)};
                 true -> Data#data{rx_dropped = Data#data.rx_dropped + 1}
             end
     end.

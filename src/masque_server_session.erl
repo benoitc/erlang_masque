@@ -237,6 +237,10 @@ handle_info_inner({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idl
         expired -> {stop, idle_timeout, S};
         {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
     end;
+%% A handler's own timer (`{masque_timer, _}') is not traffic: a retry
+%% that gets nowhere must not keep the tunnel from idling out.
+handle_info_inner({masque_timer, _} = Msg, S) ->
+    handle_traffic(Msg, S);
 handle_info_inner(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
     handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
 handle_info_inner(Msg, S) ->
@@ -250,18 +254,15 @@ handle_traffic(
         byte_size(Payload),
         #{protocol => udp, transport => h3}
     ),
-    case masque_datagram:decode(Payload) of
-        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} when
-            byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD
-        ->
+    case masque_datagram:udp_payload(Payload) of
+        {ok, UdpBytes} ->
             dispatch(handle_packet, [UdpBytes], S);
-        {ok, {?MASQUE_CONTEXT_ID_UDP, _}} ->
-            %% Oversized UDP payload — RFC 9298 §5 says drop.
-            {noreply, S};
-        {ok, {_Ctx, _Bytes}} ->
-            %% Unknown context-id: RFC 9298 §5 says silently drop.
-            {noreply, S};
-        {error, _} ->
+        too_large ->
+            %% RFC 9298 section 5: a context-zero payload over 65527
+            %% bytes aborts the stream.
+            reset_and_stop(udp_payload_too_large, ?MASQUE_H3_DATAGRAM_ERROR, S);
+        drop ->
+            %% Unknown context-id: RFC 9298 section 5 says silently drop.
             {noreply, S}
     end;
 handle_traffic(
@@ -553,10 +554,13 @@ capsule_event(0, Value, #state{stream_id = StreamId} = S) ->
 capsule_event(Type, Value, S) ->
     dispatch(handle_capsule, [Type, Value], S).
 
-reset_and_stop(Reason, #state{conn = Conn, stream_id = StreamId} = S) ->
+reset_and_stop(Reason, S) ->
+    reset_and_stop(Reason, ?MASQUE_H3_MESSAGE_ERROR, S).
+
+reset_and_stop(Reason, Code, #state{conn = Conn, stream_id = StreamId} = S) ->
     _ =
         (try
-            quic_h3:cancel(Conn, StreamId, ?MASQUE_H3_MESSAGE_ERROR)
+            quic_h3:cancel(Conn, StreamId, Code)
         catch
             _:_ -> ok
         end),

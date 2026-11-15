@@ -82,6 +82,7 @@ Clients that race transports reconnect to whichever instance your DNS or load ba
 | udp-bind peers | Only public peers. | `allow_loopback`, `allow_private`, `peer_filter_fun` |
 | Capsule size | 64 KiB per capsule. | `max_capsule_size` |
 | Client queue | 1000 items. | `rx_queue_limit` |
+| CONNECT-TCP owner backlog | The client stops reading from the proxy while 64 messages wait in the owner's mailbox. | `rx_backlog` |
 | Tunnels per connection | 100 on h3 and h2 (h1 carries one). | `max_tunnels_per_connection` |
 | Idle tunnel | Ends after 5 minutes without traffic in either direction, on every transport. | `idle_timeout_ms` |
 | CONNECT-TCP target writes | A target that stops reading ends the tunnel after 30 s; the client is flow-controlled meanwhile (h3 and h2). | - |

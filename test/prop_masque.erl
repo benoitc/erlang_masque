@@ -59,6 +59,30 @@ prop_capsule_roundtrip() ->
     ).
 
 %%====================================================================
+%% Counted receive buffer matches a plain queue
+%%====================================================================
+
+prop_client_rx_counts() ->
+    ?FORALL(
+        Ops,
+        list(oneof([{in, integer()}, out])),
+        begin
+            {Buf, Q} = lists:foldl(fun rx_op/2, {masque_client_rx:new(), queue:new()}, Ops),
+            masque_client_rx:len(Buf) =:= queue:len(Q) andalso
+                masque_client_rx:is_full(Buf, max(1, queue:len(Q))) =:=
+                    (queue:len(Q) >= max(1, queue:len(Q)))
+        end
+    ).
+
+rx_op({in, X}, {Buf, Q}) ->
+    {masque_client_rx:in(X, Buf), queue:in(X, Q)};
+rx_op(out, {Buf, Q}) ->
+    {R1, Buf2} = masque_client_rx:out(Buf),
+    {R2, Q2} = queue:out(Q),
+    R1 = R2,
+    {Buf2, Q2}.
+
+%%====================================================================
 %% Generators
 %%====================================================================
 

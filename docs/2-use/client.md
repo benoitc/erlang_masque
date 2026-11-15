@@ -32,6 +32,7 @@ This page covers everything you do on the client side of a tunnel: open it with 
 | `tcp_framing` | `capsule` on h3 and h2 | CONNECT-TCP framing: `capsule` (draft-ietf-httpbis-connect-tcp-18), or `raw` for h3 and h2 proxies of earlier drafts. On h1 the client sends a classic CONNECT first and switches to the capsule upgrade when the proxy asks for it with 426 or 501. See [connect-tcp](connect-tcp.md#two-framings). |
 | `tcp_protocol` | `<<"connect-tcp">>` | CONNECT-TCP token in capsule framing, which also picks the capsule codes. See [connect-tcp](connect-tcp.md#tokens-and-capsule-codes). |
 | `rx_queue_limit` | `1000` | Items a queue-mode session buffers. |
+| `rx_backlog` | `64` | CONNECT-TCP: messages waiting in the owner's mailbox (message mode), or items in the queue on h1 (queue mode), past which the session stops reading from the proxy until you catch up. See [connect-tcp](connect-tcp.md#client). |
 | `request_headers` | `[]` | Extra headers on the CONNECT (or h1 Upgrade) request, for example an `authorization` token. |
 | `uri_template` | per protocol | Request path template. Must match the proxy's. CONNECT-IP needs an absolute URI. |
 | `capsule_protocol` | `true` | UDP: send `capsule-protocol: ?1` and require it back. IP: must stay `true`. TCP: ignored. |

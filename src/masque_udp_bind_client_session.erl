@@ -69,7 +69,7 @@
     failure :: term(),
     timeout_ref :: reference() | undefined,
     mode :: message | queue,
-    rx_buf :: queue:queue({inet:ip_address(), inet:port_number(), binary()}),
+    rx_buf :: masque_client_rx:buf(),
     rx_waiters :: queue:queue({gen_statem:from(), reference()}),
     %% Bound on `rx_buf' (`rx_queue_limit') and datagrams dropped past it.
     rx_limit = ?MASQUE_DEFAULT_RX_QUEUE_LIMIT :: pos_integer(),
@@ -183,7 +183,7 @@ init({Target, Opts, Owner}) ->
         bind_scope = Scope,
         transport = Transport,
         mode = Mode,
-        rx_buf = queue:new(),
+        rx_buf = masque_client_rx:new(),
         rx_waiters = queue:new(),
         max_cap = MaxCap,
         extra_headers = sanitise_extra_headers(maps:get(request_headers, Opts, [])),
@@ -881,7 +881,7 @@ deliver_bind_packet(
             Data#data{rx_waiters = Ws2};
         {empty, _} ->
             case masque_client_rx:is_full(Q, Data#data.rx_limit) of
-                false -> Data#data{rx_buf = queue:in({Peer, Bytes}, Q)};
+                false -> Data#data{rx_buf = masque_client_rx:in({Peer, Bytes}, Q)};
                 true -> Data#data{rx_dropped = Data#data.rx_dropped + 1}
             end
     end.
@@ -1045,7 +1045,7 @@ handle_recv_call(
         rx_waiters = Ws
     } = Data
 ) ->
-    case queue:out(Q) of
+    case masque_client_rx:out(Q) of
         {{value, {Peer, Bytes}}, Q2} ->
             {keep_state, Data#data{rx_buf = Q2}, [{reply, From, {ok, Peer, Bytes}}]};
         {empty, _} ->

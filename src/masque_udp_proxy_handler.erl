@@ -28,6 +28,9 @@ Configure policy via `handler_opts`:
   a fixed port. Default `0` (kernel-assigned ephemeral).
   Useful for firewall rules; conflicts with concurrent tunnels
   that share a listener.
+- `dont_fragment => boolean()` - forbid IP fragmentation on the
+  socket (IPv4 DF, IPv6 DONTFRAG), as RFC 9298 section 3.1 asks.
+  A datagram above the path MTU is then dropped. Default `true`.
 """.
 -behaviour(masque_handler).
 
@@ -73,7 +76,7 @@ init(#{target_host := Host, target_port := Port} = Req, Opts) ->
                 {error, Why} ->
                     {stop, {resolution_failed, Why}};
                 ok ->
-                    open_udp(IP, Port, BindPort, BindFamily, SocketOpts, ActiveN)
+                    open_udp(IP, Port, BindPort, BindFamily, SocketOpts, Opts)
             end;
         {error, Reason} ->
             _ = Req,
@@ -157,9 +160,11 @@ default_resolver(Host) when is_list(Host) ->
             end
     end.
 
-open_udp(IP, Port, BindPort, BindFamily, SocketOpts, ActiveN) ->
+open_udp(IP, Port, BindPort, BindFamily, SocketOpts, Opts) ->
+    ActiveN = maps:get(active_n, Opts, ?DEFAULT_ACTIVE_N),
     case gen_udp:open(BindPort, [BindFamily | SocketOpts]) of
         {ok, Socket} ->
+            ok = masque_udp_df:set(Socket, Opts),
             case gen_udp:connect(Socket, IP, Port) of
                 ok ->
                     {ok, #state{

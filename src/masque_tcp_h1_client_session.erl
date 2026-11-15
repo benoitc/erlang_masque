@@ -29,6 +29,11 @@
 
 -include("masque.hrl").
 
+%% While the owner is behind, how often the session checks whether it
+%% caught up (doubling up to the maximum).
+-define(RECHECK_MIN_MS, 5).
+-define(RECHECK_MAX_MS, 100).
+
 -record(data, {
     owner :: pid(),
     owner_ref :: reference(),
@@ -40,11 +45,18 @@
     connect_opts :: map(),
     socket :: ssl:sslsocket() | undefined,
     mode :: message | queue,
-    rx_buf = queue:new() :: queue:queue(binary()),
+    rx_buf = masque_client_rx:new() :: masque_client_rx:buf(),
     rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
     %% Bound on `rx_buf' (`rx_queue_limit'); past it the tunnel ends
     %% with `rx_overflow' rather than dropping bytes.
     rx_limit = ?MASQUE_DEFAULT_RX_QUEUE_LIMIT :: pos_integer(),
+    %% The socket is read once at a time and not re-armed (`paused')
+    %% while the owner is behind: `rx_backlog' messages waiting in its
+    %% mailbox (message mode) or in `rx_buf' (queue mode). TCP then holds
+    %% the proxy back. `recheck' looks again; `recv/2' resumes at once.
+    rx_backlog = 64 :: pos_integer(),
+    paused = false :: boolean(),
+    recheck :: {reference(), pos_integer()} | undefined,
     write_closed = false :: boolean(),
     %% Extra request headers prepended to the CONNECT line.
     extra_headers = [] :: [{binary(), binary()}],
@@ -131,6 +143,7 @@ init({Target, Opts, Owner}) ->
         owner = Owner,
         owner_ref = MRef,
         rx_limit = masque_client_rx:limit(Opts),
+        rx_backlog = masque_client_rx:backlog(Opts),
         proxy_host = to_bin(ProxyHost),
         proxy_port = ProxyPort,
         target_host = to_bin(TargetHost),
@@ -251,11 +264,9 @@ open_inner(info, {ssl, Sock, Bytes}, #data{socket = Sock} = Data) ->
         {Data1, true} ->
             %% Half-close: the proxy is done sending, our side stays open.
             _ = notify_owner_closed(peer_fin, Data1),
-            _ = setopts_active_once(Sock),
-            {keep_state, Data1};
+            {keep_state, rearm(Data1)};
         {Data1, false} ->
-            _ = setopts_active_once(Sock),
-            {keep_state, Data1}
+            {keep_state, rearm(Data1)}
     end;
 %% Capsule mode: the connection closing after FINAL_DATA is the end of
 %% a finished tunnel; without it the tunnel was aborted.
@@ -277,6 +288,8 @@ open_inner(info, {ssl_error, Sock, Reason}, #data{socket = Sock} = Data) ->
     end_tunnel({ssl_error, Reason}, {stop, {ssl_error, Reason}, Data}, Data);
 open_inner(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
+open_inner(info, {timeout, TRef, rx_recheck}, #data{recheck = {TRef, Ms}} = Data) ->
+    {keep_state, rearm(Data#data{recheck = undefined}, min(2 * Ms, ?RECHECK_MAX_MS))};
 open_inner(
     info,
     {'DOWN', Ref, process, _, _},
@@ -694,6 +707,41 @@ parse_status(HdrBlock) ->
 setopts_active_once(Socket) ->
     ssl:setopts(Socket, [{active, once}, {mode, binary}]).
 
+%% Read the next TLS record, unless the owner is behind: then wait and
+%% look again (`RECHECK_MIN_MS', doubling to `RECHECK_MAX_MS').
+rearm(Data) ->
+    rearm(Data, ?RECHECK_MIN_MS).
+
+rearm(#data{recheck = {_, _}} = Data, _Ms) ->
+    Data;
+rearm(#data{socket = Sock} = Data, Ms) ->
+    case behind(Data) of
+        true ->
+            TRef = erlang:start_timer(Ms, self(), rx_recheck),
+            Data#data{paused = true, recheck = {TRef, Ms}};
+        false ->
+            _ = setopts_active_once(Sock),
+            Data#data{paused = false}
+    end.
+
+%% `recv/2' took an item: a paused socket reads again once the queue is
+%% short enough.
+resume(#data{paused = true, recheck = {TRef, _}} = Data) ->
+    case behind(Data) of
+        true ->
+            Data;
+        false ->
+            _ = erlang:cancel_timer(TRef),
+            rearm(Data#data{recheck = undefined})
+    end;
+resume(Data) ->
+    Data.
+
+behind(#data{mode = message, owner = Owner, rx_backlog = Max}) ->
+    masque_client_rx:owner_behind(Owner, Max);
+behind(#data{rx_buf = Buf, rx_backlog = Max}) ->
+    masque_client_rx:len(Buf) >= Max.
+
 %%====================================================================
 %% Owner delivery + Rx buffering
 %%====================================================================
@@ -718,15 +766,16 @@ deliver_bytes(
             Data#data{rx_waiters = Ws2};
         {empty, _} ->
             case masque_client_rx:is_full(Buf, Data#data.rx_limit) of
-                false -> Data#data{rx_buf = queue:in(Bin, Buf)};
+                false -> Data#data{rx_buf = masque_client_rx:in(Bin, Buf)};
                 true -> {overflow, Data}
             end
     end.
 
 handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
-    case queue:out(Buf) of
+    case masque_client_rx:out(Buf) of
         {{value, Bytes}, Buf2} ->
-            {keep_state, Data#data{rx_buf = Buf2}, [{reply, From, {ok, Bytes}}]};
+            Data2 = resume(Data#data{rx_buf = Buf2}),
+            {keep_state, Data2, [{reply, From, {ok, Bytes}}]};
         {empty, _} ->
             TRef = erlang:start_timer(Timeout, self(), {recv_timeout, From}),
             {keep_state, Data#data{

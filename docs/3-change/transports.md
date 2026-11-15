@@ -15,7 +15,7 @@ HTTP/3 is the native MASQUE transport: HTTP datagrams ride QUIC DATAGRAM frames,
 | Packet carriage | QUIC DATAGRAM frame; `quic_h3` adds and strips the quarter stream id | DATAGRAM capsule (type 0) on the stream body | DATAGRAM capsule on the upgraded TLS socket |
 | Inner payload | context id varint + payload (`masque_datagram`) | same | same |
 | Reliability | unreliable, may be dropped | reliable, ordered | reliable, ordered |
-| Size limit | `quic_h3:max_datagram_size/2`; the server drops larger payloads, the client returns `{error, {datagram_too_large, _, _}}` | only the UDP 65 527 byte cap (RFC 9298) | same as h2 |
+| Size limit | `quic_h3:max_datagram_size/2`, which since quic 3.0 is what fits the confirmed path MTU now (it grows as path MTU discovery confirms larger packets) and `{error, closed}` once the connection is gone; the server drops larger payloads, the client returns `{error, {datagram_too_large, _, _}}` | only the UDP 65 527 byte cap (RFC 9298) | same as h2 |
 | Capsule codec | `masque_capsule` (wraps `quic_h3_capsule`) | `h2_capsule` | `h1_capsule` |
 
 Control capsules (CONNECT-IP address and route capsules, udp-bind compression capsules) travel on the stream body on all three. CONNECT-TCP uses no capsules at all: the body is the byte stream.
@@ -66,13 +66,13 @@ sequenceDiagram
 
 ## Dependency contracts
 
-These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 2.6.1, `h2` 0.15.1, `h1` (`erlang_h1`) 0.10.0 and `instrument` 2.0.0.
+These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 3.1.0, `h2` 0.18.0, `h1` (`erlang_h1`) 0.11.0 and `instrument` 2.0.0.
 
 ### quic_h3 (package `quic`)
 
 Server calls: `quic_h3:start_server/3` (`cert`, `key`, `settings`, `quic_opts`, `handler`, `connection_handler`), `stop_server/1`, `send_response/4`, `send_data/4`, `send_datagram/3`, `max_datagram_size/2`, `cancel/3`, `set_stream_handler/4`, `get_quic_conn/1`, and `quic:peername/1`, `quic:peercert/1`.
 
-Client calls: `quic_h3:connect/3` with `sync => true`, `connect_timeout`, `settings`, `h3_datagram_enabled => true`, `quic_opts`; `get_peer_settings/1`; `request/3` with `end_stream => false`; `send_data/4`, `send_datagram/3`, `cancel/2,3`, `close/1`, `unset_stream_handler/2` (pool).
+Client calls: `quic_h3:connect/3` with `sync => true`, `connect_timeout`, `settings`, `h3_datagram_enabled => true`, `quic_opts`; `get_peer_settings/1`; `request/3` with `end_stream => false` (and `flow_control => manual` for CONNECT-TCP, whose credit goes back with `consume/3` as the owner reads); `send_data/4`, `send_datagram/3`, `cancel/2,3`, `close/1`, `unset_stream_handler/2` (pool). A later `set_stream_handler/4` without `flow_control` keeps the stream's mode.
 
 Assumptions:
 
@@ -109,7 +109,7 @@ Known quirks: `quic_h3:connect_opts()` does not declare `sync` and `h3_datagram_
 
 Server calls: `h2:start_server/3` (`cert`, `key` as PEM paths, `handler`, `enable_connect_protocol => true`, `settings`, `acceptors`, `ssl_opts`), `stop_server/1`, `peername/1`, `peercert/1`, `send_response/4`, `send_data/4`, `send_data/5` with `#{block => Ms}`, `cancel/3` (`protocol_error`, `connect_error`, `internal_error`), `set_stream_handler/3`.
 
-Client calls: `h2:connect/3` (`transport => ssl`, `ssl_opts`, `sync => true`, `timeout`, `settings`), `get_peer_settings/1`, `request/3` with `#{protocol => ...}`, `send_data/4`, `cancel/2`, `close/1`, and `h2_capsule:encode/2`, `decode/1`.
+Client calls: `h2:connect/3` (`transport => ssl`, `ssl_opts`, `sync => true`, `timeout`, `settings`), `get_peer_settings/1`, `get_settings/1` (our `initial_window_size`, which sets the credit step), `request/3` with `#{protocol => ...}` (and `flow_control => manual` for CONNECT-TCP, credit back with `consume/3`), `send_data/4`, `cancel/2`, `close/1`, and `h2_capsule:encode/2`, `decode/1`.
 
 Assumptions:
 

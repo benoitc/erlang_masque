@@ -15,7 +15,7 @@
 %%% caller blocks in a `receive', so it must be the process quic_h3
 %%% tells about `send_ready': the one that made the refused write.
 
--export([send/5]).
+-export([send/5, send_timeout/0]).
 
 -define(DEFAULT_SEND_TIMEOUT, 30000).
 %% A blocked write gives up after this many send timeouts in all.
@@ -74,6 +74,8 @@ h3_send(C, Sid, Bytes, Fin) ->
 deadline(Timeout, Ceiling) ->
     min(erlang:monotonic_time(millisecond) + Timeout, Ceiling).
 
+%% How long a blocked write may make no progress (`stream_send_timeout_ms').
+-spec send_timeout() -> pos_integer().
 send_timeout() ->
     case application:get_env(masque, stream_send_timeout_ms) of
         {ok, Ms} when is_integer(Ms), Ms > 0 -> Ms;

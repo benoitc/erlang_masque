@@ -167,7 +167,8 @@ address_allocation_round_robin(Config) ->
             ?assertEqual({10, 200, 0, 1}, A1)
     after 2000 -> ct:fail("no assign 1")
     end,
-    %% Second request: get 10.200.0.2
+    %% Second request: get 10.200.0.2. RFC 9484 section 4.7.1: the
+    %% answer is the full set, so 10.200.0.1 follows, unprompted (id 0).
     {ok, [Id2]} =
         masque:request_addresses(Sess, [{4, {0, 0, 0, 0}, 0}]),
     receive
@@ -175,9 +176,11 @@ address_allocation_round_robin(Config) ->
             #ip_assignment{
                 request_id = Id2,
                 address = A2
-            }
+            },
+            #ip_assignment{request_id = 0, address = Kept}
         ]} ->
-            ?assertEqual({10, 200, 0, 2}, A2)
+            ?assertEqual({10, 200, 0, 2}, A2),
+            ?assertEqual({10, 200, 0, 1}, Kept)
     after 2000 -> ct:fail("no assign 2")
     end,
     ok = masque:close(Sess).
@@ -198,6 +201,7 @@ pool_exhaustion_rejects(Config) ->
     end,
     %% Pool is a single address; the next request exhausts and the
     %% handler responds with the RFC-9484 §5.2 rejection sentinel.
+    %% The address already held is still listed (request id 0).
     {ok, [Id2]} = masque:request_addresses(Sess, [{4, {0, 0, 0, 0}, 0}]),
     receive
         {masque_address_assign, Sess, [
@@ -205,7 +209,8 @@ pool_exhaustion_rejects(Config) ->
                 request_id = Id2,
                 address = {0, 0, 0, 0},
                 prefix_len = 32
-            }
+            },
+            #ip_assignment{request_id = 0, address = {10, 200, 0, 1}}
         ]} ->
             ok
     after 2000 -> ct:fail("no rejection for exhausted pool")

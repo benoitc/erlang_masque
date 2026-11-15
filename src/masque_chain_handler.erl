@@ -22,7 +22,11 @@ Covers all three tunnel protocols:
 - CONNECT-TCP (`protocol = tcp`): bytes forwarded via
   `masque:send/2` both ways. Bytes the upstream refuses wait here with
   their flow-control credit held, so nothing is lost and a slow
-  upstream slows the client.
+  upstream slows the client. They go out again when an h3 upstream
+  reports room (`masque_send_ready`), or on a retry that backs off
+  from 5 ms to 200 ms for h2. An upstream that takes nothing for
+  `stream_send_timeout_ms` (application env, default 30 s) ends the
+  tunnel with `{upstream_send_failed, send_timeout}`.
 - CONNECT-IP (`protocol = ip`): IP packets forwarded via
   `masque:send_ip_packet/2`; ROUTE_ADVERTISEMENT and
   unprompted ADDRESS_ASSIGN (request_id 0) from the upstream
@@ -77,6 +81,14 @@ on the same node can still be chained together.
 
 -define(TOKEN_KEY, {?MODULE, node_token}).
 
+%% Time before trying a refused h2 upstream write again, doubling up to
+%% the maximum while the upstream takes nothing. Retries are tagged
+%% `{masque_timer, _}' so the session does not count them as traffic.
+-define(RETRY_MS, 5).
+-define(RETRY_MAX_MS, 200).
+-define(RETRY_MSG, {masque_timer, chain_retry}).
+-define(DEADLINE_MSG, {masque_timer, chain_deadline}).
+
 -record(state, {
     upstream :: pid(),
     protocol :: udp | tcp | ip,
@@ -90,12 +102,15 @@ on the same node can still be chained together.
     %% first. Their credit is held, so the client's window bounds this.
     pending = queue:new() :: queue:queue(binary()),
     retry_timer :: reference() | undefined,
+    %% Wait before the next h2 retry; doubles while nothing goes out.
+    retry_ms = ?RETRY_MS :: pos_integer(),
+    %% While bytes are pending: when the upstream last took some, and the
+    %% timer that ends the tunnel once it took none for the send timeout.
+    progress_at :: integer() | undefined,
+    deadline_timer :: reference() | undefined,
     %% The client's FIN arrived while bytes were still pending.
     eof_pending = false :: boolean()
 }).
-
-%% Time before trying a refused upstream write again.
--define(RETRY_MS, 5).
 
 -ifdef(TEST).
 test_state(Upstream, Protocol) when
@@ -264,41 +279,97 @@ handle_data(Data, #state{pending = Pending} = State) ->
             case upstream_send(Data, State) of
                 ok ->
                     {ok, State};
-                full ->
-                    {ok, arm_retry(State#state{pending = queue:in(Data, Pending)}), [hold_credit]};
+                {full, Wait} ->
+                    State1 = stalled(State#state{pending = queue:in(Data, Pending)}),
+                    {ok, wait(Wait, State1), [hold_credit]};
                 {error, Reason} ->
                     {stop, {upstream_send_failed, Reason}, State}
             end
     end.
 
+%% An h3 upstream tells us when its send queue drained (`ready'); h2
+%% has no such event, so the write is retried (`poll').
 upstream_send(Data, #state{upstream = Sess}) ->
     try masque:send(Sess, Data) of
         ok -> ok;
-        {error, send_queue_full} -> full;
-        {error, send_buffer_full} -> full;
+        {error, send_queue_full} -> {full, ready};
+        {error, send_buffer_full} -> {full, poll};
         {error, _} = Err -> Err
     catch
         exit:Reason -> {error, Reason}
     end.
 
-arm_retry(State) ->
-    State#state{retry_timer = erlang:send_after(?RETRY_MS, self(), masque_chain_retry)}.
+wait(ready, State) ->
+    cancel_retry(State);
+wait(poll, #state{retry_ms = Ms} = State) ->
+    State1 = cancel_retry(State),
+    State1#state{retry_timer = erlang:send_after(Ms, self(), ?RETRY_MSG)}.
+
+cancel_retry(#state{retry_timer = undefined} = State) ->
+    State;
+cancel_retry(#state{retry_timer = TRef} = State) ->
+    _ = erlang:cancel_timer(TRef),
+    State#state{retry_timer = undefined}.
+
+%% Bytes started to wait: arm the no-progress deadline.
+stalled(#state{progress_at = undefined} = State) ->
+    Timeout = masque_stream_send:send_timeout(),
+    State#state{
+        progress_at = now_ms(),
+        deadline_timer = erlang:send_after(Timeout, self(), ?DEADLINE_MSG)
+    };
+stalled(State) ->
+    State.
+
+%% Nothing waits any more.
+unstalled(#state{deadline_timer = Deadline} = State) ->
+    _ =
+        case Deadline of
+            undefined -> ok;
+            _ -> erlang:cancel_timer(Deadline)
+        end,
+    (cancel_retry(State))#state{
+        progress_at = undefined, deadline_timer = undefined, retry_ms = ?RETRY_MS
+    }.
+
+%% The deadline fired: end the tunnel if the upstream took nothing for
+%% the whole send timeout, otherwise wait for the time left.
+check_deadline(#state{progress_at = undefined} = State) ->
+    {ok, State#state{deadline_timer = undefined}};
+check_deadline(#state{progress_at = At} = State) ->
+    Timeout = masque_stream_send:send_timeout(),
+    case now_ms() - At of
+        Idle when Idle >= Timeout ->
+            {stop, {upstream_send_failed, send_timeout}, unstalled(State)};
+        Idle ->
+            TRef = erlang:send_after(Timeout - Idle, self(), ?DEADLINE_MSG),
+            {ok, State#state{deadline_timer = TRef}}
+    end.
+
+now_ms() -> erlang:monotonic_time(millisecond).
 
 %% Send what the upstream takes now and give that credit back.
 drain_pending(#state{pending = Pending} = State, Released) ->
     case queue:out(Pending) of
         {empty, _} ->
-            drained(State#state{retry_timer = undefined}, Released);
+            drained(unstalled(State), Released);
         {{value, Data}, Rest} ->
             case upstream_send(Data, State) of
                 ok ->
                     drain_pending(State#state{pending = Rest}, Released + byte_size(Data));
-                full ->
-                    {ok, arm_retry(State), release_actions(Released)};
+                {full, Wait} ->
+                    {ok, wait(Wait, still_full(State, Released)), release_actions(Released)};
                 {error, Reason} ->
                     {stop, {upstream_send_failed, Reason}, State}
             end
     end.
+
+%% Some bytes went out: that is progress, retry soon again. None did:
+%% back off.
+still_full(State, Released) when Released > 0 ->
+    State#state{progress_at = now_ms(), retry_ms = ?RETRY_MS};
+still_full(#state{retry_ms = Ms} = State, 0) ->
+    State#state{retry_ms = min(2 * Ms, ?RETRY_MAX_MS)}.
 
 drained(#state{eof_pending = true} = State, Released) ->
     case finish_eof(State#state{eof_pending = false}) of
@@ -366,8 +437,16 @@ finish_eof(#state{upstream = Sess} = State) ->
 
 -spec handle_info(term(), #state{}) ->
     {ok, #state{}} | {ok, #state{}, [term()]} | {stop, term(), #state{}}.
-handle_info(masque_chain_retry, State) ->
-    drain_pending(State, 0);
+handle_info(?RETRY_MSG, State) ->
+    drain_pending(State#state{retry_timer = undefined}, 0);
+handle_info(?DEADLINE_MSG, State) ->
+    check_deadline(State);
+%% The h3 upstream's send queue drained: send what waits.
+handle_info({masque_send_ready, Sess}, #state{upstream = Sess, pending = Pending} = State) ->
+    case queue:is_empty(Pending) of
+        true -> {ok, State};
+        false -> drain_pending(State, 0)
+    end;
 handle_info(
     {masque_data, Sess, Data},
     #state{

@@ -78,6 +78,8 @@
 
 %% RFC 9114 §8.1: stream-level error codes we emit.
 -define(MASQUE_H3_MESSAGE_ERROR, 16#10E).
+%% RFC 9297 section 2.1: H3_DATAGRAM_ERROR.
+-define(MASQUE_H3_DATAGRAM_ERROR, 16#33).
 
 %%====================================================================
 %% Capsule types (RFC 9298 §7)
