@@ -301,13 +301,15 @@ drain_and_arm(S) ->
     end.
 
 dispatch_capsule(datagram, Inner, S) ->
-    case masque_datagram:decode(Inner) of
-        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} when
-            byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD
-        ->
+    case masque_datagram:udp_payload(Inner) of
+        {ok, UdpBytes} ->
             dispatch(handle_packet, [UdpBytes], count_in(UdpBytes, S));
-        _ ->
-            %% RFC 9298 §5: unknown context-id or oversize -> drop.
+        too_large ->
+            %% RFC 9298 section 5: a context-zero payload over 65527
+            %% bytes aborts the tunnel; `terminate/2' closes the socket.
+            {stop, udp_payload_too_large, S};
+        drop ->
+            %% RFC 9298 section 5: unknown context-id -> drop.
             {noreply, S}
     end;
 dispatch_capsule(Type, Inner, S) when is_integer(Type) ->
@@ -408,10 +410,7 @@ safe_apply(M, F, A) ->
         apply(M, F, A)
     catch
         Class:Reason:Stack ->
-            logger:error(
-                "masque h1 handler ~p:~p/~p failed: ~p:~p~n~p",
-                [M, F, length(A), Class, Reason, Stack]
-            ),
+            masque_crash_log:handler("h1", M, F, length(A), Class, Reason, Stack),
             {stop, {handler_crash, Reason}}
     end.
 

@@ -66,8 +66,14 @@ start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
     end.
 
 start_h3_listener(Name, Opts0) ->
-    persistent_term:erase({masque_drain, Name}),
     Opts = defaults(Opts0),
+    case masque_listener_auth:check_start(Opts) of
+        ok -> start_h3_listener_1(Name, Opts);
+        {error, _} = Err -> Err
+    end.
+
+start_h3_listener_1(Name, Opts) ->
+    persistent_term:erase({masque_drain, Name}),
     Port = maps:get(port, Opts),
     #{
         handler := Handler,
@@ -110,8 +116,14 @@ build_quic_opts(Opts) ->
             true -> Base#{reuseport => true};
             false -> Base
         end,
+    %% `ip' binds the listening socket to one address.
+    Base2 =
+        case maps:get(ip, Opts, undefined) of
+            undefined -> Base1;
+            IP -> Base1#{extra_socket_opts => [{ip, IP}]}
+        end,
     %% The caller's `quic_opts' come last, so they override the defaults.
-    maps:merge(Base1, maps:get(quic_opts, Opts, #{})).
+    maps:merge(Base2, maps:get(quic_opts, Opts, #{})).
 
 %% Stop a MASQUE listener.
 -spec stop_listener(listener_name()) -> ok | {error, term()}.
@@ -163,6 +175,7 @@ h3_handlers(Opts0) ->
         handler_opts => HandlerOpts,
         fallback => Fallback,
         name => DrainKey,
+        authenticate => maps:get(authenticate, Opts, undefined),
         reverse => masque_reverse_listener:config(Opts)
     },
     MaxTunnels = maps:get(max_tunnels_per_connection, Opts, ?MASQUE_DEFAULT_MAX_TUNNELS),
@@ -262,17 +275,21 @@ dispatch_request_1(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
         false ->
             dispatch_masque(Conn, StreamId, Method, Path, Headers, Dispatch, Router);
         _ ->
-            Base = add_peer_info(Conn, #{
-                headers => Headers, handler_opts => maps:get(handler_opts, Dispatch)
-            }),
-            case masque_reverse_listener:route(Rev, h3, Conn, Path, Base) of
-                {ok, Protocol, Handler, HOpts, Req} ->
-                    spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req);
-                {reject, Reason} ->
-                    reject(Conn, StreamId, Reason);
-                {reject, Reason, Extra} ->
-                    reject(Conn, StreamId, Reason, Extra)
+            Base0 = #{headers => Headers, handler_opts => maps:get(handler_opts, Dispatch)},
+            case add_peer_info(Conn, Base0) of
+                gone -> ok;
+                Base -> route_reverse(Rev, Conn, StreamId, Path, Base, Router)
             end
+    end.
+
+route_reverse(Rev, Conn, StreamId, Path, Base, Router) ->
+    case masque_reverse_listener:route(Rev, h3, Conn, Path, Base) of
+        {ok, Protocol, Handler, HOpts, Req} ->
+            spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req);
+        {reject, Reason} ->
+            reject(Conn, StreamId, Reason);
+        {reject, Reason, Extra} ->
+            reject(Conn, StreamId, Reason, Extra)
     end.
 
 dispatch_masque(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
@@ -309,28 +326,16 @@ dispatch_masque(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
                     ip -> IpHandler;
                     udp_bind -> BindHandler
                 end,
-            Req1 = add_peer_info(Conn, Req0),
-            Req2 = Req1#{handler_opts => HandlerOpts},
-            case masque_ip:resolve_target(Protocol, Req2, Resolver) of
-                {ok, Req3} ->
-                    case accept_request(HandlerMod, Req3) of
-                        accept ->
-                            spawn_session(
-                                Conn,
-                                StreamId,
-                                Router,
-                                Protocol,
-                                HandlerMod,
-                                HandlerOpts,
-                                Req3
-                            );
-                        {reject, Reason} ->
-                            reject(Conn, StreamId, Reason);
-                        {reject, Reason, Extra} when is_list(Extra) ->
-                            reject(Conn, StreamId, Reason, Extra)
-                    end;
-                {error, Reason} ->
-                    reject(Conn, StreamId, Reason)
+            case add_peer_info(Conn, Req0) of
+                gone ->
+                    %% The connection is terminating: nothing to answer on.
+                    ok;
+                Req1 ->
+                    Req2 = Req1#{handler_opts => HandlerOpts},
+                    Ctx = {Conn, StreamId, Router, Protocol, HandlerMod, HandlerOpts},
+                    accept_masque(
+                        Ctx, masque_listener_auth:resolve(Dispatch, Protocol, Req2, Resolver)
+                    )
             end;
         {error, Reason} ->
             case Fallback of
@@ -340,6 +345,18 @@ dispatch_masque(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
                     Fun(Conn, StreamId, Method, Path, Headers)
             end
     end.
+
+accept_masque({Conn, StreamId, Router, Protocol, HandlerMod, HandlerOpts}, {ok, Req}) ->
+    case accept_request(HandlerMod, Req) of
+        accept ->
+            spawn_session(Conn, StreamId, Router, Protocol, HandlerMod, HandlerOpts, Req);
+        {reject, Reason} ->
+            reject(Conn, StreamId, Reason);
+        {reject, Reason, Extra} when is_list(Extra) ->
+            reject(Conn, StreamId, Reason, Extra)
+    end;
+accept_masque({Conn, StreamId, _, _, _, _}, {error, Reason}) ->
+    reject(Conn, StreamId, Reason).
 
 spawn_session(Conn, StreamId, undefined, _Proto, _Handler, _HOpts, _Req) ->
     reject(Conn, StreamId, resolution_failed);
@@ -375,16 +392,23 @@ spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req) ->
             ok
     end.
 
+%% The peer's address and certificate. A client that resets or drops
+%% the connection while its request is dispatched ends the connection
+%% processes under us: `gone', not a handler crash.
 add_peer_info(Conn, Req) ->
-    QuicConn = quic_h3:get_quic_conn(Conn),
-    Req1 =
-        case quic:peername(QuicConn) of
-            {ok, PeerAddr} -> Req#{peer => PeerAddr};
-            _ -> Req
-        end,
-    case quic:peercert(QuicConn) of
-        {ok, Cert} -> Req1#{peer_cert => Cert};
-        _ -> Req1
+    try
+        QuicConn = quic_h3:get_quic_conn(Conn),
+        Req1 =
+            case quic:peername(QuicConn) of
+                {ok, PeerAddr} -> Req#{peer => PeerAddr};
+                _ -> Req
+            end,
+        case quic:peercert(QuicConn) of
+            {ok, Cert} -> Req1#{peer_cert => Cert};
+            _ -> Req1
+        end
+    catch
+        exit:_ -> gone
     end.
 
 %% A session that stopped in `init/1' exits quietly (`masque_quiet').
@@ -586,9 +610,10 @@ reject(Conn, StreamId, Reason, ExtraHeaders) ->
         {<<"proxy-status">>, proxy_status_field(Reason)}
     ],
     Headers = merge_extra_headers(Base, ExtraHeaders),
-    %% The stream may already be gone (client reset): nothing to do.
-    _ = quic_h3:send_response(Conn, StreamId, Status, Headers),
-    _ = quic_h3:send_data(Conn, StreamId, Body, true),
+    %% The stream, or the whole connection, may already be gone (client
+    %% reset or vanished): nothing to answer, and nothing to report.
+    _ = masque_out:call(fun() -> quic_h3:send_response(Conn, StreamId, Status, Headers) end),
+    _ = masque_out:call(fun() -> quic_h3:send_data(Conn, StreamId, Body, true) end),
     ok.
 
 %% Caller-supplied headers win on collision so apps can override the

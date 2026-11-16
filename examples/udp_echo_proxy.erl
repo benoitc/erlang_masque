@@ -28,6 +28,9 @@ start(Port) ->
         port => Port,
         cert => Cert,
         key => Key,
+        %% A demo: this listener relays to any public host its clients
+        %% name. A real one needs `authenticate' (or `ip' on loopback).
+        public_relay => true,
         handler => masque_udp_proxy_handler
     },
     masque:start_listener(?LISTENER, Opts).

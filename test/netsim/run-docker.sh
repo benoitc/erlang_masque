@@ -1,11 +1,13 @@
 #!/bin/sh
 # Run masque_netsim_SUITE on a machine without Linux namespaces, in a
 # privileged Linux container. Usage: test/netsim/run-docker.sh
+# NETSIM_IMAGE picks the image (default erlang:29), for example a native
+# build when the local erlang:29 is for another architecture.
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 # CT logs land in _build/netsim-logs.
 mkdir -p "$ROOT/_build/netsim-logs"
-exec docker run --rm --privileged -e LTE_MTU -e NETEM_OFF -e CT_CASE -e WIFI_NETEM -e LTE_NETEM -v "$ROOT:/src:ro" -v "$ROOT/_build/netsim-logs:/logs" erlang:29 sh -c '
+exec docker run --rm --privileged -e LTE_MTU -e NETEM_OFF -e CT_CASE -e WIFI_NETEM -e LTE_NETEM -v "$ROOT:/src:ro" -v "$ROOT/_build/netsim-logs:/logs" "${NETSIM_IMAGE:-erlang:29}" sh -c '
     set -e
     apt-get update -qq >/dev/null
     apt-get install -y -qq iproute2 iptables conntrack cmake iputils-ping >/dev/null

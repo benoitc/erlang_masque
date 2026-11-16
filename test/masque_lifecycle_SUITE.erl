@@ -56,6 +56,8 @@
     h2_slow_start_does_not_block_others/1,
     default_tunnel_cap_is_100/1,
     h3_datagram_capsule_is_a_datagram/1,
+    h3_oversize_datagram_ends_session/1,
+    h2_oversize_datagram_ends_session/1,
     h3_many_small_capsules_in_one_write/1,
     listener_name_unique_across_transports/1,
     h3_idle_tunnel_ends/1,
@@ -140,6 +142,8 @@ all() ->
         h2_slow_start_does_not_block_others,
         default_tunnel_cap_is_100,
         h3_datagram_capsule_is_a_datagram,
+        h3_oversize_datagram_ends_session,
+        h2_oversize_datagram_ends_session,
         h3_many_small_capsules_in_one_write,
         listener_name_unique_across_transports,
         h3_idle_tunnel_ends,
@@ -685,6 +689,41 @@ h1_udp_bind_pending_limit(Config) ->
     end,
     {open, _} = sys:get_state(Sess),
     ok = masque:close(Sess).
+
+%% RFC 9298 section 5: a context-zero payload over 65527 bytes ends the
+%% server session, quietly, and resets the stream.
+h3_oversize_datagram_ends_session(Config) ->
+    Reports = count_error_reports(),
+    {Conn, Sid} = h3_open_udp(Config),
+    oversize_ends_session(fun(Cap) -> quic_h3:send_data(Conn, Sid, Cap, false) end),
+    receive
+        {quic_h3, Conn, {stream_reset, Sid, _}} -> ok
+    after 5000 -> ct:fail(no_reset)
+    end,
+    quic_h3:close(Conn),
+    ?assertEqual(0, stop_counting(Reports)).
+
+h2_oversize_datagram_ends_session(Config) ->
+    Reports = count_error_reports(),
+    {Conn, Sid} = h2_open_udp(Config),
+    oversize_ends_session(fun(Cap) -> h2:send_data(Conn, Sid, Cap, false) end),
+    receive
+        {h2, Conn, {stream_reset, Sid, _}} -> ok
+    after 5000 -> ct:fail(no_reset)
+    end,
+    h2:close(Conn),
+    ?assertEqual(0, stop_counting(Reports)).
+
+oversize_ends_session(Send) ->
+    Pid = await_session(),
+    MRef = erlang:monitor(process, Pid),
+    Cap = iolist_to_binary(masque_capsule:encode(0, [<<0>>, binary:copy(<<"o">>, 65528)])),
+    ok = Send(Cap),
+    receive
+        {'DOWN', MRef, process, Pid, Reason} ->
+            ?assertEqual(udp_payload_too_large, masque_quiet:reason(Reason))
+    after 5000 -> ct:fail({session_still_alive, Pid})
+    end.
 
 %% RFC 9297 sec 3.5: a DATAGRAM capsule on an h3 stream carries an
 %% HTTP datagram; the proxy handles it like a QUIC DATAGRAM frame.
@@ -1574,7 +1613,8 @@ h2_tcp_rejects_capsule_protocol_response(Config) ->
         {error, _} = masque:connect(
             iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
             {<<"192.0.2.6">>, 443},
-            #{verify => verify_none, transports => [h2], protocol => tcp}
+            %% Raw framing: a 2xx switching to capsules is refused.
+            #{verify => verify_none, transports => [h2], protocol => tcp, tcp_framing => raw}
         )
     after
         h2:stop_server(Ref)

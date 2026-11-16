@@ -165,6 +165,20 @@ This page records design decisions that are visible in the code, with the reason
 - **Why.** For TCP, "dropping bytes would corrupt the stream, so reset the tunnel" (comment in `rx_overflow/1` in `masque_tcp_client_session`). Commit 8f072f9.
 - **Where.** `masque_client_rx`.
 
+### A CONNECT-TCP client paces the proxy by its owner's mailbox
+
+- **Decision.** CONNECT-TCP client sessions open their stream with `flow_control => manual`. In message mode they give credit back unless the owner has `rx_backlog` messages waiting (default 64), and hold it until the owner catches up, rechecking every 5 to 100 ms. In queue mode on h3 and h2 credit goes back when `recv/2` hands the bytes out. On h1 the socket is not re-armed instead.
+- **Why.** A byte stream cannot drop, and a message-mode owner never says when it has read a message, so before this the owner's mailbox took everything the proxy sent (32 MB in the November 2026 review). An explicit ack API would have been byte-exact but changes the API and leaves the default unbounded; the mailbox length is the bound the datagram path already uses (`masque_client_owner:send_bounded/2`).
+- **Consequences.** The bound counts every message in the owner's mailbox, not only tunnel data, so a busy owner slows its tunnels. An owner on another node is never considered behind. What waits is bounded by about `rx_backlog` chunks plus one stream window.
+- **Where.** `owner_credit/2` and `recheck/2` in `masque_tcp_client_session`, `rearm/2` in `masque_tcp_h1_client_session`, `masque_client_rx:owner_behind/2`, `masque_rx_credit`.
+
+### Handler-call writes do not block the server session
+
+- **Decision.** The writes a handler call starts (the reverse connect accept stream's `send` and `shutdown_write`) run in a per-session writer process; the caller waits for its reply, the session keeps reading.
+- **Why.** With bounded clients, an edge that wrote from inside the session stopped delivering the agent's bytes and taking `consumed/2` while the write waited, and an agent echoing those bytes deadlocked against it (`masque_reverse_SUITE` `large_both_ways`).
+- **Consequences.** Writes from `handle_info/2` and init actions still run in the session, synchronously; a handler that mixes both kinds of writes gets no ordering between them.
+- **Where.** `masque_session_writer`, `write_async/5` in `masque_tcp_server_session` and `masque_tcp_h1_server_session`.
+
 ### Clients verify proxy certificates by default
 
 - **Decision.** Every client transport uses `verify_peer` with the system CA store, hostname check and SNI unless told otherwise.
@@ -218,8 +232,8 @@ This page records design decisions that are visible in the code, with the reason
 
 ### Unknown capsules and datagram contexts are dropped silently
 
-- **Decision.** Unknown capsule types go to `handle_capsule/3` if exported, else are ignored; unknown context ids and oversize UDP payloads are dropped.
-- **Why.** RFC 9297 section 3.3 and RFC 9298 section 5 (comments in `masque_capsule` and the sessions).
+- **Decision.** Unknown capsule types go to `handle_capsule/3` if exported, else are ignored; unknown context ids are dropped. A context-zero UDP payload over 65527 bytes is not dropped: it aborts the stream (`udp_payload_too_large`).
+- **Why.** RFC 9297 section 3.3 and RFC 9298 section 5 (comments in `masque_capsule` and the sessions). Section 5 says a receiver MUST abort the stream on an oversized context-zero payload; dropping it was a gap the November 2026 review found.
 - **Where.** `masque_capsule:known/1`, `dispatch_capsule/3` and the datagram paths of every session.
 
 ## Open questions

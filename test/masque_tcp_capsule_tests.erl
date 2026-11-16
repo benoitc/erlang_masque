@@ -132,7 +132,9 @@ token_version_test() ->
     ?assertEqual(unknown, ?C:token_version(undefined)).
 
 client_protocol_test() ->
-    ?assertEqual({raw, <<"connect-tcp">>, final}, ?C:client_protocol(#{})),
+    %% Capsule framing (draft -18) by default; raw on request.
+    ?assertEqual({capsule, <<"connect-tcp">>, final}, ?C:client_protocol(#{})),
+    ?assertEqual({raw, <<"connect-tcp">>, final}, ?C:client_protocol(#{tcp_framing => raw})),
     ?assertEqual(
         {capsule, <<"connect-tcp">>, final}, ?C:client_protocol(#{tcp_framing => capsule})
     ),

@@ -36,6 +36,9 @@ start(Port) ->
         port => Port,
         cert => Cert,
         key => Key,
+        %% A demo: this listener relays for any client. A real one needs
+        %% `authenticate' (or `ip' on loopback).
+        public_relay => true,
         ip_handler => masque_ip_proxy_handler,
         address_pool => {4, {10, 200, 0, 0}, 24},
         routes => [

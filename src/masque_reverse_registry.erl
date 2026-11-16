@@ -37,13 +37,21 @@ new_table() ->
     ]),
     ok.
 
-%% Store a request under a fresh random id.
+%% Store a request under a fresh random id. Ids come from a strong
+%% random source: on h1 an accept is matched to its request by id and
+%% identity, so they must not be predictable (draft section 6). A
+%% collision of 62-bit ids is all but impossible; retry a few times.
 -spec register(entry()) -> non_neg_integer().
 register(Entry) ->
-    Id = rand:uniform(?MASQUE_REQUEST_ID_MAX + 1) - 1,
+    register_new(Entry, 8).
+
+register_new(_Entry, 0) ->
+    error(request_id_collision);
+register_new(Entry, N) ->
+    <<_:2, Id:62>> = crypto:strong_rand_bytes(8),
     case ets:insert_new(?TABLE, {Id, Entry}) of
         true -> Id;
-        false -> register(Entry)
+        false -> register_new(Entry, N - 1)
     end.
 
 -spec lookup(non_neg_integer()) -> {ok, entry()} | error.

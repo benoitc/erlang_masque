@@ -51,8 +51,14 @@ start_listener(Name, Opts0) when is_atom(Name), is_map(Opts0) ->
     end.
 
 start_h1_listener(Name, Opts0) ->
-    persistent_term:erase({masque_drain, Name}),
     Opts = defaults(Opts0),
+    case masque_listener_auth:check_start(Opts) of
+        ok -> start_h1_listener_1(Name, Opts);
+        {error, _} = Err -> Err
+    end.
+
+start_h1_listener_1(Name, Opts) ->
+    persistent_term:erase({masque_drain, Name}),
     Port = maps:get(port, Opts),
     #{handler := Handler} = h1_handlers(Opts#{drain_key => Name}),
     ServerOpts0 = #{
@@ -70,6 +76,7 @@ start_h1_listener(Name, Opts0) ->
         [
             ssl_opts,
             acceptors,
+            ip,
             handshake_timeout,
             request_timeout,
             idle_timeout,
@@ -152,6 +159,7 @@ build_dispatch(Opts) ->
             maps:get(handler_opts, Opts, #{})
         ),
         name => maps:get(drain_key, Opts, undefined),
+        authenticate => maps:get(authenticate, Opts, undefined),
         reverse => masque_reverse_listener:config(Opts)
     }.
 
@@ -242,7 +250,7 @@ dispatch_masque(Conn, StreamId, Method, Path, Headers, Dispatch) ->
                 end,
             Req1 = add_peer(Conn, Req0#{handler_opts => HandlerOpts}),
             Resolver = maps:get(resolver, Dispatch, fun default_resolver/1),
-            case masque_ip:resolve_target(Protocol, Req1, Resolver) of
+            case masque_listener_auth:resolve(Dispatch, Protocol, Req1, Resolver) of
                 {ok, Req} ->
                     case accept_request(HandlerMod, Req) of
                         accept ->

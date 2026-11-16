@@ -4,7 +4,7 @@ This page is for running `masque` in production: what the metrics mean and which
 
 ## Metrics
 
-`masque_metrics` creates `instrument_meter` instruments on the `masque` meter when the application starts (the `instrument` application is a dependency and starts with it). Export them with any `instrument` exporter (OTLP, Prometheus).
+`masque_metrics` creates `instrument_meter` instruments on the `masque` meter when the application starts (the `instrument` application is a dependency and starts with it; since `instrument` 2.0.0 it also starts `hackney`). Export them with any `instrument` exporter (OTLP, Prometheus). In Prometheus each instrument exports under its own name with its attributes as labels (no longer one series name per attribute combination), and an instrument exports nothing before its first write.
 
 | Instrument | Kind | Attributes | Meaning |
 |---|---|---|---|
@@ -21,7 +21,7 @@ Every server session reports `masque.tunnels.total`, `masque.tunnels.active` and
 
 ## Counters
 
-Plain `counters` sit beside the meters. `masque_metrics:backlog_drop_count/0` counts the HTTP/3 datagrams the router dropped because their session had 10 000 unprocessed messages. They are node-wide totals, cheap to read, and meant for scrapers and tests.
+Plain `counters` sit beside the meters. `masque_metrics:backlog_drop_count/0` counts the HTTP/3 datagrams the router dropped because their session had 10 000 unprocessed messages. `masque_metrics:owner_drop_count/0` counts the datagrams client sessions dropped because their owner, in `message` mode, had 10 000 messages waiting. They are node-wide totals, cheap to read, and meant for scrapers and tests.
 
 ### Drop counters
 
@@ -82,6 +82,7 @@ Clients that race transports reconnect to whichever instance your DNS or load ba
 | udp-bind peers | Only public peers. | `allow_loopback`, `allow_private`, `peer_filter_fun` |
 | Capsule size | 64 KiB per capsule. | `max_capsule_size` |
 | Client queue | 1000 items. | `rx_queue_limit` |
+| CONNECT-TCP owner backlog | The client stops reading from the proxy while 64 messages wait in the owner's mailbox. | `rx_backlog` |
 | Tunnels per connection | 100 on h3 and h2 (h1 carries one). | `max_tunnels_per_connection` |
 | Idle tunnel | Ends after 5 minutes without traffic in either direction, on every transport. | `idle_timeout_ms` |
 | CONNECT-TCP target writes | A target that stops reading ends the tunnel after 30 s; the client is flow-controlled meanwhile (h3 and h2). | - |
@@ -92,6 +93,6 @@ Clients that race transports reconnect to whichever instance your DNS or load ba
 
 ## Logs
 
-`masque` itself logs one thing: an exception raised by a handler callback in a server session, at error level through `logger`, with the module, function, arity, class, reason and stack. Refused requests are not logged; they are counted in `masque.tunnels.rejected`. What the handler crash does to the tunnel is described in [handlers](handlers.md#what-a-crash-does). The transport libraries (`quic`, `h2`, `h1`) log on their own.
+`masque` itself logs one thing: an exception raised by a handler callback (or a listener's `authenticate`) in a server session, at error level through `logger`. The line names the callback, the exception class and the shape of the reason (`badmatch`, `function_clause`, ...), and lists the stack as `Module:Function/Arity (file:line)`: no values, since a reason or an argument can hold request headers such as `authorization`. Set the application env `{masque, [{handler_crash_detail, true}]}` to log the full reason while you debug. At most ten such lines are written a second; the next one says how many were left out. Refused requests are not logged; they are counted in `masque.tunnels.rejected`. What the handler crash does to the tunnel is described in [handlers](handlers.md#what-a-crash-does). The transport libraries (`quic`, `h2`, `h1`) log on their own.
 
 Next: [debugging](../3-change/debugging.md), or back to [concepts](../1-understand/concepts.md) for the map of the code.

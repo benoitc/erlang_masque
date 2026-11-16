@@ -740,10 +740,7 @@ safe_apply(M, F, A) ->
         apply(M, F, A)
     catch
         Class:Reason:Stack ->
-            logger:error(
-                "masque udp-bind-h1 handler ~p:~p/~p failed: ~p:~p~n~p",
-                [M, F, length(A), Class, Reason, Stack]
-            ),
+            masque_crash_log:handler("udp-bind-h1", M, F, length(A), Class, Reason, Stack),
             {stop, {handler_crash, Reason}}
     end.
 

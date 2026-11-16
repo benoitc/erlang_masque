@@ -9,7 +9,7 @@ reserved for future extensions (compression, ICMP, QUIC-aware
 proxying).
 """.
 
--export([encode/2, decode/1]).
+-export([encode/2, decode/1, udp_payload/1]).
 
 -export_type([context_id/0]).
 
@@ -37,4 +37,24 @@ decode(Bin) when is_binary(Bin) ->
     catch
         error:{incomplete, _} -> {error, malformed_varint};
         error:badarg -> {error, malformed_varint}
+    end.
+
+-doc """
+Classify an HTTP Datagram payload received on a CONNECT-UDP stream.
+
+Returns `{ok, Udp}` for a context-zero UDP payload, `too_large` for a
+context-zero payload over 65527 bytes, which RFC 9298 section 5
+requires the receiver to answer by aborting the stream, and `drop`
+for an unknown context or a malformed payload, which is silently
+dropped.
+""".
+-spec udp_payload(binary()) -> {ok, binary()} | too_large | drop.
+udp_payload(Bin) ->
+    case decode(Bin) of
+        {ok, {?MASQUE_CONTEXT_ID_UDP, Udp}} when byte_size(Udp) =< ?MASQUE_MAX_UDP_PAYLOAD ->
+            {ok, Udp};
+        {ok, {?MASQUE_CONTEXT_ID_UDP, _}} ->
+            too_large;
+        _ ->
+            drop
     end.

@@ -51,6 +51,8 @@
     tcp_stalled_client/1,
     udp_echo_sizes/1,
     udp_oversize_refused/1,
+    udp_oversize_aborts/1,
+    ip_full_assign_set/1,
     udp_burst/1,
     h3_udp_quiet_tunnel/1,
     bind_two_peers/1,
@@ -134,6 +136,8 @@ groups() ->
     Other = [
         udp_echo_sizes,
         udp_oversize_refused,
+        udp_oversize_aborts,
+        ip_full_assign_set,
         udp_burst,
         bind_two_peers,
         bind_compressed_peer,
@@ -280,6 +284,9 @@ case_opts(vec_continue_before_dial) ->
         {ok, {127, 0, 0, 1}}
     end,
     #{handler_opts => #{allow_private => true, allow_self => true, resolver => Slow}};
+case_opts(ip_full_assign_set) ->
+    Pools = [{4, {10, 200, 0, 0}, 24}, {6, {16#fd00, 0, 0, 0, 0, 0, 0, 0}, 64}],
+    #{handler_opts => (default_handler_opts())#{address_pool => Pools}};
 case_opts(bind_peer_filter) ->
     #{accept_bind => true, handler_opts => #{bind_address => {127, 0, 0, 1}}};
 case_opts(_) ->
@@ -1425,11 +1432,12 @@ udp_echo_sizes(Config) ->
         [1, 100, 1200]
     ),
     %% Only h2 and h1 can carry this, in capsules. On h3 it is refused
-    %% rather than lost silently. 8000 bytes stays under macOS's 9216
-    %% byte limit on a UDP send to the target.
+    %% rather than lost silently: past what the path carries now (quic 3
+    %% reports the confirmed path MTU, not the peer's limit). 8000 bytes
+    %% stays under macOS's 9216 byte limit on a UDP send to the target.
     Big = binary:copy(<<"b">>, 8000),
     case ?config(transport, Config) of
-        h3 -> ?assertEqual({error, datagram_too_large_for_path}, masque:send(Sess, Big));
+        h3 -> ?assertMatch({error, {datagram_too_large, 8000, _}}, masque:send(Sess, Big));
         _ -> ok = echo_datagram(Sess, Big)
     end,
     close(Sess).
@@ -1442,6 +1450,77 @@ udp_oversize_refused(Config) ->
     ),
     ok = echo_datagram(Sess, <<"still fine">>),
     close(Sess).
+
+%% RFC 9298 section 5: a context-zero payload over 65527 bytes aborts
+%% the stream, so the payload sent after it is never echoed. masque's
+%% own client refuses to send one, so the request is made by hand, with
+%% the payload in a DATAGRAM capsule.
+udp_oversize_aborts(Config) ->
+    Big = masque_capsule:encode(0, masque_datagram:encode(0, binary:copy(<<"o">>, 65528))),
+    After = masque_capsule:encode(0, masque_datagram:encode(0, <<"after">>)),
+    Bytes = iolist_to_binary([Big, After]),
+    case ?config(transport, Config) of
+        h1 -> udp_oversize_h1(Config, Bytes);
+        _ -> udp_oversize_raw(Config, Bytes)
+    end,
+    await_no_server_sessions(5000).
+
+udp_oversize_raw(Config, Bytes) ->
+    #{port := Port} = ?config(server, Config),
+    UdpPort = integer_to_binary(?config(udp_port, Config)),
+    Base = [
+        {<<":method">>, <<"CONNECT">>},
+        {<<":scheme">>, <<"https">>},
+        {<<":authority">>, iolist_to_binary(["127.0.0.1:", integer_to_list(Port)])},
+        {<<":path">>, <<"/.well-known/masque/udp/127.0.0.1/", UdpPort/binary, "/">>}
+    ],
+    %% Pseudo-headers come first on h3.
+    Headers =
+        case ?config(transport, Config) of
+            h3 ->
+                Base ++ [{<<":protocol">>, <<"connect-udp">>}, {<<"capsule-protocol">>, <<"?1">>}];
+            h2 ->
+                Base ++ [{<<"capsule-protocol">>, <<"?1">>}]
+        end,
+    {Tag, Conn, Sid} = raw_request(Config, Headers, <<"connect-udp">>),
+    {200, _} = raw_response(Tag, Conn, Sid),
+    ok = raw_send(Tag, Conn, Sid, Bytes),
+    receive
+        {Tag, Conn, {stream_reset, Sid, _}} -> ok;
+        {Tag, Conn, {data, Sid, _, _}} -> ct:fail(echo_after_oversize)
+    after 5000 -> ct:fail(no_reset)
+    end,
+    raw_close(Tag, Conn).
+
+udp_oversize_h1(Config, Bytes) ->
+    #{port := Port} = ?config(server, Config),
+    {ok, Sock} = ssl:connect(
+        "127.0.0.1",
+        Port,
+        [
+            binary,
+            {active, false},
+            {verify, verify_none},
+            {alpn_advertised_protocols, [<<"http/1.1">>]}
+        ],
+        5000
+    ),
+    Host = iolist_to_binary(["127.0.0.1:", integer_to_list(Port)]),
+    Path = iolist_to_binary([
+        "/.well-known/masque/udp/127.0.0.1/", integer_to_list(?config(udp_port, Config)), "/"
+    ]),
+    ok = ssl:send(Sock, [
+        <<"GET ">>,
+        Path,
+        <<" HTTP/1.1\r\nHost: ">>,
+        Host,
+        <<"\r\nConnection: Upgrade\r\nUpgrade: connect-udp\r\nCapsule-Protocol: ?1\r\n\r\n">>
+    ]),
+    {ok, Reply} = ssl:recv(Sock, 0, 5000),
+    ?assertMatch(<<"HTTP/1.1 101", _/binary>>, Reply),
+    ok = ssl:send(Sock, Bytes),
+    ?assertEqual({error, closed}, ssl:recv(Sock, 0, 5000)),
+    ssl:close(Sock).
 
 %% UDP may lose packets under a burst, but it must not break the
 %% tunnel, and what arrives must be intact.
@@ -1611,6 +1690,23 @@ ip_two_clients(Config) ->
     end,
     close(SessA),
     close(SessB).
+
+%% RFC 9484 section 4.7.1: each ADDRESS_ASSIGN is the full set the
+%% client holds. Asking for IPv6 after IPv4 keeps the IPv4 address.
+ip_full_assign_set(Config) ->
+    {Sess, V4} = connect_ip(Config),
+    {ok, [Id]} = masque:request_addresses(Sess, [{6, {0, 0, 0, 0, 0, 0, 0, 0}, 128}]),
+    receive
+        {masque_address_assign, Sess, Entries} ->
+            ?assertMatch(
+                [#ip_assignment{request_id = Id, version = 6}, #ip_assignment{request_id = 0}],
+                Entries
+            ),
+            [_, #ip_assignment{version = 4, address = Kept}] = Entries,
+            ?assertEqual(V4, Kept)
+    after 5000 -> ct:fail(no_v6_assign)
+    end,
+    close(Sess).
 
 connect_ip(Config) ->
     Sess = connect(Config, {'*', '*'}, #{protocol => ip}),
@@ -2045,7 +2141,15 @@ session_module(P) ->
 %%====================================================================
 
 server_opts(Extra) ->
-    Defaults = #{
+    Handler =
+        case Extra of
+            #{handler_opts := H} -> H;
+            _ -> default_handler_opts()
+        end,
+    Extra#{accept_bind => true, handler_opts => Handler}.
+
+default_handler_opts() ->
+    #{
         allow_private => true,
         allow_self => true,
         bind_address => {127, 0, 0, 1},
@@ -2060,13 +2164,7 @@ server_opts(Extra) ->
             }
         ],
         forward_fun => fun ?MODULE:ip_router/2
-    },
-    Handler =
-        case Extra of
-            #{handler_opts := H} -> H;
-            _ -> Defaults
-        end,
-    Extra#{accept_bind => true, handler_opts => Handler}.
+    }.
 
 start_server(h3, Certs, Extra) ->
     {ok, Srv} = masque_test_helpers:start_masque_server(maps:merge(Certs, server_opts(Extra))),

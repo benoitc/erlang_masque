@@ -17,7 +17,7 @@ masque:start_listener(my_proxy, #{
 }).
 ```
 
-`accept/1` runs in the listener's request process. Every other callback runs inside the tunnel's server session process: one process per tunnel, so `self()` in a callback is the session, and anything you send to it (socket messages, timers) comes back through `handle_info/2`.
+`accept/1` runs in the listener's request process. Every other callback runs inside the tunnel's server session process: one process per tunnel, so `self()` in a callback is the session, and anything you send to it (socket messages, timers) comes back through `handle_info/2`. Every message counts as traffic for the idle timeout, except one tagged `{masque_timer, _}`: tag a retry timer that way so a retry that gets nowhere does not keep the tunnel alive.
 
 ## Callbacks
 
@@ -107,6 +107,7 @@ Actions run in list order. Unknown actions are ignored. A closing action ends th
 | `resolved_addresses` | IP | The listener resolver's answer for a host name target, the address itself for an address target, `[]` otherwise. |
 | `peer` | all | `{Address, Port}` of the client. |
 | `peer_cert` | every transport, with a client certificate | DER leaf certificate, checked against the listener's trust anchors. |
+| `identity` | every transport, when the listener's `authenticate` returned `{ok, Identity}` | Whatever `authenticate` returned. |
 
 ## init runs before the 2xx
 

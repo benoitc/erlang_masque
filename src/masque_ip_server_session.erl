@@ -350,6 +350,10 @@ handle_info_inner({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idl
         expired -> {stop, idle_timeout, S};
         {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
     end;
+%% A handler's own timer (`{masque_timer, _}') is not traffic: a retry
+%% that gets nowhere must not keep the tunnel from idling out.
+handle_info_inner({masque_timer, _} = Msg, S) ->
+    handle_traffic(Msg, S);
 handle_info_inner(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
     handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
 handle_info_inner(Msg, S) ->
@@ -862,10 +866,7 @@ safe_apply(M, F, A) ->
         apply(M, F, A)
     catch
         Class:Reason:Stack ->
-            logger:error(
-                "masque ip handler ~p:~p/~p failed: ~p:~p~n~p",
-                [M, F, length(A), Class, Reason, Stack]
-            ),
+            masque_crash_log:handler("ip", M, F, length(A), Class, Reason, Stack),
             {stop, {handler_crash, Reason}}
     end.
 

@@ -16,6 +16,8 @@ data_before_response_is_kept_test() ->
     Opts = #{
         proxy => {<<"127.0.0.1">>, 443},
         protocol => tcp,
+        %% Raw bytes on the stream: the data below is not a capsule.
+        tcp_framing => raw,
         transport => h3,
         pool_owner => Owner,
         timeout => 5000

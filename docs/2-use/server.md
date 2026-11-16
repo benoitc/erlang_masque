@@ -44,6 +44,9 @@ Opts = #{
 | Option | Transports | Default | Meaning |
 |---|---|---|---|
 | `port` | all | required | Listen port; `0` picks one. |
+| `ip` | all | every interface | Bind the listening socket to one address, for example `{127, 0, 0, 1}`. |
+| `authenticate` | all | none | `fun(Req) -> ok \| {ok, Identity} \| {reject, Reason}` called for every tunnel request before the handler's `accept/1`. `{ok, Identity}` puts `identity` in the request map. See [public listeners](#public-listeners). |
+| `public_relay` | all | `false` (application env `public_relay`) | Start a listener with the built-in relaying handlers on a non-loopback address without `authenticate`. Say it only when the relay is meant to be open. |
 | `cert`, `key` | all | required | See [TLS material](#tls-material). |
 | `handler`, `tcp_handler`, `ip_handler`, `bind_handler` | all | built-in proxy handlers | Handler module per protocol. |
 | `handler_opts` | all | `#{}` | Passed to every handler's `init/2` and visible in `accept/1` as `handler_opts`. |
@@ -72,6 +75,37 @@ Opts = #{
 Handler policy (`allow`, `allow_private`, `family`, `connect_timeout`, `socket_opts`, `active_n`, `mtu`, `address_pool`, and so on) belongs in `handler_opts`. For convenience every listener also copies these top-level keys into `handler_opts`: `address_pool`, `routes`, `mtu`, `max_assignments`, `allowed_source_prefixes`, `allow_ip`, `resolver`, `allow`, `family`, `allow_private`, `connect_timeout`, `socket_opts` and the udp-bind keys (the list is `handler_opt_keys/0` in `masque_server`). A key in `handler_opts` always wins.
 
 The top-level `resolver` has the listener shape (`{ok, [Address]}`). When it is copied into `handler_opts`, the UDP and TCP proxy handlers use the first address of the list.
+
+## Public listeners
+
+The built-in handlers (`masque_udp_proxy_handler`, `masque_tcp_proxy_handler`, `masque_ip_proxy_handler`, `masque_udp_bind_proxy_handler`, `masque_chain_handler`) relay to any public host a client names. On an address the Internet can reach, that is an open relay. So a listener that uses one of them refuses to start, with `{error, {unauthenticated_relay, Protocols}}`, unless you pick one of these:
+
+```erlang
+%% Check every tunnel request.
+masque:start_listener(edge, Opts#{authenticate => fun my_auth:check/1}).
+
+%% Only local clients.
+masque:start_listener(local, Opts#{ip => {127, 0, 0, 1}}).
+
+%% Relay for anyone, on purpose.
+masque:start_listener(open, Opts#{public_relay => true}).
+```
+
+`authenticate` gets the request map (headers, `peer`, `peer_cert`) before the handler's `accept/1`, for CONNECT-UDP, CONNECT-TCP, CONNECT-IP and Connect-UDP-Bind:
+
+```erlang
+check(#{headers := Headers}) ->
+    case lists:keyfind(<<"authorization">>, 1, Headers) of
+        {_, <<"Bearer ", Token/binary>>} -> lookup(Token);   %% {ok, User} or {reject, {other, 401}}
+        false -> {reject, {other, 401}}
+    end.
+```
+
+- `{ok, Identity}` puts `identity` in the request map, so `accept/1` and `init/2` can use it.
+- A crash in `authenticate` refuses the request with 403; the request is not logged.
+- Listeners whose handlers are your own modules are not checked: your `accept/1` carries the policy.
+- Reverse connect requests are authenticated by the `listen_handler` instead.
+- For a node that relays on purpose everywhere, set the application env `{masque, [{public_relay, true}]}`; a listener's own `public_relay` wins.
 
 ## Accept, refuse, authenticate
 
@@ -152,6 +186,7 @@ Draining works by listener name on all three transports. Tunnels already open ke
 
 ## Security defaults
 
+- A listener with the built-in handlers does not start on a non-loopback address without `authenticate` or `public_relay => true` (see [public listeners](#public-listeners)).
 - The built-in UDP and TCP handlers refuse targets that resolve to non-public addresses (private, loopback, link-local, CGNAT, documentation, multicast; see `masque_ip:is_public/1`). The tunnel is refused with 502 `resolution_failed`. Set `allow_private => true` in `handler_opts` to allow them.
 - The built-in IP handler refuses the `*` target and non-public targets with 403 unless `allow_private` is set, and filters packets per tunnel. See [connect-ip](connect-ip.md#target-scoping).
 - The built-in udp-bind handler only exchanges packets with public peers; `allow_loopback` and `allow_private` widen that. See [connect-udp-bind](connect-udp-bind.md#peer-filter).

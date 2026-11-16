@@ -84,7 +84,7 @@ end.
 - `request_connection/3` returns `{error, declined}`, `{error, timeout}` or `{error, closed}` when no stream comes.
 - The caller owns the stream: it gets `{masque_data, Stream, Bytes}`, `{masque_closed, Stream, peer_fin}` when the agent finished sending, and `{masque_closed, Stream, Reason}` when the stream ends, unless it closed the stream itself.
 - Credit returns only through `consumed/2`, so an edge that stops reading stops the agent too.
-- `send/2` returns once the bytes are on the stream; `shutdown_write/1` half-closes; `close/1` ends it.
+- `send/2` returns once the bytes are on the stream; `shutdown_write/1` half-closes; `close/1` ends it. While a `send/2` waits for the agent, the stream keeps delivering what the agent sends and keeps taking `consumed/2`, so read from another process than the one that writes.
 
 ### Forward a public port
 
@@ -138,7 +138,7 @@ end.
 - `masque:migrate(Listen)` moves the HTTP/3 connection to a new address; the accept streams on it move too.
 - `{masque_closed, Listen, Reason}` arrives if the proxy ends the channel; `masque:close(Listen)` ends it from your side.
 
-Accept first, then dial the service, and close the stream if the service is down; on the agent side no credit calls are needed:
+Accept first, then dial the service, and close the stream if the service is down. On the agent side no credit calls are needed: the stream stops reading from the proxy while your process has `rx_backlog` messages waiting (64 by default), so a slow local service slows the edge.
 
 ```erlang
 agent_stream(Listen, Id, Port) ->

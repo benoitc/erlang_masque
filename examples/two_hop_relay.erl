@@ -77,6 +77,7 @@ start(_Opts) ->
             port => 0,
             cert => Cert,
             key => Key,
+            public_relay => true,
             handler_opts => EgressCommon
         }
     ),
@@ -88,6 +89,7 @@ start(_Opts) ->
             port => 0,
             cert => CertFile,
             key => KeyFile,
+            public_relay => true,
             handler_opts => EgressCommon
         }
     ),
@@ -117,6 +119,7 @@ start(_Opts) ->
             port => 0,
             cert => Cert,
             key => Key,
+            public_relay => true,
             handler_opts => IngressCommon
         }
     ),
@@ -127,6 +130,7 @@ start(_Opts) ->
             port => 0,
             cert => CertFile,
             key => KeyFile,
+            public_relay => true,
             handler_opts => IngressCommon
         }
     ),
@@ -308,7 +312,9 @@ start_h1(Name, CertFile, KeyFile, Extra) ->
                     #{
                         port => 0,
                         cert => CertFile,
-                        key => KeyFile
+                        key => KeyFile,
+                        %% A demo: these listeners relay on purpose.
+                        public_relay => true
                     },
                     Extra
                 )
@@ -326,7 +332,9 @@ start_chain_h1(Name, CertFile, KeyFile, Extra) ->
                     #{
                         port => 0,
                         cert => CertFile,
-                        key => KeyFile
+                        key => KeyFile,
+                        %% A demo: these listeners relay on purpose.
+                        public_relay => true
                     },
                     Extra
                 )
