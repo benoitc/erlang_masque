@@ -17,7 +17,7 @@ masque:start_listener(my_proxy, #{
 }).
 ```
 
-`accept/1` runs in the listener's request process. Every other callback runs inside the tunnel's server session process: one process per tunnel, so `self()` in a callback is the session, and anything you send to it (socket messages, timers) comes back through `handle_info/2`.
+`accept/1` runs in the listener's request process. Every other callback runs inside the tunnel's server session process: one process per tunnel, so `self()` in a callback is the session, and anything you send to it (socket messages, timers) comes back through `handle_info/2`. Every message counts as traffic for the idle timeout, except one tagged `{masque_timer, _}`: tag a retry timer that way so a retry that gets nowhere does not keep the tunnel alive.
 
 ## Callbacks
 

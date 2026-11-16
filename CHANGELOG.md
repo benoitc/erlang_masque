@@ -20,6 +20,9 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - The wildcard target of CONNECT-IP and Connect-UDP-Bind is sent as `%2A`,
   as RFC 9484 erratum 8444 and the Connect-UDP-Bind draft require. Proxies
   still accept a bare `*`.
+- A CONNECT-UDP peer that sends a UDP payload larger than 65527 bytes now
+  has its tunnel aborted, on the proxy and on the client, as RFC 9298
+  requires. Such payloads used to be dropped and the tunnel kept going.
 
 ### Changed
 
@@ -28,6 +31,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   combined names must be updated. `instrument` now also starts
   `hackney`. h2 0.15.1 notices a vanished peer at once instead of after
   about five seconds.
+- masque now uses quic 3.1.0, h2 0.18.0 and h1 0.11.0. Over HTTP/3, a peer
+  certificate issued for another purpose than TLS is now refused. A UDP
+  payload is checked against what the network path carries now rather than
+  the peer's advertised limit, so a large payload on a new connection is
+  refused as too large until path MTU discovery confirms bigger packets.
 
 ### Added
 
@@ -42,6 +50,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
   oversized clients can be dropped sooner.
 - A CONNECT-TCP tunnel on HTTP/3 tells its owner when a full send queue
   has drained, so the owner knows when to send again instead of polling.
+- CONNECT-TCP clients take `rx_backlog` (64 by default): how many
+  messages may wait in the owner's mailbox before the tunnel stops reading
+  from the proxy.
+- The UDP proxy handlers take `dont_fragment` (on by default) to control
+  whether the kernel may fragment the packets they send.
 - A reverse connect agent takes `max_pending_requests` (64 by default):
   requests past it are declined for you.
 - HTTP/3 listeners and clients take QUIC options. A listener can pick its
@@ -88,6 +101,33 @@ and the project uses [Semantic Versioning](https://semver.org/).
   most ten are written a second.
 - Reverse connect request ids came from a predictable random source; they
   now come from a cryptographic one.
+- A CONNECT-TCP client whose owner read slowly took everything the proxy
+  sent into the owner's mailbox, with no limit: 32 MB arrived in a test
+  where the owner read nothing. The tunnel now slows the proxy down until
+  the owner catches up, in both delivery modes and on every transport,
+  which also protects chained proxies whose client side is slow.
+- A chained CONNECT-TCP tunnel whose next proxy stopped taking data
+  retried every 5 ms forever, and those retries kept the tunnel from ever
+  timing out as idle. It now waits for the next proxy to say it has room,
+  backs off, ends the tunnel after 30 seconds without progress, and idles
+  out as configured.
+- A CONNECT-TCP proxy on HTTP/2 with a stream window smaller than 32 KB
+  stalled: it held back flow-control credit waiting for 16 KB and the
+  client could never send that much. Credit now comes back in steps that
+  fit the window.
+- A CONNECT-IP client that asked for a second address lost the first one:
+  the proxy's answer listed only the new address, and RFC 9484 treats an
+  address missing from an answer as withdrawn, while the proxy kept it
+  reserved. Every answer now lists all the addresses the client holds.
+- The UDP proxy let the kernel fragment packets larger than the path MTU,
+  which RFC 9298 forbids. Its sockets now set Don't Fragment on Linux,
+  macOS and FreeBSD, and such packets are dropped.
+- An HTTP/3 client that reset its request or closed its connection while
+  the request was being dispatched could log a handler error on the proxy.
+  These disconnects are now quiet.
+- Checking whether a client's receive queue was full took longer the fuller
+  the queue was, so a busy queue-mode session spent more and more time on
+  it. The check now takes constant time.
 - A proxy that refused a tunnel just as the client went away logged a crash
   report.
 - Pooled HTTP/2 tunnels failed when the proxy allowed fewer concurrent

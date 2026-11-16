@@ -326,7 +326,7 @@ backlog_drop_inc() ->
 
 -doc """
 Count a datagram a client session dropped because its owner (in
-`message' mode) already had 10 000 messages waiting.
+`message` mode) already had 10 000 messages waiting.
 """.
 -spec owner_drop_inc() -> ok.
 owner_drop_inc() ->

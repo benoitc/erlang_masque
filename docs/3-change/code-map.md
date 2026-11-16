@@ -13,7 +13,8 @@ This page lists every module in `src/`, grouped by role, with one line on what i
 | Module | Role | Change this when... |
 |---|---|---|
 | `masque_handler` | The handler behaviour: callback specs, the `req()` map type, `default_accept/1`. It defines the contract only; the code that calls handlers is in each server session. | you add a callback or a field to the request map. |
-| `masque_udp_proxy_handler` | Default CONNECT-UDP handler: opens a `gen_udp` socket to the target, relays both ways, applies `allow`, `resolver`, `family`, `active_n`. | you change how the proxy reaches UDP targets or its policy options. |
+| `masque_udp_proxy_handler` | Default CONNECT-UDP handler: opens a `gen_udp` socket to the target, relays both ways, applies `allow`, `resolver`, `family`, `active_n`, `dont_fragment`. | you change how the proxy reaches UDP targets or its policy options. |
+| `masque_udp_df` | Don't-fragment raw socket options per OS for the UDP handlers' sockets (RFC 9298 section 3.1). | you support another OS or change how fragmentation is forbidden. |
 | `masque_tcp_proxy_handler` | Default CONNECT-TCP handler: opens a `gen_tcp` connection, relays bytes, maps FIN both ways, `eof_timeout` for half-closed tunnels. | you change TCP dialing, half-close or target policy. |
 | `masque_tcp_dial` | Happy Eyeballs (RFC 8305) for the CONNECT-TCP handler: races a target's addresses and hands over the first connection. | you change how capsule-framed tunnels dial their target. |
 | `masque_tcp_capsule` | CONNECT-TCP capsule framing: tokens and versions, `DATA`/`FINAL_DATA` encoding, the streaming decoder and its invalid-data checks. | the CONNECT-TCP draft changes its tokens, codes or framing rules. |
@@ -23,6 +24,7 @@ This page lists every module in `src/`, grouped by role, with one line on what i
 | `masque_listen_h1_client_session` | The same over h1, on its own TLS connection. | as above, for h1. |
 | `masque_reverse_listener` | Listener side of reverse connect, shared by the three listeners: recognises `connect-listen` and `connect-accept`, authenticates, checks accepts (id, connection, identity). | you change what a listener accepts for reverse connect. |
 | `masque_reverse_accept_handler` | Handler for TCP accept streams on the proxy: takes the pending request and relays the stream to the requester, with `handle_call/3` for its API. | you change the proxy-side accept stream API. |
+| `masque_session_writer` | Per-session writer for the writes a handler call starts (the accept stream API): the blocking tunnel write runs there, so the TCP server session keeps reading and taking `consumed` meanwhile; it replies to the caller, then the session runs the call's other actions. | you change how handler-call writes reach the tunnel. |
 | `masque_reverse_accept_udp_handler` | Handler for UDP accept streams on the proxy: relays datagrams to the requester. | you change the proxy-side UDP accept stream. |
 | `masque_reverse_registry` | ETS table of pending requests (id to control session, connection, identity, requester, service). | you change how requests are matched to accepts. |
 | `masque_reverse_ids` | The request ids an agent has seen on a control channel, bounded to the last 4,096, for the reuse check. | you change how reused request ids are detected. |
@@ -31,6 +33,7 @@ This page lists every module in `src/`, grouped by role, with one line on what i
 | `masque_listen_handler` | Behaviour for the proxy's `listen_handler`. | you add a callback. |
 | `masque_quiet` | Quiet session exits: wraps a session's stop reason in `{shutdown, {masque_quiet, R}}` so OTP does not log it, and unwraps it for `terminate` and callers. | you add a session module (wrap its callbacks) or read a session's exit reason. |
 | `masque_stream_send` | Blocking write on an h3 or h2 stream (h2 flow-control wait, h3 retry on `send_ready`, 30 s without progress, 150 s in all; `stream_send_timeout_ms`). Used by CONNECT-TCP, udp-bind control capsules and the reverse connect control channel. | you change how stream writes wait for the transport. |
+| `masque_rx_credit` | Receive credit for one CONNECT-TCP stream with manual flow control: h3 credit back at once, h2 batched in steps of a frame or half the stream window. Used by TCP server and client sessions. | you change when the peer gets credit back. |
 | `masque_out` | Non-blocking writes on a server session's traffic path (h3 datagrams and stream data, h2 stream data) that stop the session quietly with `connection_closed` when the connection is already gone. | you add a write on a server session's traffic path. |
 | `masque_ip_proxy_handler` | Default CONNECT-IP handler: address allocation from `address_pool`, route advertisement, source filtering, TTL and MTU handling, `forward_fun` and `lifecycle_fun` hooks. | you change the CONNECT-IP forwarding plane or address policy. |
 | `masque_udp_bind_proxy_handler` | Default Connect-UDP-Bind handler: owns the bind `gen_udp` socket, builds `Proxy-Public-Address`, filters peers. Adds `handle_bind_packet/3`, which is not part of `masque_handler`. | you change bind socket policy or public address reporting. |
@@ -78,7 +81,7 @@ Change a session module when you change the wire behaviour of that cell: framing
 |---|---|---|
 | `masque_client_failed` | The shared `failed` state: parks a dial error until `handshake_await` collects it. | you change how early dial errors reach the caller. |
 | `masque_client_owner` | Holds application-owner messages while `defer_owner` is set, flushes them on `set_owner`. `send_bounded/2` drops proxy-driven events while the owner has 10,000 messages waiting. Uses the process dictionary. | you change the racer handoff or what reaches the owner. |
-| `masque_client_rx` | Queue-mode rules shared by client sessions: `rx_queue_limit`, the `closed` state that serves unread data, linger timeout. | you change queue-mode delivery or close semantics. |
+| `masque_client_rx` | Receive rules shared by client sessions: the counted queue-mode buffer, `rx_queue_limit`, `rx_backlog` and the owner backlog check, the `closed` state that serves unread data, linger timeout. | you change queue-mode delivery or close semantics. |
 | `masque_tls` | TLS client options for h1 and h2 dials: `verify_peer` by default, system CA store, hostname check, ALPN, SNI rules. | you change client TLS defaults. |
 
 ## Codecs and URI

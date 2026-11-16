@@ -37,6 +37,10 @@
 %% How long a closed tunnel waits for the proxy's FIN before closing
 %% its own connection.
 -define(CLOSE_LINGER_MS, 2000).
+%% While the owner is behind, how often the session checks whether it
+%% caught up (doubling from the first to the second).
+-define(RECHECK_MIN_MS, 5).
+-define(RECHECK_MAX_MS, 100).
 
 -record(data, {
     owner :: pid(),
@@ -54,11 +58,21 @@
     failure :: term(),
     timeout_ref :: reference() | undefined,
     mode :: message | queue,
-    rx_buf = queue:new() :: queue:queue(binary()),
+    rx_buf = masque_client_rx:new() :: masque_client_rx:buf(),
     rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
     %% Bound on `rx_buf' (`rx_queue_limit'); past it the tunnel ends
     %% with `rx_overflow' rather than dropping bytes.
     rx_limit = ?MASQUE_DEFAULT_RX_QUEUE_LIMIT :: pos_integer(),
+    %% Receive credit follows the owner (`flow_control => manual'): in
+    %% message mode it is held while the owner has `rx_backlog' messages
+    %% waiting (`held', rechecked by `recheck'), in queue mode it goes
+    %% back when `recv/2' hands the bytes out.
+    rx_backlog = 64 :: pos_integer(),
+    held = 0 :: non_neg_integer(),
+    recheck :: {reference(), pos_integer()} | undefined,
+    %% Queued items at the head of `rx_buf' whose credit already went
+    %% back (the session left queue mode with them queued).
+    credited = 0 :: non_neg_integer(),
     write_closed = false :: boolean(),
     %% An h3 send was refused with `send_queue_full': the owner gets
     %% `{masque_send_ready, Sess}' once quic_h3 says the queue drained.
@@ -138,6 +152,7 @@ init({Target, Opts, Owner}) ->
         owner = Owner,
         owner_ref = MRef,
         rx_limit = masque_client_rx:limit(Opts),
+        rx_backlog = masque_client_rx:backlog(Opts),
         proxy_host = to_bin(ProxyHost),
         proxy_port = ProxyPort,
         target_host = to_bin(TargetHost),
@@ -171,6 +186,7 @@ connecting(Type, Event, Data) ->
 connecting_inner(internal, {do_handshake, Opts}, Data) ->
     case masque_client_failed:guard(fun() -> do_connect(Data, Opts) end) of
         {ok, Conn, StreamId} ->
+            ok = masque_rx_credit:init(Data#data.transport, Conn),
             Timeout = maps:get(timeout, Opts, 5000),
             TRef = erlang:start_timer(Timeout, self(), handshake_timeout),
             {keep_state, Data#data{
@@ -308,6 +324,12 @@ open_inner(
     {keep_state, Data#data{send_blocked = false}};
 open_inner({call, From}, {recv, Timeout}, Data) ->
     handle_recv_call(From, Timeout, Data);
+open_inner({call, From}, {set_mode, message}, #data{mode = queue, rx_buf = Buf} = Data) ->
+    %% Queued bytes no longer gate the proxy once new ones go to the
+    %% mailbox: give their credit back, they stay readable with `recv/2'.
+    Items = lists:nthtail(Data#data.credited, masque_client_rx:to_list(Buf)),
+    Data2 = Data#data{mode = message, credited = masque_client_rx:len(Buf)},
+    {keep_state, credit(lists:sum([byte_size(B) || B <- Items]), Data2), [{reply, From, ok}]};
 open_inner({call, From}, {set_mode, Mode}, Data) ->
     {keep_state, Data#data{mode = Mode}, [{reply, From, ok}]};
 open_inner({call, From}, {set_owner, NewOwner}, Data) ->
@@ -361,6 +383,9 @@ open_inner(
         {ok, Items, Dec2} ->
             Payload = iolist_to_binary([P || {_, P} <- Items]),
             Final = lists:keymember(final, 1, Items),
+            %% Capsule headers are not the owner's: their credit goes
+            %% back at once.
+            _ = credit(byte_size(Bytes) - byte_size(Payload), Data),
             Data1 = Data#data{dec = Dec2, final_in = Data#data.final_in orelse Final},
             case {Fin, Data1#data.final_in, masque_tcp_capsule:end_of_stream(Dec2)} of
                 {true, false, _} ->
@@ -414,6 +439,8 @@ open_inner(
     end_tunnel(goaway, {stop, goaway, Data}, Data);
 open_inner(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
+open_inner(info, {timeout, TRef, rx_recheck}, Data) ->
+    {keep_state, recheck(TRef, Data)};
 open_inner(
     info,
     {'DOWN', Ref, process, _, _},
@@ -569,8 +596,8 @@ do_connect(#data{pool_owner = PoolOwner} = Data, _Opts) when
     ReqHeaders = request_headers(Data),
     ReqOpts =
         case Data#data.transport of
-            h3 -> #{end_stream => false};
-            h2 -> #{protocol => Data#data.token}
+            h3 -> #{end_stream => false, flow_control => manual};
+            h2 -> #{protocol => Data#data.token, flow_control => manual}
         end,
     case
         masque_upstream_owner:acquire_stream(
@@ -603,7 +630,7 @@ do_connect(#data{transport = h3} = Data, Opts) ->
                         quic_h3:request(
                             Conn,
                             ReqHeaders,
-                            #{end_stream => false}
+                            #{end_stream => false, flow_control => manual}
                         )
                     of
                         {ok, StreamId} ->
@@ -643,7 +670,7 @@ do_connect(#data{transport = h2} = Data, Opts) ->
                         h2:request(
                             Conn,
                             ReqHeaders,
-                            #{protocol => Data#data.token}
+                            #{protocol => Data#data.token, flow_control => manual}
                         )
                     of
                         {ok, StreamId} ->
@@ -785,9 +812,14 @@ sanitise_extra_headers(List) when is_list(List) ->
 %%====================================================================
 
 handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
-    case queue:out(Buf) of
+    case masque_client_rx:out(Buf) of
+        {{value, Bytes}, Buf2} when Data#data.credited > 0 ->
+            %% Credited when the session left queue mode.
+            Data2 = Data#data{rx_buf = Buf2, credited = Data#data.credited - 1},
+            {keep_state, Data2, [{reply, From, {ok, Bytes}}]};
         {{value, Bytes}, Buf2} ->
-            {keep_state, Data#data{rx_buf = Buf2}, [{reply, From, {ok, Bytes}}]};
+            Data2 = credit(byte_size(Bytes), Data#data{rx_buf = Buf2}),
+            {keep_state, Data2, [{reply, From, {ok, Bytes}}]};
         {empty, _} when Data#data.read_closed ->
             {keep_state, Data, [{reply, From, {error, closed}}]};
         {empty, _} ->
@@ -803,19 +835,53 @@ deliver(<<>>, Data) ->
     Data;
 deliver(Bytes, #data{mode = message, owner = Owner} = Data) ->
     masque_client_owner:send(Owner, {masque_data, self(), Bytes}),
-    Data;
+    owner_credit(byte_size(Bytes), Data);
 deliver(Bytes, #data{mode = queue, rx_waiters = Ws, rx_buf = Buf} = Data) ->
     case queue:out(Ws) of
         {{value, {From, TRef}}, Ws2} ->
             _ = erlang:cancel_timer(TRef),
             gen_statem:reply(From, {ok, Bytes}),
-            Data#data{rx_waiters = Ws2};
+            credit(byte_size(Bytes), Data#data{rx_waiters = Ws2});
         {empty, _} ->
             case masque_client_rx:is_full(Buf, Data#data.rx_limit) of
-                false -> Data#data{rx_buf = queue:in(Bytes, Buf)};
+                false -> Data#data{rx_buf = masque_client_rx:in(Bytes, Buf)};
                 true -> {overflow, Data}
             end
     end.
+
+%% Give the proxy `N' bytes of credit back.
+credit(0, Data) ->
+    Data;
+credit(N, #data{transport = T, conn = C, stream_id = S} = Data) when is_pid(C) ->
+    ok = masque_rx_credit:consume(T, C, S, N),
+    Data;
+credit(_N, Data) ->
+    Data.
+
+%% Message mode: the bytes are in the owner's mailbox. Their credit goes
+%% back unless the owner is `rx_backlog' messages behind; then it is held
+%% (in order, behind credit already held) until the owner catches up.
+owner_credit(N, #data{held = Held} = Data) when Held > 0 ->
+    Data#data{held = Held + N};
+owner_credit(N, #data{owner = Owner, rx_backlog = Max} = Data) ->
+    case masque_client_rx:owner_behind(Owner, Max) of
+        true -> arm_recheck(?RECHECK_MIN_MS, Data#data{held = N});
+        false -> credit(N, Data)
+    end.
+
+recheck(TRef, #data{recheck = {TRef, Ms}, owner = Owner, rx_backlog = Max} = Data) ->
+    case masque_client_rx:owner_behind(Owner, Max) of
+        true ->
+            arm_recheck(min(2 * Ms, ?RECHECK_MAX_MS), Data);
+        false ->
+            credit(Data#data.held, Data#data{held = 0, recheck = undefined})
+    end;
+recheck(_StaleRef, Data) ->
+    Data.
+
+arm_recheck(Ms, Data) ->
+    TRef = erlang:start_timer(Ms, self(), rx_recheck),
+    Data#data{recheck = {TRef, Ms}}.
 
 %% The peer's FIN: queued bytes stay readable, then `recv/2' returns
 %% `{error, closed}'; waiters (only present with an empty queue) get

@@ -50,6 +50,9 @@ Configurable via `handler_opts`:
   {drop, Reason, State})`
   - data-plane policy hook for DDoS scrubbing or other
   per-packet filtering. Default identity.
+- `dont_fragment :: boolean()` - forbid IP fragmentation on the
+  socket (RFC 9298 section 3.1); a packet above the path MTU is
+  dropped. Default `true`.
 """.
 
 -export([init/2, handle_bind_packet/3, handle_packet/2, handle_info/2, terminate/2]).
@@ -141,6 +144,7 @@ open(Scope, Opts) ->
     ],
     case gen_udp:open(BindPort, SocketOpts) of
         {ok, Socket} ->
+            ok = masque_udp_df:set(Socket, Opts),
             case resolve_public_addresses(Socket, Opts) of
                 {ok, Addresses} ->
                     Families = families(Addresses),

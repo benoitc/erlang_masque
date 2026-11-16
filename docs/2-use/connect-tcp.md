@@ -12,7 +12,14 @@ receive {masque_data, Sess, Chunk} -> Chunk end.
 
 - On h3 and h2 the request is Extended CONNECT with `:protocol = connect-tcp` (or the token in use, see below) on the `/.well-known/masque/tcp/{target_host}/{target_port}/` template. On h1 it is `CONNECT host:port HTTP/1.1` in raw framing, or a `GET` upgrade on the same template in capsule framing; set `proxy_authorization` to send a `Proxy-Authorization` header.
 - No datagrams and no context ids. In raw framing the request carries no `capsule-protocol` header, and a 2xx that carries one is refused with `{error, {bad_response, capsule_protocol}}`. `send_capsule/3` returns `{error, not_supported}` in both framings; the `capsule_protocol` option is ignored.
-- Bytes are never dropped. In queue mode, a full queue (`rx_queue_limit`) resets the tunnel and `recv/2` ends with `{error, rx_overflow}` after the buffered data.
+- Bytes are never dropped, and a slow owner slows the proxy down instead of piling bytes up:
+  - In message mode the session stops giving the proxy flow-control credit while your mailbox holds `rx_backlog` messages (default 64), and gives it back once you catch up. On h1 it stops reading the socket instead. What sits in your mailbox is then bounded by about `rx_backlog` chunks plus one stream window. An owner on another node is not checked.
+  - In queue mode on h3 and h2 the credit for a chunk goes back when `recv/2` hands it out, so the queue holds at most a stream window. On h1 the socket is not read while `rx_backlog` items wait. A queue that still fills up (`rx_queue_limit`) resets the tunnel, and `recv/2` ends with `{error, rx_overflow}` after the buffered data.
+
+```erlang
+%% Let up to 256 chunks wait in this process's mailbox.
+{ok, Sess} = masque:connect(Proxy, Target, #{protocol => tcp, rx_backlog => 256}).
+```
 
 ## Two framings
 

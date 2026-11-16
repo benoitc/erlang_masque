@@ -230,6 +230,10 @@ handle_info_inner({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idl
         expired -> {stop, idle_timeout, S};
         {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
     end;
+%% A handler's own timer (`{masque_timer, _}') is not traffic: a retry
+%% that gets nowhere must not keep the tunnel from idling out.
+handle_info_inner({masque_timer, _} = Msg, S) ->
+    handle_traffic(Msg, S);
 handle_info_inner(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
     handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
 handle_info_inner(Msg, S) ->
@@ -349,13 +353,15 @@ drain_capsules(Buf, Fin, S) ->
     end.
 
 dispatch_capsule(datagram, Inner, S) ->
-    case masque_datagram:decode(Inner) of
-        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} when
-            byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD
-        ->
+    case masque_datagram:udp_payload(Inner) of
+        {ok, UdpBytes} ->
             dispatch(handle_packet, [UdpBytes], count_in(UdpBytes, S));
-        _ ->
-            %% Unknown context-id or oversize: RFC 9298 §5 says drop.
+        too_large ->
+            %% RFC 9298 section 5: a context-zero payload over 65527
+            %% bytes aborts the stream.
+            reset_and_stop(udp_payload_too_large, S);
+        drop ->
+            %% Unknown context-id: RFC 9298 section 5 says drop.
             {noreply, S}
     end;
 dispatch_capsule(Type, Inner, S) when is_integer(Type) ->

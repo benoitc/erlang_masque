@@ -11,9 +11,10 @@ Section numbers in the RFC 9484 table were checked against the RFC's table of co
 | §2 | URI template with `target_host` and `target_port` | Default `/.well-known/masque/udp/{target_host}/{target_port}/`; client expands, server matches `:path`. Parsing is strict: dotted-quad IPv4 only, no zone ids, digit-only ports, no double decoding. | `masque_uri`, `masque_uri_template`, `include/masque.hrl` |
 | §3 | A 2xx means the proxy is ready to forward | The handler's `init/2` (socket open, target checks) runs before the 2xx. On h3 the 2xx is sent from finalize, and handler output produced earlier is held until after it. | `masque_server_session`, `masque_server_connection` |
 | §3.2, §3.3 | HTTP/1.1: `GET` with `Upgrade: connect-udp`, `Connection: Upgrade`, `Capsule-Protocol: ?1`; 101 response | Listener requires all three headers and a `Host`; the client validates the 101. | `masque_h1_server`, `masque_h1_client_session` |
+| §3.1 | The proxy must not introduce IP fragmentation and sets IPv4 DF where it can | The proxy's UDP sockets set IPv4 Don't Fragment (Linux `IP_PMTUDISC_DO`, `IP_DONTFRAG` on macOS and FreeBSD) and `IPV6_DONTFRAG`. A packet above the path MTU is dropped. `dont_fragment => false` turns it off; other systems keep the kernel default. | `masque_udp_df`, `masque_udp_proxy_handler`, `masque_udp_bind_proxy_handler` |
 | §3.4, §3.5 | HTTP/2 and HTTP/3: Extended CONNECT with `:protocol = connect-udp` | Listeners require `:method = CONNECT`, `:protocol`, `:scheme` and `:authority`. | `masque_server`, `masque_h2_server` |
 | §4 | Context ID 0 is UDP payload; other ids are extensions | Context 0 is delivered to `handle_packet/2` / the owner. Unknown context ids are dropped on receipt. `masque:send/3` lets you send on another id. | `masque_datagram`, UDP sessions |
-| §5 | UDP payload at most 65527 bytes | Larger payloads are refused on send (`{payload_too_large, _, 65527}` on the client, silent drop in a handler action) and dropped on receipt. On h3 the negotiated datagram size is checked too. | UDP sessions |
+| §5 | UDP payload at most 65527 bytes; a receiver aborts the stream on a larger one | Larger payloads are refused on send (`{payload_too_large, _, 65527}` on the client, silent drop in a handler action). A larger context-zero payload received aborts the stream: `H3_DATAGRAM_ERROR` on h3, `PROTOCOL_ERROR` on h2, the connection closed on h1, with reason `udp_payload_too_large`. On h3 a send is also checked against what the path carries now. | UDP sessions, `masque_datagram` |
 | (errors) | Failures are reported as HTTP status codes | See the status mapping in [messages-and-errors](messages-and-errors.md#server-side-handshake-reasons-and-http-status). | `masque_errors` |
 
 Deviations and additions:
@@ -44,6 +45,7 @@ This table replaces the compliance map from the former `docs/connect_ip.md`. Eac
 | §4.2 | Upgrade with `Upgrade: connect-ip` | Supported on h1, same checks as CONNECT-UDP. | `masque_h1_server`, `masque_ip_h1_*` |
 | §4.6 | Proxy limits traffic to the requested `target` / `ipproto` | The default handler drops packets outside the scope (`scope_target`, `scope_ipproto`); a hostname target only reaches its advertised routes; a prefix target drops non-public destinations unless `allow_private`. | `masque_ip_proxy_handler`, `masque_ip_packet` |
 | §4.7.1 | Non-zero Request ID answers a prior ADDRESS_REQUEST; ID 0 is unprompted | Both sides track pending ids. The client's `assign_addresses/2` returns `{no_such_pending_request, Id}`; on the server an `{assign, Entries}` action containing an unmatched id is skipped as a whole. | `masque_ip_client_session`, `masque_ip_server_session`, `masque_ip_h1_server_session` |
+| §4.7.1 | Every ADDRESS_ASSIGN carries the full list of assigned addresses; one left out is removed | The default handler answers each ADDRESS_REQUEST with the new entries under their request ids, followed by every address it assigned earlier, with request id 0. | `masque_ip_proxy_handler` |
 | §4.7.1 | Hostname targets are resolved before the 2xx and advertised | All three listeners run the `resolver` through `masque_ip:resolve_target/3` before `accept/1`; the result is in `resolved_addresses` and the default handler advertises it. | `masque_ip`, listeners |
 | §4.7.2 | At least one entry; Request IDs non-zero and unique per sender | Enforced on encode and decode (`empty_address_request`, `duplicate_request_id`). | `masque_ip_capsule` |
 | §4.7.2 | Proxy answers requests it cannot satisfy | With no pool, or when the pool is exhausted, entries are answered with the all-zero "reject" assignment. | `masque_ip`, `masque_ip_proxy_handler` |
@@ -98,7 +100,7 @@ Stream and connection semantics from RFC 9114 and RFC 9113 that the sessions rel
 
 ## draft-ietf-httpbis-connect-tcp
 
-masque implements draft-ietf-httpbis-connect-tcp-18 (in the RFC Editor queue) in capsule framing. It also keeps the raw framing of the earlier revisions, which stays the client default, and the provisional capsule codes of drafts -09 and -10 for peers that still use them. See [connect-tcp](../2-use/connect-tcp.md#two-framings).
+masque implements draft-ietf-httpbis-connect-tcp-18 (in the RFC Editor queue) in capsule framing. Capsule framing is the client default. It also keeps the raw framing of the earlier revisions (`tcp_framing => raw`), and the provisional capsule codes of drafts -09 and -10 for peers that still use them. See [connect-tcp](../2-use/connect-tcp.md#two-framings).
 
 | Requirement | Behaviour in masque | Module |
 | --- | --- | --- |

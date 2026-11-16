@@ -28,11 +28,6 @@
 
 -define(DEFAULT_IDLE_MS, 300000).
 
-%% h2 receive credit is returned in steps of at least one full frame
-%% (`consume_bytes/3').
--define(H2_MIN_CREDIT, 16384).
--define(H2_CREDIT_KEY, {?MODULE, h2_credit}).
-
 -record(state, {
     conn :: pid(),
     stream_id :: non_neg_integer(),
@@ -70,7 +65,11 @@
     version = final :: masque_tcp_capsule:version(),
     dec :: masque_tcp_capsule:decoder() | undefined,
     %% Capsule mode: the client sent FINAL_DATA.
-    final_in = false :: boolean()
+    final_in = false :: boolean(),
+    %% Writes of handler calls (`masque_session_writer') and, per call,
+    %% whether they end the stream and the actions to run after them.
+    writer :: pid() | undefined,
+    writes = #{} :: #{reference() => {boolean(), [term()]}}
 }).
 
 %%====================================================================
@@ -268,6 +267,7 @@ claim_stream(#state{transport = h3, conn = C, stream_id = S}) ->
         quic_h3:set_stream_handler(C, S, self(), #{drain_buffer => false, flow_control => manual})
     end);
 claim_stream(#state{transport = h2, conn = C, stream_id = S}) ->
+    ok = masque_rx_credit:init(h2, C),
     masque_out:call(fun() -> h2:set_stream_handler(C, S, self(), #{flow_control => manual}) end).
 
 %% The stream may already be gone (its FIN was the last event).
@@ -276,38 +276,11 @@ consume(Tag, Bytes, S) ->
 
 consume_bytes(_Tag, 0, _S) ->
     ok;
-%% h2 sends a WINDOW_UPDATE for every `consume'. Capsules do not line up
-%% with h2 frames, so credit would come back in few-byte pieces and a
-%% blocked client would answer each with a few-byte DATA frame (silly
-%% window). Credit is returned once a full frame's worth has built up;
-%% with the 64 KB default stream window the client always keeps room to
-%% go on meanwhile.
+%% Batched on h2 (see `masque_rx_credit').
 consume_bytes(h2, N, #state{conn = C, stream_id = Sid}) ->
-    Pending = get_h2_credit() + N,
-    case Pending >= ?H2_MIN_CREDIT of
-        true ->
-            put(?H2_CREDIT_KEY, 0),
-            try
-                h2:consume(C, Sid, Pending)
-            catch
-                exit:_ -> ok
-            end;
-        false ->
-            put(?H2_CREDIT_KEY, Pending),
-            ok
-    end;
+    masque_rx_credit:consume(h2, C, Sid, N);
 consume_bytes(quic_h3, N, #state{conn = C, stream_id = Sid}) ->
-    try
-        quic_h3:consume(C, Sid, N)
-    catch
-        exit:_ -> ok
-    end.
-
-get_h2_credit() ->
-    case get(?H2_CREDIT_KEY) of
-        undefined -> 0;
-        N -> N
-    end.
+    masque_rx_credit:consume(h3, C, Sid, N).
 
 %%====================================================================
 %% Capsule framing (draft-ietf-httpbis-connect-tcp-18)
@@ -428,11 +401,12 @@ handle_call_inner(Req, From, #state{handler = Handler, h_state = HS} = S) ->
                 {reply, Reply, HS2} ->
                     {reply, Reply, S#state{h_state = HS2}};
                 {reply, Reply, HS2, Actions} ->
-                    case do_actions(Actions, S#state{h_state = HS2}) of
-                        {ok, S2} -> {reply, Reply, S2};
-                        %% The actions ended the stream cleanly.
-                        {stop, normal, S2} -> {stop, normal, Reply, S2};
-                        {stop, Reason, S2} -> {stop, Reason, {error, closed}, S2}
+                    case split_writes(Actions) of
+                        {[], _} ->
+                            call_actions(Reply, Actions, S#state{h_state = HS2});
+                        {Writes, Rest} ->
+                            {noreply,
+                                write_async(From, Reply, Writes, Rest, S#state{h_state = HS2})}
                     end;
                 {stop, Reason, Reply, HS2} ->
                     {stop, Reason, Reply, S#state{h_state = HS2}};
@@ -442,6 +416,64 @@ handle_call_inner(Req, From, #state{handler = Handler, h_state = HS} = S) ->
     end;
 handle_call_inner(_Req, _From, S) ->
     {reply, {error, unknown_call}, S}.
+
+call_actions(Reply, Actions, S) ->
+    case do_actions(Actions, S) of
+        {ok, S2} -> {reply, Reply, S2};
+        %% The actions ended the stream cleanly.
+        {stop, normal, S2} -> {stop, normal, Reply, S2};
+        {stop, Reason, S2} -> {stop, Reason, {error, closed}, S2}
+    end.
+
+%% The writes a handler call starts with go to the writer (see
+%% `masque_session_writer'), so the session keeps reading while they
+%% wait for the transport; the caller gets its reply once they landed.
+split_writes(Actions) ->
+    lists:splitwith(
+        fun
+            ({send_data, _}) -> true;
+            ({send_data, _, _}) -> true;
+            (_) -> false
+        end,
+        Actions
+    ).
+
+write_async(From, Reply, Writes, Rest, #state{writes = Pending} = S) ->
+    S1 = ensure_writer(S),
+    Items = [write_item(W) || W <- Writes],
+    lists:foreach(fun({Bytes, _}) -> ok = count_out(Bytes, S1) end, Items),
+    Ref = make_ref(),
+    Fin = lists:any(fun({_, F}) -> F end, Items),
+    ok = masque_session_writer:write(S1#state.writer, Ref, From, Reply, Items),
+    S1#state{writes = Pending#{Ref => {Fin, Rest}}}.
+
+write_item({send_data, Bytes}) -> {Bytes, false};
+write_item({send_data, Bytes, Fin}) -> {Bytes, Fin}.
+
+%% The writer's result for a handler call: run the call's other actions.
+writer_done(Ref, Result, #state{writes = Pending} = S) ->
+    case maps:take(Ref, Pending) of
+        error ->
+            {noreply, S};
+        {{_Fin, _Rest}, Pending2} when Result =/= ok ->
+            {error, Reason} = Result,
+            {stop, {tunnel_send_failed, Reason}, S#state{writes = Pending2}};
+        {{Fin, Rest}, Pending2} ->
+            after_write(Fin, Rest, S#state{writes = Pending2})
+    end.
+
+after_write(Fin, Rest, S) ->
+    S1 = S#state{fin_sent = Fin orelse S#state.fin_sent},
+    case do_actions(Rest, S1) of
+        {ok, S2} -> {noreply, S2};
+        {stop, Reason, S2} -> {stop, Reason, S2}
+    end.
+
+ensure_writer(#state{writer = undefined} = S) ->
+    Write = fun(Bytes, Fin) -> tunnel_send(S, frame(S, Bytes, Fin), Fin) end,
+    S#state{writer = masque_session_writer:start_link(Write)};
+ensure_writer(S) ->
+    S.
 
 %% Asynchronous finalize from the router: run the same steps as the
 %% `finalize' call and report back; the session stops if the stream
@@ -483,11 +515,17 @@ handle_info(Msg, State) ->
 %% traffic, so they cannot keep the stream from idling out or pile up.
 handle_info_inner({masque_datagram_in, _, _}, S) ->
     {noreply, S};
+handle_info_inner({masque_writer_done, Ref, Result}, S) ->
+    writer_done(Ref, Result, S);
 handle_info_inner({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idle =/= undefined ->
     case masque_idle:check(Ref, Idle) of
         expired -> {stop, idle_timeout, S};
         {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
     end;
+%% A handler's own timer (`{masque_timer, _}') is not traffic: a retry
+%% that gets nowhere must not keep the tunnel from idling out.
+handle_info_inner({masque_timer, _} = Msg, S) ->
+    handle_traffic(Msg, S);
 handle_info_inner(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
     handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
 handle_info_inner(Msg, S) ->
@@ -564,6 +602,9 @@ terminate(Reason, State) ->
 
 terminate_inner(_Reason, {starting, Args}) ->
     masque_session_start:abandon(Args);
+terminate_inner(Reason, #state{writer = W} = S) when is_pid(W) ->
+    ok = masque_session_writer:stop(W),
+    terminate_inner(Reason, S#state{writer = undefined});
 terminate_inner(
     Reason,
     #state{

@@ -182,8 +182,14 @@ address_allocation_round_robin(Config) ->
     {ok, [Id2]} =
         masque:request_addresses(Sess, [{4, {0, 0, 0, 0}, 0}]),
     receive
-        {masque_address_assign, Sess, [#ip_assignment{request_id = Id2, address = A2}]} ->
-            ?assertEqual({10, 200, 0, 2}, A2)
+        %% RFC 9484 section 4.7.1: the full set, the first address
+        %% unprompted (id 0).
+        {masque_address_assign, Sess, [
+            #ip_assignment{request_id = Id2, address = A2},
+            #ip_assignment{request_id = 0, address = Kept}
+        ]} ->
+            ?assertEqual({10, 200, 0, 2}, A2),
+            ?assertEqual({10, 200, 0, 1}, Kept)
     after 2000 -> ct:fail("no assign 2")
     end,
     ok = masque:close(Sess).
@@ -204,7 +210,8 @@ pool_exhaustion_rejects(Config) ->
                 request_id = Id2,
                 address = {0, 0, 0, 0},
                 prefix_len = 32
-            }
+            },
+            #ip_assignment{request_id = 0, address = {10, 200, 0, 1}}
         ]} ->
             ok
     after 2000 -> ct:fail("no rejection for exhausted pool")

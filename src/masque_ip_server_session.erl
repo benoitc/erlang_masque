@@ -350,6 +350,10 @@ handle_info_inner({timeout, Ref, masque_idle}, #state{idle = Idle} = S) when Idl
         expired -> {stop, idle_timeout, S};
         {ok, Idle2} -> {noreply, S#state{idle = Idle2}}
     end;
+%% A handler's own timer (`{masque_timer, _}') is not traffic: a retry
+%% that gets nowhere must not keep the tunnel from idling out.
+handle_info_inner({masque_timer, _} = Msg, S) ->
+    handle_traffic(Msg, S);
 handle_info_inner(Msg, #state{idle = Idle} = S) when Idle =/= undefined ->
     handle_traffic(Msg, S#state{idle = masque_idle:touch(Idle)});
 handle_info_inner(Msg, S) ->

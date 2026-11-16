@@ -16,6 +16,8 @@ Responsibilities:
   addresses.
 - At most `max_assignments` addresses per IP family per session
   (default 1); a further request gets the address already held.
+- Every `ADDRESS_ASSIGN` is the full set the client holds: addresses
+  assigned by earlier requests are repeated with request id 0.
 - Act as a router for accepted packets: decrement the TTL /
   Hop Limit (ICMP Time Exceeded when it runs out) and enforce
   the `mtu` option (default 1500; ICMPv6 Packet Too Big or
@@ -164,7 +166,19 @@ init(Req, Opts) ->
 
 handle_address_request(Requests, #state{} = S) ->
     {Entries, S1} = allocate_or_reject(Requests, S),
-    {ok, S1, [{assign, Entries}]}.
+    {ok, S1, [{assign, Entries ++ retained(Entries, S1)}]}.
+
+%% RFC 9484 section 4.7.1: every ADDRESS_ASSIGN carries the full list of
+%% addresses the client holds, and one left out is removed. Addresses
+%% assigned earlier go out again, with request id 0 since they do not
+%% answer this request; one this request is answered with is not repeated.
+retained(Entries, #state{assigned = Assigned}) ->
+    Answered = [{V, A, P} || #ip_assignment{version = V, address = A, prefix_len = P} <- Entries],
+    [
+        #ip_assignment{request_id = 0, version = V, address = A, prefix_len = P}
+     || {V, A, P} <- lists:reverse(Assigned),
+        not lists:member({V, A, P}, Answered)
+    ].
 
 emit_assigned(
     #ip_assignment{

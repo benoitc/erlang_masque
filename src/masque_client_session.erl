@@ -63,7 +63,7 @@
     %% for sync `recv/2'.
     mode :: message | queue,
     %% Pending sync receivers and buffered datagrams (when mode=queue).
-    rx_buf = queue:new() :: queue:queue(binary()),
+    rx_buf = masque_client_rx:new() :: masque_client_rx:buf(),
     rx_waiters = queue:new() :: queue:queue({gen_statem:from(), reference()}),
     %% Bound on `rx_buf' (`rx_queue_limit') and datagrams dropped past it.
     rx_limit = ?MASQUE_DEFAULT_RX_QUEUE_LIMIT :: pos_integer(),
@@ -319,13 +319,10 @@ open_inner(
     {quic_h3, _Conn, {datagram, StreamId, Payload}},
     #data{stream_id = StreamId} = Data
 ) ->
-    case masque_datagram:decode(Payload) of
-        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} when
-            byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD
-        ->
-            {keep_state, deliver_packet(UdpBytes, Data)};
-        _ ->
-            {keep_state, Data}
+    case masque_datagram:udp_payload(Payload) of
+        {ok, UdpBytes} -> {keep_state, deliver_packet(UdpBytes, Data)};
+        too_large -> client_stream_abort(udp_payload_too_large, Data);
+        drop -> {keep_state, Data}
     end;
 open_inner(
     info,
@@ -471,7 +468,7 @@ swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->
     Data#data{owner = NewOwner, owner_ref = NewRef}.
 
 handle_recv_call(From, Timeout, #data{rx_buf = Buf, rx_waiters = Ws} = Data) ->
-    case queue:out(Buf) of
+    case masque_client_rx:out(Buf) of
         {{value, Bytes}, Buf2} ->
             {keep_state, Data#data{rx_buf = Buf2}, [{reply, From, {ok, Bytes}}]};
         {empty, _} ->
@@ -497,26 +494,28 @@ deliver_packet(
             Data#data{rx_waiters = Ws2};
         {empty, _} ->
             case masque_client_rx:is_full(Buf, Data#data.rx_limit) of
-                false -> Data#data{rx_buf = queue:in(UdpBytes, Buf)};
+                false -> Data#data{rx_buf = masque_client_rx:in(UdpBytes, Buf)};
                 true -> Data#data{rx_dropped = Data#data.rx_dropped + 1}
             end
     end.
 
+%% RFC 9298 section 5: a context-zero payload over 65527 bytes aborts
+%% the stream; an unknown context is dropped.
 capsule_datagram(Payload, Data) ->
-    case masque_datagram:decode(Payload) of
-        {ok, {?MASQUE_CONTEXT_ID_UDP, UdpBytes}} when
-            byte_size(UdpBytes) =< ?MASQUE_MAX_UDP_PAYLOAD
-        ->
-            deliver_packet(UdpBytes, Data);
-        _ ->
-            Data
+    case masque_datagram:udp_payload(Payload) of
+        {ok, UdpBytes} -> deliver_packet(UdpBytes, Data);
+        too_large -> {abort, udp_payload_too_large};
+        drop -> Data
     end.
 
 drain_client_capsules(Buf, Fin, #data{owner = Owner} = Data) ->
     case masque_capsule:decode(Buf) of
         {ok, {0, Value, Rest}} ->
             %% RFC 9297 sec 3.5: a DATAGRAM capsule is an HTTP datagram.
-            drain_client_capsules(Rest, Fin, capsule_datagram(Value, Data#data{cap_buf = <<>>}));
+            case capsule_datagram(Value, Data#data{cap_buf = <<>>}) of
+                {abort, Reason} -> client_stream_abort(Reason, Data);
+                Data2 -> drain_client_capsules(Rest, Fin, Data2)
+            end;
         {ok, {Type, Value, Rest}} ->
             masque_client_owner:send_bounded(Owner, {masque_capsule, self(), Type, Value}),
             drain_client_capsules(Rest, Fin, Data#data{cap_buf = <<>>});

@@ -34,6 +34,7 @@ With `accept_bind => true`, a CONNECT-UDP request carrying `connect-udp-bind: ?1
 | `allow_self`, `self_addresses` | `false`, `[]` | The proxy's own addresses (interfaces, `self_addresses`, `public_addresses`) are refused as peers unless `allow_self`. |
 | `scrub_fun` | pass | `fun(Payload, UserState) -> {pass, Payload, UserState} \| {drop, Reason, UserState}`, per-packet filter; `user_state` seeds `UserState`. |
 | `active_n` | `32` | Datagrams read before the socket pauses until the session relayed them. |
+| `dont_fragment` | `true` | Forbid IP fragmentation on the bind socket (RFC 9298 section 3.1); a packet larger than the path MTU is dropped. |
 | `max_compression_contexts` | `1024` | Entries per compression table. |
 | `max_pending_compression_responses` | `16` | Proxy compression assigns waiting for an ACK (h3 and h2). |
 

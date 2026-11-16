@@ -265,7 +265,7 @@ allocate_prefix_aligned_test() ->
             prefix_len = 28
         }
     ],
-    {ok, _S2, [{assign, [Assign2]}]} =
+    {ok, _S2, [{assign, [Assign2, Kept]}]} =
         masque_ip_proxy_handler:handle_address_request(Reqs2, S1),
     ?assertMatch(
         #ip_assignment{
@@ -273,7 +273,9 @@ allocate_prefix_aligned_test() ->
             address = {10, 0, 0, 16}
         },
         Assign2
-    ).
+    ),
+    %% The first /28 is still held, so it is listed again (unprompted).
+    ?assertEqual(Assign1#ip_assignment{request_id = 0}, Kept).
 
 %% Even when the client asks for a wider prefix than `min_assignable',
 %% the proxy clamps the response to `min_assignable'.
@@ -743,6 +745,40 @@ allowed_source_prefix_passes_test() ->
 
 request(Id) ->
     #ip_prefix_request{request_id = Id, version = 4, address = {0, 0, 0, 0}, prefix_len = 32}.
+
+%% A later request for the other family keeps the first address in the
+%% answer: every ADDRESS_ASSIGN is the full set (RFC 9484 4.7.1).
+second_family_keeps_first_address_test() ->
+    drain(),
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    S0 = init_with(Req, #{
+        address_pool => [{4, {10, 0, 0, 0}, 24}, {6, {16#fd00, 0, 0, 0, 0, 0, 0, 0}, 64}]
+    }),
+    {ok, S1, [{assign, [V4]}]} =
+        masque_ip_proxy_handler:handle_address_request([request(1)], S0),
+    V6Req = #ip_prefix_request{
+        request_id = 2, version = 6, address = {0, 0, 0, 0, 0, 0, 0, 0}, prefix_len = 128
+    },
+    {ok, _S2, [{assign, [V6, Kept]}]} =
+        masque_ip_proxy_handler:handle_address_request([V6Req], S1),
+    ?assertMatch(#ip_assignment{request_id = 2, version = 6}, V6),
+    ?assertEqual(V4#ip_assignment{request_id = 0}, Kept).
+
+%% A rejected request is not retained: the next answer lists only what
+%% the client really holds.
+rejection_not_retained_test() ->
+    drain(),
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    S0 = init_with(Req, #{address_pool => {4, {10, 0, 0, 0}, 24}}),
+    V6Req = #ip_prefix_request{
+        request_id = 1, version = 6, address = {0, 0, 0, 0, 0, 0, 0, 0}, prefix_len = 128
+    },
+    {ok, S1, [{assign, [Reject]}]} =
+        masque_ip_proxy_handler:handle_address_request([V6Req], S0),
+    ?assertMatch(#ip_assignment{request_id = 1, prefix_len = 128}, Reject),
+    {ok, _S2, [{assign, [V4]}]} =
+        masque_ip_proxy_handler:handle_address_request([request(2)], S1),
+    ?assertMatch(#ip_assignment{request_id = 2, version = 4}, V4).
 
 %% One session cannot drain the pool: past `max_assignments' (1 per
 %% family by default) a request gets the address already held.
