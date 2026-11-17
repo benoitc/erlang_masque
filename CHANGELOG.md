@@ -31,7 +31,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
   combined names must be updated. `instrument` now also starts
   `hackney`. h2 0.15.1 notices a vanished peer at once instead of after
   about five seconds.
-- masque now uses quic 3.1.0, h2 0.18.0 and h1 0.11.0. Over HTTP/3, a peer
+- masque now uses quic 3.1.1, h2 0.18.0 and h1 0.11.0. quic 3.1.1 uses less CPU and memory per connection, idle ones most of all. Over HTTP/3, a peer
   certificate issued for another purpose than TLS is now refused. A UDP
   payload is checked against what the network path carries now rather than
   the peer's advertised limit, so a large payload on a new connection is
