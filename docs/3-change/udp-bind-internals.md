@@ -36,9 +36,10 @@ Rules enforced by `masque_compression_table`:
 - **Duplicates.** A repeated context id is malformed. A peer that assigns a tuple it already mapped gets `malformed_duplicate_tuple`.
 - **Cross-side conflict.** On the proxy, `install/3` also looks at the own table. If the client assigns a tuple the proxy already opened, the install succeeds with `{conflict, close_proxy_id, Id}`; the session keeps the client's context, sends COMPRESSION_CLOSE for its own and ACKs the client's.
 - **Uncompressed context.** Only the client may open it (IP version 0), and at most one may be open.
-- **Post-close rule.** When the client closes its uncompressed context, the proxy session calls `mark_uncompressed_closed/1` on its own table; from then on `open_compressed/2` returns `{error, uncompressed_closed}` and the proxy opens no new compressed contexts.
+- **Post-close rule.** When the client's uncompressed context closes (the client's CLOSE, or the proxy's own `{compression_close, Id}`), the proxy session calls `mark_uncompressed_closed/1` on its own table; from then on `open_compressed/2` returns `{error, uncompressed_closed}` and the proxy opens no new compressed contexts. A new uncompressed ASSIGN from the client calls `mark_uncompressed_open/1` and lifts it.
+- **One context per tuple.** Both sessions open contexts with `open_compressed/3`, which also checks the peer table: a tuple the peer already opened gets `{error, tuple_open_by_peer}`.
 - **Families.** Only address families listed in `Proxy-Public-Address` are accepted (`unadvertised_family`).
-- **Bounds.** `max_compression_contexts` in `handler_opts` (default 1024) caps each table (`table_full`). `max_pending_compression_responses` (default 16) caps how many proxy ASSIGNs may wait for an ACK; past it the assign is dropped.
+- **Bounds.** `max_compression_contexts` in `handler_opts` (default 1024) caps each table (`table_full`); `max_compression_contexts_in` (peer table) and `max_compression_contexts_out` (own table) override it per table. `max_pending_compression_responses` (default 16) caps how many proxy ASSIGNs may wait for an ACK; past it the assign is dropped.
 
 Any malformed ASSIGN, an ACK for an unknown id, or a CLOSE for an id in neither table resets the stream (`malformed_capsule`).
 
@@ -66,7 +67,7 @@ A proxy ASSIGN for a tuple the client already opened is acknowledged and then cl
 
 ## Bind socket lifecycle
 
-`masque_udp_bind_proxy_handler:init/2` opens one `gen_udp` socket per session on `bind_address` (default `any`) and `bind_port` (default 0), in `{active, active_n}` mode (default 32), plus `bind_socket_opts`. It computes the public addresses from `public_address_fun`, then `public_addresses`, then the socket name when bound to a specific interface; a wildcard bind with neither option set stops `init` with `no_public_addresses`. It returns `{response_headers, [Connect-UDP-Bind, Proxy-Public-Address]}`, which the session splices into the 2xx (the families found there also configure both tables).
+`masque_udp_bind_proxy_handler:init/2` opens one `gen_udp` socket per session on `bind_address` (default `any`) and `bind_port` (default 0), in `{active, active_n}` mode (default 32), plus `bind_socket_opts`. It computes the public addresses from `public_address_fun`, then `public_addresses`, then the socket name when bound to a specific interface; a wildcard bind with neither option set stops `init` with `no_public_addresses`. It returns `{response_headers, [Connect-UDP-Bind, Proxy-Public-Address]}`, which the session splices into the 2xx (the families found there also configure both tables). The session builds those headers with `masque_uri_udp_bind:bind_response_headers/1`: it always sends `Connect-UDP-Bind: ?1` itself and, when the handler's list has no valid `Proxy-Public-Address`, runs the handler's `terminate/2` and refuses with 500 (`{reject, {other, 500}}`) before anything is sent.
 
 Packets from the kernel whose source family was not advertised are ignored; others become `{send_bind_packet, {IP, Port}, Bytes}`. `{udp_passive, _}` re-arms the socket, as for the other handlers (see [server internals](server-internals.md#backpressure)). `udp_error` or `udp_closed` stop the session. `terminate/2` closes the socket.
 

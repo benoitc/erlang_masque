@@ -175,3 +175,12 @@ accept_template_test() ->
 accept_template_requires_request_id_test() ->
     ?assertEqual({error, bad_template}, masque_uri_reverse:parse_accept_template(<<"/accept/">>)),
     ?assertEqual({error, bad_template}, masque_uri_reverse:parse_accept_template(<<"/a/{id}/">>)).
+
+%% Section 5.2: the template MAY contain variables other than
+%% `request_id'.
+accept_template_other_vars_test() ->
+    {ok, T} = masque_uri_reverse:parse_accept_template(<<"/accept/{user}/{request_id}/">>),
+    ?assertEqual({ok, 9}, masque_uri_reverse:match_accept(T, <<"/accept/bob/9/">>)),
+    ?assertMatch(
+        {ok, _}, masque_uri_reverse:parse_accept_template(<<"/masque/accept{?user,request_id}">>)
+    ).

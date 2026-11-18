@@ -686,8 +686,12 @@ side. Close it with `masque:close/1`.
 
 Options are those of `connect/3` with one transport in `transports`
 (default `[h3]`), plus `listen_uri_template` and `accept_uri_template`
-(the draft's defaults otherwise). Pass your credentials in
-`request_headers`. On HTTP/3 and HTTP/2 the channel gets a connection
+(the draft's defaults otherwise). The accept template must contain
+`request_id` (`{error, bad_template}` otherwise); its other variables
+come from `uri_vars`. A request left unanswered is dropped after
+`pending_request_timeout_ms` (default 30000); at most
+`max_pending_requests` (default 64) wait at once. Pass your credentials
+in `request_headers`. On HTTP/3 and HTTP/2 the channel gets a connection
 of its own, which its accept streams share.
 """.
 -spec reverse_listen(
@@ -701,6 +705,12 @@ reverse_listen(ProxyURI, {Target, IpProto}, Opts) when is_map(Opts) ->
         {ok, Template} ?=
             masque_uri_reverse:parse_listen_template(
                 maps:get(listen_uri_template, Opts, ?MASQUE_DEFAULT_LISTEN_URI_TEMPLATE)
+            ),
+        %% Section 5.2: refuse a bad accept template before anything
+        %% is sent, not when the first accept is dialed.
+        {ok, _} ?=
+            masque_uri_reverse:parse_accept_template(
+                maps:get(accept_uri_template, Opts, ?MASQUE_DEFAULT_ACCEPT_URI_TEMPLATE)
             ),
         Path = masque_uri_reverse:expand_listen(Template, #{target => Target, ipproto => IpProto}),
         Owner = maps:get(owner, Opts, self()),
@@ -739,7 +749,11 @@ reverse_accept(Listen, Id, Opts) when is_map(Opts) ->
                 AcceptOpts0#{
                     transport => T,
                     uri_template => maps:get(accept_uri_template, Spec),
-                    uri_vars => #{request_id => integer_to_binary(Id)}
+                    %% Section 5.2: the template may have variables other
+                    %% than `request_id'; they come from `uri_vars'.
+                    uri_vars => (maps:get(uri_vars, AcceptOpts0, #{}))#{
+                        request_id => integer_to_binary(Id)
+                    }
                 },
                 accept_protocol(Service)
             ),

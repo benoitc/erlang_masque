@@ -688,7 +688,7 @@ handle_assign_compression(From, {IP, Port}, Data) ->
     Tuple = {family_of(IP), IP, Port},
     case
         masque_compression_table:open_compressed(
-            Data#data.own_table, Tuple
+            Data#data.own_table, Tuple, Data#data.peer_table
         )
     of
         {ok, Entry, T2} ->
@@ -1028,7 +1028,10 @@ dispatch_capsule(?MASQUE_CAPSULE_COMPRESSION_CLOSE, Body, Data) ->
 dispatch_capsule(0, Value, Data) ->
     %% RFC 9297 sec 3.5: a DATAGRAM capsule is an HTTP datagram, on h2
     %% (where it is the only way) and on h3 alike.
-    {ok, handle_inbound_datagram(Value, Data)};
+    case handle_inbound_datagram(Value, Data) of
+        {abort, Reason} -> {stop, Reason};
+        Data2 -> {ok, Data2}
+    end;
 dispatch_capsule(_Type, _Value, Data) ->
     %% Unknown / unrelated capsules: silently drop per RFC 9297.
     {ok, Data}.

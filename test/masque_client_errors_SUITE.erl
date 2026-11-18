@@ -30,6 +30,9 @@
     default_opts_reject_self_signed_bind_h3/1,
     default_opts_reject_self_signed_bind_h2/1,
     default_opts_reject_self_signed_bind_h1/1,
+    default_opts_reject_self_signed_reverse_h3/1,
+    default_opts_reject_self_signed_reverse_h2/1,
+    default_opts_reject_self_signed_reverse_h1/1,
     trusted_cacerts_accepted_h3/1,
     trusted_cacerts_accepted_h2/1,
     trusted_cacerts_accepted_h1/1,
@@ -57,6 +60,9 @@ all() ->
         default_opts_reject_self_signed_bind_h3,
         default_opts_reject_self_signed_bind_h2,
         default_opts_reject_self_signed_bind_h1,
+        default_opts_reject_self_signed_reverse_h3,
+        default_opts_reject_self_signed_reverse_h2,
+        default_opts_reject_self_signed_reverse_h1,
         trusted_cacerts_accepted_h3,
         trusted_cacerts_accepted_h2,
         trusted_cacerts_accepted_h1,
@@ -142,6 +148,17 @@ default_opts_reject_self_signed_bind_h2(Config) ->
 
 default_opts_reject_self_signed_bind_h1(Config) ->
     assert_rejected(bind_connect(Config, h1)).
+
+%% Reverse connect section 6: the agent confirms the proxy's identity,
+%% so a default-verify control channel refuses a self-signed proxy.
+default_opts_reject_self_signed_reverse_h3(Config) ->
+    assert_rejected(reverse_listen(Config, h3)).
+
+default_opts_reject_self_signed_reverse_h2(Config) ->
+    assert_rejected(reverse_listen(Config, h2)).
+
+default_opts_reject_self_signed_reverse_h1(Config) ->
+    assert_rejected(reverse_listen(Config, h1)).
 
 trusted_cacerts_accepted_h3(Config) ->
     assert_accepted(connect(Config, h3, trusted(Config))).
@@ -458,6 +475,15 @@ bind_connect(Config, Transport) ->
         masque:bind_connect(
             proxy_uri(Config, Transport),
             unscoped,
+            #{transports => [Transport], timeout => 3000}
+        )
+    end).
+
+reverse_listen(Config, Transport) ->
+    catch_all(fun() ->
+        masque:reverse_listen(
+            proxy_uri(Config, Transport),
+            {local, tcp},
             #{transports => [Transport], timeout => 3000}
         )
     end).

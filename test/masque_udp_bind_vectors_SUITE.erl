@@ -1,7 +1,9 @@
 %%% @doc Wire vectors for Connect-UDP-Bind
 %%% (draft-ietf-masque-connect-udp-listen-16) against a real listener on
 %%% h3, h2 and h1. Each case builds the request, capsules and datagrams
-%%% by hand and checks what the proxy answers.
+%%% by hand and checks what the proxy answers. The `client_' cases turn
+%%% it around: a fake proxy sends the bytes and the case checks what
+%%% `masque:bind_connect/3' does with them.
 -module(masque_udp_bind_vectors_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
@@ -24,7 +26,17 @@
     reused_id_aborts/1,
     closed_context_datagram_is_discarded/1,
     unknown_ack_aborts/1,
-    second_uncompressed_aborts/1
+    second_uncompressed_aborts/1,
+    wrong_parity_aborts/1,
+    duplicate_tuple_aborts/1,
+    both_sides_conflict_closes_proxy_context/1,
+    bind_header_always_sent/1,
+    no_public_address_is_500/1,
+    closed_uncompressed_stops_compression/1,
+    client_context_zero_aborts/1,
+    client_uncompressed_assign_aborts/1,
+    client_missing_bind_header/1,
+    client_missing_public_address/1
 ]).
 
 -define(LIMIT, 2).
@@ -47,7 +59,17 @@ groups() ->
         reused_id_aborts,
         closed_context_datagram_is_discarded,
         unknown_ack_aborts,
-        second_uncompressed_aborts
+        second_uncompressed_aborts,
+        wrong_parity_aborts,
+        duplicate_tuple_aborts,
+        both_sides_conflict_closes_proxy_context,
+        bind_header_always_sent,
+        no_public_address_is_500,
+        closed_uncompressed_stops_compression,
+        client_context_zero_aborts,
+        client_uncompressed_assign_aborts,
+        client_missing_bind_header,
+        client_missing_public_address
     ],
     [{h3, [], Cases}, {h2, [], Cases}, {h1, [], Cases}].
 
@@ -65,8 +87,9 @@ init_per_group(T, Config) -> [{transport, T} | Config].
 
 end_per_group(_T, _Config) -> ok.
 
-init_per_testcase(_Case, Config) ->
-    [{server, start_server(?config(transport, Config), ?config(certs, Config))} | Config].
+init_per_testcase(Case, Config) ->
+    Opts = listener_opts(Case, Config),
+    [{server, start_server(?config(transport, Config), ?config(certs, Config), Opts)} | Config].
 
 end_per_testcase(_Case, Config) ->
     stop_server(?config(transport, Config), ?config(server, Config)),
@@ -194,6 +217,100 @@ second_uncompressed_aborts(Config) ->
     ?assertEqual(aborted, stream_end(W)),
     close(W).
 
+%% Sections 3 and 3.1: clients allocate even ids; an odd one from the
+%% client is malformed.
+wrong_parity_aborts(Config) ->
+    W = bound(Config),
+    ok = send_capsule(W, assign(3, {127, 0, 0, 1}, ?config(echo_port, Config))),
+    ?assertEqual(aborted, stream_end(W)),
+    close(W).
+
+%% Section 3.1: a second context for a tuple the client already opened
+%% is malformed.
+duplicate_tuple_aborts(Config) ->
+    W = bound(Config),
+    Port = ?config(echo_port, Config),
+    ok = send_capsule(W, assign(2, {127, 0, 0, 1}, Port)),
+    ?assertEqual({ack, 2}, next_capsule(W)),
+    ok = send_capsule(W, assign(4, {127, 0, 0, 1}, Port)),
+    ?assertEqual(aborted, stream_end(W)),
+    close(W).
+
+%% Section 3.1: both sides opened a context for the same tuple; the
+%% proxy keeps the client's and closes its own.
+both_sides_conflict_closes_proxy_context(Config) ->
+    W = bound(Config),
+    Port = ?config(echo_port, Config),
+    ?assertEqual({assign, 1, {{127, 0, 0, 1}, Port}}, next_capsule(W)),
+    ok = send_capsule(W, assign(2, {127, 0, 0, 1}, Port)),
+    ?assertEqual({ack, 2}, next_capsule(W)),
+    ?assertEqual({close, 1}, next_capsule(W)),
+    ok = send_datagram(W, 2, <<"ping">>),
+    ?assertEqual({2, <<"ping">>}, next_datagram(W)),
+    close(W).
+
+%% Section 6: the proxy sends `Connect-UDP-Bind: ?1' even when its
+%% handler only gives the address list.
+bind_header_always_sent(Config) ->
+    W = bound(Config),
+    ?assertEqual(<<"?1">>, proplists:get_value(<<"connect-udp-bind">>, headers(W))),
+    ?assertNotEqual(undefined, proplists:get_value(<<"proxy-public-address">>, headers(W))),
+    close(W).
+
+%% Section 7: no address list from the handler, no bind: 500.
+no_public_address_is_500(Config) ->
+    W = open(Config, unscoped_path(), [bind_header()]),
+    ?assertEqual(500, status(W)),
+    close(W).
+
+%% Section 3.1: once the client's uncompressed context is closed (here
+%% by the proxy itself) the proxy opens no compressed context; when the
+%% client opens a new uncompressed context (section 4) it may again.
+closed_uncompressed_stops_compression(Config) ->
+    W = bound(Config),
+    Port = ?config(echo_port, Config),
+    ok = send_capsule(W, uncompressed(2)),
+    ?assertEqual({ack, 2}, next_capsule(W)),
+    ok = send_capsule(W, masque_capsule:encode(16#ff02, <<2>>)),
+    ?assertEqual({close, 2}, next_capsule(W)),
+    ok = send_capsule(W, assign(4, {127, 0, 0, 1}, Port)),
+    ?assertEqual({ack, 4}, next_capsule(W)),
+    ok = send_capsule(W, uncompressed(6)),
+    ?assertEqual({ack, 6}, next_capsule(W)),
+    ok = send_capsule(W, masque_capsule:encode(16#ff03, <<(Port + 1):16>>)),
+    ?assertEqual({assign, 1, {{127, 0, 0, 1}, Port + 1}}, next_capsule(W)),
+    close(W).
+
+%% Section 3: on an unscoped bind the client aborts on a context-zero
+%% datagram from the proxy.
+client_context_zero_aborts(Config) ->
+    Sess = fake_bound(Config, bind_response(), {datagram, 0, <<"x">>}),
+    ?assertEqual(context_zero_datagram, closed_reason(Sess)).
+
+%% Section 4: only the client opens uncompressed contexts; a version-0
+%% COMPRESSION_ASSIGN from the proxy is malformed.
+client_uncompressed_assign_aborts(Config) ->
+    Sess = fake_bound(Config, bind_response(), {capsule, uncompressed(1)}),
+    ?assertEqual(malformed_capsule, closed_reason(Sess)).
+
+%% Section 6: a 2xx without `Connect-UDP-Bind: ?1' is not a bind.
+client_missing_bind_header(Config) ->
+    ?assertEqual(
+        {error, missing_bind_response_header},
+        fake_bind(Config, [public_address()], none)
+    ).
+
+%% Section 7: a bind 2xx without a usable address list fails.
+client_missing_public_address(Config) ->
+    ?assertEqual(
+        {error, missing_proxy_public_address},
+        fake_bind(Config, [bind_header()], none)
+    ),
+    ?assertEqual(
+        {error, missing_proxy_public_address},
+        fake_bind(Config, [bind_header(), {<<"proxy-public-address">>, <<"127.0.0.1:4000">>}], none)
+    ).
+
 %%====================================================================
 %% Capsules
 %%====================================================================
@@ -215,6 +332,10 @@ close_capsule(Id) ->
     masque_compression_capsule:encode(#compression_close{context_id = Id}).
 
 bind_header() -> {<<"connect-udp-bind">>, <<"?1">>}.
+
+public_address() -> {<<"proxy-public-address">>, <<"\"127.0.0.1:4000\"">>}.
+
+bind_response() -> [bind_header(), public_address()].
 
 unscoped_path() -> <<"/.well-known/masque/udp/%2A/%2A/">>.
 
@@ -327,9 +448,14 @@ send_datagram(W, Ctx, Payload) ->
     Inner = iolist_to_binary(masque_datagram:encode(Ctx, Payload)),
     send_capsule(W, masque_capsule:encode(0, Inner)).
 
-%% The next compression capsule from the proxy: `{ack | close, Id}'.
+%% The next compression capsule from the proxy: `{ack | close, Id}', or
+%% `{assign, Id, {IP, Port}}'.
 next_capsule(W) ->
     case next_item(W) of
+        {capsule, ?MASQUE_CAPSULE_COMPRESSION_ASSIGN, V} ->
+            {ok, #compression_assign{context_id = Id, address = A, port = P}} =
+                masque_compression_capsule:decode_assign(V),
+            {assign, Id, {A, P}};
         {capsule, ?MASQUE_CAPSULE_COMPRESSION_ACK, V} ->
             {ok, #compression_ack{context_id = Id}} = masque_compression_capsule:decode_ack(V),
             {ack, Id};
@@ -418,21 +544,168 @@ listener_opts() ->
         }
     }.
 
-start_server(h3, Certs) ->
-    {ok, Srv} = masque_test_helpers:start_masque_server(maps:merge(Certs, listener_opts())),
+%% Cases that need the proxy to act on its own use the test handler.
+listener_opts(both_sides_conflict_closes_proxy_context, Config) ->
+    test_handler(#{early_assign => {{127, 0, 0, 1}, ?config(echo_port, Config)}});
+listener_opts(bind_header_always_sent, _Config) ->
+    test_handler(#{response_headers => address_only});
+listener_opts(no_public_address_is_500, _Config) ->
+    test_handler(#{response_headers => none});
+listener_opts(closed_uncompressed_stops_compression, _Config) ->
+    test_handler(#{});
+listener_opts(_Case, _Config) ->
+    listener_opts().
+
+test_handler(Extra) ->
+    #{handler_opts := HOpts} = Opts = listener_opts(),
+    Opts#{bind_handler => masque_crash_bind_handler, handler_opts => maps:merge(HOpts, Extra)}.
+
+start_server(h3, Certs, Opts) ->
+    {ok, Srv} = masque_test_helpers:start_masque_server(maps:merge(Certs, Opts)),
     Srv;
-start_server(h2, #{cert_file := Cert, key_file := Key}) ->
+start_server(h2, #{cert_file := Cert, key_file := Key}, Opts) ->
     Name = unique(h2),
-    {ok, {_, _, Port}} = masque:start_listener_h2(Name, (listener_opts())#{
+    {ok, {_, _, Port}} = masque:start_listener_h2(Name, Opts#{
         port => 0, cert => Cert, key => Key
     }),
     #{name => Name, port => Port};
-start_server(h1, #{cert_file := Cert, key_file := Key}) ->
+start_server(h1, #{cert_file := Cert, key_file := Key}, Opts) ->
     Name = unique(h1),
-    {ok, Ref} = masque:start_listener_h1(Name, (listener_opts())#{
+    {ok, Ref} = masque:start_listener_h1(Name, Opts#{
         port => 0, cert => Cert, key => Key
     }),
     #{name => Name, port => h1:server_port(Ref)}.
+
+%%====================================================================
+%% Fake proxy for the client cases
+%%====================================================================
+
+%% Dial a fake proxy that answers with `Headers' and then sends `Then'.
+fake_bind(Config, Headers, Then) ->
+    {Port, Stop} = fake_proxy(?config(transport, Config), ?config(certs, Config), Headers, Then),
+    try
+        URI = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+        masque:bind_connect(URI, unscoped, #{
+            transports => [?config(transport, Config)], verify => verify_none, timeout => 3000
+        })
+    after
+        put(fake_stop, Stop)
+    end.
+
+fake_bound(Config, Headers, Then) ->
+    {ok, Sess} = fake_bind(Config, Headers, Then),
+    Sess.
+
+closed_reason(Sess) ->
+    Reason =
+        receive
+            {masque_closed, Sess, R} -> R
+        after 5000 -> ct:fail(session_not_closed)
+        end,
+    (get(fake_stop))(),
+    Reason.
+
+%% h3 and h2 answer 200 (plus `capsule-protocol'), h1 a 101 upgrade.
+%% `Then' goes out a little after the response, so the client sees the
+%% response first.
+fake_proxy(h3, #{cert := Cert, key := Key}, Headers, Then) ->
+    Name = unique(fake_h3),
+    {ok, _} = quic_h3:start_server(Name, 0, #{
+        cert => Cert,
+        key => Key,
+        settings => #{enable_connect_protocol => 1, h3_datagram => 1},
+        quic_opts => #{alpn => [<<"h3">>], max_datagram_frame_size => 65535},
+        connection_handler => fun(_ConnPid) ->
+            #{
+                h3_datagram_enabled => true,
+                handler => fun(Conn, Sid, _Method, _Path, _Headers) ->
+                    ok = quic_h3:send_response(Conn, Sid, 200, [cp() | Headers]),
+                    later(fun() -> fake_send(quic_h3, Conn, Sid, Then) end)
+                end
+            }
+        end
+    }),
+    {ok, Port} = quic:get_server_port(Name),
+    {Port, fun() -> quic_h3:stop_server(Name) end};
+fake_proxy(h2, #{cert_file := Cert, key_file := Key}, Headers, Then) ->
+    Self = self(),
+    Keeper = spawn(fun() ->
+        {ok, {_, _, P}} = h2:start_server(unique(fake_h2), 0, #{
+            cert => Cert,
+            key => Key,
+            enable_connect_protocol => true,
+            settings => #{enable_connect_protocol => 1},
+            handler => fun(Conn, Sid, _Method, _Path, _Headers) ->
+                ok = h2:send_response(Conn, Sid, 200, [cp() | Headers]),
+                timer:sleep(200),
+                fake_send(h2, Conn, Sid, Then),
+                receive
+                    stop -> ok
+                after 10000 -> ok
+                end
+            end
+        }),
+        Self ! {fake_port, P},
+        receive
+            stop -> ok
+        end
+    end),
+    receive
+        {fake_port, Port} -> {Port, fun() -> Keeper ! stop end}
+    after 5000 -> ct:fail(fake_h2_start)
+    end;
+fake_proxy(h1, #{cert_file := Cert, key_file := Key}, Headers, Then) ->
+    Self = self(),
+    Pid = spawn(fun() ->
+        {ok, L} = ssl:listen(0, [
+            binary, {active, false}, {reuseaddr, true}, {certfile, Cert}, {keyfile, Key}
+        ]),
+        {ok, {_, P}} = ssl:sockname(L),
+        Self ! {fake_port, P},
+        {ok, T} = ssl:transport_accept(L, 5000),
+        {ok, S} = ssl:handshake(T, 5000),
+        {ok, _Req} = ssl:recv(S, 0, 5000),
+        ok = ssl:send(S, [
+            <<"HTTP/1.1 101 Switching Protocols\r\nUpgrade: connect-udp\r\n">>,
+            <<"Connection: Upgrade\r\nCapsule-Protocol: ?1\r\n">>,
+            [[K, <<": ">>, V, <<"\r\n">>] || {K, V} <- Headers],
+            <<"\r\n">>
+        ]),
+        timer:sleep(200),
+        fake_send(h1, S, undefined, Then),
+        receive
+            stop -> ok
+        after 10000 -> ok
+        end,
+        ssl:close(S)
+    end),
+    receive
+        {fake_port, Port} -> {Port, fun() -> Pid ! stop end}
+    after 5000 -> ct:fail(fake_h1_start)
+    end.
+
+cp() -> {<<"capsule-protocol">>, <<"?1">>}.
+
+later(Fun) ->
+    _ = spawn(fun() ->
+        timer:sleep(200),
+        Fun()
+    end),
+    ok.
+
+fake_send(_Tag, _Conn, _Sid, none) ->
+    ok;
+fake_send(quic_h3, Conn, Sid, {datagram, Ctx, Payload}) ->
+    quic_h3:send_datagram(Conn, Sid, iolist_to_binary(masque_datagram:encode(Ctx, Payload)));
+fake_send(Tag, Conn, Sid, {datagram, Ctx, Payload}) ->
+    Inner = iolist_to_binary(masque_datagram:encode(Ctx, Payload)),
+    fake_send(Tag, Conn, Sid, {capsule, masque_capsule:encode(0, Inner)});
+fake_send(quic_h3, Conn, Sid, {capsule, Bin}) ->
+    quic_h3:send_data(Conn, Sid, iolist_to_binary(Bin), false);
+fake_send(h2, Conn, Sid, {capsule, Bin}) ->
+    h2:send_data(Conn, Sid, iolist_to_binary(Bin), false);
+fake_send(h1, Sock, _Sid, {capsule, Bin}) ->
+    ssl:send(Sock, Bin).
 
 stop_server(h3, Srv) -> masque_test_helpers:stop_masque_server(Srv);
 stop_server(h2, #{name := Name}) -> masque:stop_listener_h2(Name);

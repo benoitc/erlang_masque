@@ -32,6 +32,8 @@
     %% the ones not answered yet.
     seen = masque_reverse_ids:new() :: masque_reverse_ids:ids(),
     open = #{} :: #{non_neg_integer() => masque_reverse_capsule:service()},
+    %% Expiry timer of each request in `open'.
+    timers = #{} :: #{non_neg_integer() => reference()},
     accept_template :: binary(),
     opts :: map(),
     fin_sent = false :: boolean()
@@ -149,9 +151,10 @@ await_response(#state{conn = C, stream_id = Sid} = S, Timeout) ->
 handle_call(Request, From, State) ->
     masque_quiet:stop(handle_call_inner(Request, From, State)).
 
-handle_call_inner({accept_spec, Id}, _From, #state{open = Open} = S) ->
+handle_call_inner({accept_spec, Id}, _From, #state{open = Open} = S0) ->
     case maps:take(Id, Open) of
         {Service, Open2} ->
+            S = untrack(Id, S0),
             Spec = #{
                 service => Service,
                 transport => S#state.transport,
@@ -161,14 +164,15 @@ handle_call_inner({accept_spec, Id}, _From, #state{open = Open} = S) ->
             },
             {reply, {ok, Spec}, S#state{open = Open2}};
         error ->
-            {reply, {error, unknown_request}, S}
+            {reply, {error, unknown_request}, S0}
     end;
 handle_call_inner({decline, Id}, _From, #state{open = Open} = S) ->
     case maps:take(Id, Open) of
         {_, Open2} ->
-            reply_send(masque_reverse_capsule:encode({connection_request_declined, Id}), S#state{
-                open = Open2
-            });
+            reply_send(
+                masque_reverse_capsule:encode({connection_request_declined, Id}),
+                untrack(Id, S#state{open = Open2})
+            );
         error ->
             {reply, {error, unknown_request}, S}
     end;
@@ -214,6 +218,8 @@ handle_info_inner({Tag, C, {closed, _}}, #state{conn = C} = S) when Tag =:= quic
     {stop, peer_closed, S};
 handle_info_inner({quic_h3, _C, {send_ready, _}}, S) ->
     {noreply, S};
+handle_info_inner({timeout, TRef, {pending_timeout, Id}}, S) ->
+    {noreply, expire(TRef, Id, S)};
 handle_info_inner({'DOWN', Ref, process, _, _}, #state{owner_mon = Ref} = S) ->
     {stop, owner_gone, S};
 handle_info_inner({'EXIT', _Pid, _Reason}, S) ->
@@ -263,7 +269,7 @@ capsule(connection_request, Value, #state{seen = Seen, open = Open, owner = Owne
                             decline_now(Id, S2);
                         false ->
                             Owner ! {masque_connection_request, self(), Id, Service},
-                            {ok, S2#state{open = Open#{Id => Service}}}
+                            {ok, track(Id, S2#state{open = Open#{Id => Service}})}
                     end
             end;
         {error, _} ->
@@ -274,6 +280,31 @@ capsule(_Other, _Value, S) ->
 
 max_pending(#state{opts = Opts}) ->
     maps:get(max_pending_requests, Opts, ?MASQUE_DEFAULT_MAX_PENDING_REQUESTS).
+
+%% A request the owner neither accepts nor declines is dropped after
+%% `pending_request_timeout_ms', so ignored requests do not fill
+%% `max_pending_requests' for good. The proxy has given up on it by
+%% then (its own timeout), so nothing is sent: a late DECLINED would be
+%% an error for it (section 5.1).
+track(Id, #state{timers = T, opts = Opts} = S) ->
+    Ms = maps:get(pending_request_timeout_ms, Opts, ?MASQUE_DEFAULT_PENDING_REQUEST_TIMEOUT),
+    TRef = erlang:start_timer(Ms, self(), {pending_timeout, Id}),
+    S#state{timers = T#{Id => TRef}}.
+
+untrack(Id, #state{timers = T} = S) ->
+    case maps:take(Id, T) of
+        {TRef, T2} ->
+            _ = erlang:cancel_timer(TRef),
+            S#state{timers = T2};
+        error ->
+            S
+    end.
+
+expire(TRef, Id, #state{open = Open, timers = T} = S) ->
+    case maps:find(Id, T) of
+        {ok, TRef} -> S#state{open = maps:remove(Id, Open), timers = maps:remove(Id, T)};
+        _ -> S
+    end.
 
 decline_now(Id, #state{transport = T, conn = C, stream_id = Sid} = S) ->
     Capsule = masque_reverse_capsule:encode({connection_request_declined, Id}),

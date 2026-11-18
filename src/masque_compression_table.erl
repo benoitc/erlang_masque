@@ -45,7 +45,11 @@ Draft-ietf-masque-connect-udp-listen-16 invariants enforced here:
   compressed mappings. The proxy session reports the closure
   with `mark_uncompressed_closed/1`; `open_compressed/2` then
   returns `{error, uncompressed_closed}` on that proxy-side own
-  table.
+  table. A later uncompressed context from the client lifts it
+  again (`mark_uncompressed_open/1`).
+- Cross-table tuple check on open: `open_compressed/3` refuses a
+  tuple the peer already opened with `{error, tuple_open_by_peer}`
+  (draft-16 section 3.1).
 - Address-family gating: `open_compressed/2` for a family not
   in the advertised list returns `{error, unadvertised_family}`;
   the same family check applies to `install/2`.
@@ -60,10 +64,12 @@ returned `state()` through their gen_server state.
     new_own/2,
     new_peer/2,
     open_compressed/2,
+    open_compressed/3,
     open_uncompressed/1,
     install/2,
     install/3,
     mark_uncompressed_closed/1,
+    mark_uncompressed_open/1,
     install_ack/2,
     install_close/2,
     reject/2,
@@ -113,6 +119,7 @@ returned `state()` through their gen_server state.
     | uncompressed_closed
     | unadvertised_family
     | malformed_duplicate_tuple
+    | tuple_open_by_peer
     | table_full.
 
 -type install_error() ::
@@ -233,6 +240,20 @@ open_compressed(
     end.
 
 -doc """
+Like `open_compressed/2`, and also refuse a tuple the peer already
+opened in `PeerTable` (read-only) with `{error, tuple_open_by_peer}`:
+draft-16 section 3.1 forbids registering a context for a tuple that
+already has one, whichever side opened it.
+""".
+-spec open_compressed(state(), peer_tuple(), state()) ->
+    {ok, #compression_entry{}, state()} | {error, open_error()}.
+open_compressed(#state{} = S, Peer, #state{direction = peer, by_tuple = T}) ->
+    case maps:is_key(Peer, T) of
+        true -> {error, tuple_open_by_peer};
+        false -> open_compressed(S, Peer)
+    end.
+
+-doc """
 Allocate a fresh own context-ID for an uncompressed
 (IP Version 0) mapping. Client-only.
 """.
@@ -309,6 +330,15 @@ proxy own table, later `open_compressed/2` calls fail with
 -spec mark_uncompressed_closed(state()) -> state().
 mark_uncompressed_closed(#state{} = S) ->
     S#state{uncompressed_closed = true}.
+
+-doc """
+Record that the client opened an uncompressed context again
+(draft-16 section 4 lets it close one and reopen another). Lifts
+the post-close prohibition set by `mark_uncompressed_closed/1`.
+""".
+-spec mark_uncompressed_open(state()) -> state().
+mark_uncompressed_open(#state{} = S) ->
+    S#state{uncompressed_closed = false}.
 
 own_conflict(_S, #compression_assign{ip_version = 0}, _Own) ->
     none;

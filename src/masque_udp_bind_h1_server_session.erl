@@ -45,6 +45,9 @@
 }).
 
 -define(DEFAULT_MAX_PENDING_RESPONSES, 16).
+-define(DEFAULT_MAX_CONTEXTS, 1024).
+%% The handler gave no usable `Proxy-Public-Address' list.
+-define(NO_PUBLIC_ADDRESS_STATUS, 500).
 
 %%====================================================================
 %% API
@@ -120,67 +123,84 @@ init_session(#{
     IdleMs = maps:get(idle_timeout_ms, HOpts, 300000),
     case init_handler(Handler, Req, HOpts) of
         {ok, HState, Actions} ->
-            {Headers, OtherActions} = take_response_headers(Actions),
-            BaseHeaders = [{<<"capsule-protocol">>, <<"?1">>}],
-            UpgradeHeaders = BaseHeaders ++ Headers,
-            case h1:accept_upgrade(Conn, StreamId, UpgradeHeaders) of
-                {ok, Socket, Buffer} ->
-                    Transport = socket_transport(Socket),
-                    _ = masque_tls:bound_sends(Transport, Socket),
-                    PublicAddrs = read_public_addresses(Headers),
-                    Families = lists:usort([
-                        family_of(IP)
-                     || {IP, _} <- PublicAddrs
-                    ]),
-                    TableOpts = #{
-                        advertised_families => Families,
-                        max_entries =>
-                            maps:get(
-                                max_compression_contexts,
-                                HOpts,
-                                1024
-                            )
-                    },
-                    State0 = arm_idle(#state{
-                        transport = Transport,
-                        socket = Socket,
-                        handler = Handler,
-                        h_state = HState,
-                        req = Req,
-                        bind_scope = maps:get(bind, Req, unscoped),
-                        public_addresses = PublicAddrs,
-                        own_table = masque_compression_table:new_own(
-                            proxy, TableOpts
-                        ),
-                        peer_table = masque_compression_table:new_peer(
-                            proxy, TableOpts
-                        ),
-                        cap_buf = Buffer,
-                        max_cap = MaxCap,
-                        idle_ms = IdleMs,
-                        max_pending = maps:get(
-                            max_pending_compression_responses,
-                            HOpts,
-                            ?DEFAULT_MAX_PENDING_RESPONSES
-                        )
-                    }),
-                    case drain_and_arm(State0) of
-                        {ok, State1} ->
-                            apply_init_actions(OtherActions, State1);
-                        {stop, Reason, S2} ->
-                            {stop, Reason, S2}
-                    end;
-                {error, Reason} ->
-                    try_callback(
-                        Handler,
-                        terminate,
-                        [{accept_upgrade, Reason}, HState]
-                    ),
-                    {stop, {accept_upgrade, Reason}}
+            {HandlerHeaders, OtherActions} = take_response_headers(Actions),
+            case masque_uri_udp_bind:bind_response_headers(HandlerHeaders) of
+                {ok, PublicAddrs, Headers} ->
+                    upgrade(Conn, StreamId, Handler, HOpts, Req, {
+                        HState, OtherActions, PublicAddrs, Headers, MaxCap, IdleMs
+                    });
+                {error, Why} ->
+                    %% Draft -16 section 7: no bind without a public
+                    %% address to advertise.
+                    try_callback(Handler, terminate, [{no_public_address, Why}, HState]),
+                    {stop, {reject, {other, ?NO_PUBLIC_ADDRESS_STATUS}}}
             end;
         {stop, Reason} ->
             {stop, Reason}
     end.
+
+upgrade(
+    Conn,
+    StreamId,
+    Handler,
+    HOpts,
+    Req,
+    {HState, OtherActions, PublicAddrs, Headers, MaxCap, IdleMs}
+) ->
+    BaseHeaders = [{<<"capsule-protocol">>, <<"?1">>}],
+    UpgradeHeaders = BaseHeaders ++ Headers,
+    case h1:accept_upgrade(Conn, StreamId, UpgradeHeaders) of
+        {ok, Socket, Buffer} ->
+            Transport = socket_transport(Socket),
+            _ = masque_tls:bound_sends(Transport, Socket),
+            Families = lists:usort([
+                family_of(IP)
+             || {IP, _} <- PublicAddrs
+            ]),
+            State0 = arm_idle(#state{
+                transport = Transport,
+                socket = Socket,
+                handler = Handler,
+                h_state = HState,
+                req = Req,
+                bind_scope = maps:get(bind, Req, unscoped),
+                public_addresses = PublicAddrs,
+                own_table = masque_compression_table:new_own(
+                    proxy, table_opts(max_compression_contexts_out, Families, HOpts)
+                ),
+                peer_table = masque_compression_table:new_peer(
+                    proxy, table_opts(max_compression_contexts_in, Families, HOpts)
+                ),
+                cap_buf = Buffer,
+                max_cap = MaxCap,
+                idle_ms = IdleMs,
+                max_pending = maps:get(
+                    max_pending_compression_responses,
+                    HOpts,
+                    ?DEFAULT_MAX_PENDING_RESPONSES
+                )
+            }),
+            case drain_and_arm(State0) of
+                {ok, State1} ->
+                    apply_init_actions(OtherActions, State1);
+                {stop, Reason, S2} ->
+                    {stop, Reason, S2}
+            end;
+        {error, Reason} ->
+            try_callback(
+                Handler,
+                terminate,
+                [{accept_upgrade, Reason}, HState]
+            ),
+            {stop, {accept_upgrade, Reason}}
+    end.
+
+%% `max_compression_contexts_in' bounds the contexts the client opens
+%% (peer table), `max_compression_contexts_out' the ones we open (own
+%% table); each falls back to `max_compression_contexts'.
+table_opts(Key, Families, HOpts) ->
+    Default = maps:get(max_compression_contexts, HOpts, ?DEFAULT_MAX_CONTEXTS),
+    #{advertised_families => Families, max_entries => maps:get(Key, HOpts, Default)}.
 
 handle_call(Request, From, State) ->
     masque_quiet:stop(handle_call_inner(Request, From, State)).
@@ -421,7 +441,7 @@ install_peer_assign(Assign, #state{own_table = OT} = S) ->
     case masque_compression_table:install(S#state.peer_table, Assign, OT) of
         {ok, T2} ->
             send_capsule(#compression_ack{context_id = Id}, S),
-            {noreply, S#state{peer_table = T2}};
+            {noreply, S#state{peer_table = T2, own_table = reopened(Assign, OT)}};
         {ok, {conflict, close_proxy_id, OwnId}, T2} ->
             %% The client assigned a tuple we already opened: keep
             %% theirs, close ours.
@@ -437,6 +457,13 @@ install_peer_assign(Assign, #state{own_table = OT} = S) ->
                 malformed -> {stop, malformed_capsule, S}
             end
     end.
+
+%% Draft -16 section 4: the client may close its uncompressed context
+%% and open another; once it is open again, so is compression.
+reopened(#compression_assign{ip_version = 0}, OT) ->
+    masque_compression_table:mark_uncompressed_open(OT);
+reopened(_Assign, OT) ->
+    OT.
 
 handle_peer_ack(Ack, S) ->
     case masque_compression_table:install_ack(S#state.own_table, Ack) of
@@ -521,7 +548,7 @@ open_compression(IP, Port, #state{own_table = OT} = S) ->
         false ->
             case
                 masque_compression_table:open_compressed(
-                    OT, {family_of(IP), IP, Port}
+                    OT, {family_of(IP), IP, Port}, S#state.peer_table
                 )
             of
                 {ok, Entry, OT2} ->
@@ -544,9 +571,20 @@ forget_context(Id, #state{own_table = OT, peer_table = PT} = S) ->
         {ok, OT2} ->
             S#state{own_table = OT2};
         {error, _} ->
+            Uncompressed = is_uncompressed(PT, Id),
             case masque_compression_table:install_close(PT, Close) of
-                {ok, PT2} -> S#state{peer_table = PT2};
-                {error, _} -> S
+                {ok, PT2} when Uncompressed ->
+                    %% We closed the client's uncompressed context: the
+                    %% post-close prohibition applies as after its own
+                    %% CLOSE (draft -16 section 3.1).
+                    S#state{
+                        peer_table = PT2,
+                        own_table = masque_compression_table:mark_uncompressed_closed(OT)
+                    };
+                {ok, PT2} ->
+                    S#state{peer_table = PT2};
+                {error, _} ->
+                    S
             end
     end.
 
@@ -817,12 +855,6 @@ take_response_headers([{response_headers, Pairs} | Rest], H, O) ->
     take_response_headers(Rest, lists:reverse(Pairs) ++ H, O);
 take_response_headers([X | Rest], H, O) ->
     take_response_headers(Rest, H, [X | O]).
-
-read_public_addresses(Headers) ->
-    case masque_uri_udp_bind:parse_proxy_public_address(Headers) of
-        {ok, A} -> A;
-        {error, _} -> []
-    end.
 
 advertised_families(#state{public_addresses = A}) ->
     lists:usort([family_of(IP) || {IP, _} <- A]).

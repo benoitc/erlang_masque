@@ -19,14 +19,14 @@ Bind is off by default. Turn it on per listener with `accept_bind`; the same opt
 
 With `accept_bind => true`, a CONNECT-UDP request carrying `connect-udp-bind: ?1` goes to the bind handler (`bind_handler`, default `masque_udp_bind_proxy_handler`); requests without the header stay plain CONNECT-UDP. With `accept_bind => false` the header is ignored and an unscoped request (`*` host and port) fails as a bad CONNECT-UDP target.
 
-`masque_udp_bind_proxy_handler` opens one `gen_udp` socket per tunnel and answers with `connect-udp-bind: ?1` and a `proxy-public-address` header.
+`masque_udp_bind_proxy_handler` opens one `gen_udp` socket per tunnel and answers with a `proxy-public-address` header. The session always adds `connect-udp-bind: ?1`. A custom `bind_handler` must return a valid `proxy-public-address` in its `{response_headers, _}` init action: without one the session answers 500 and calls the handler's `terminate/2` with `{no_public_address, Why}`.
 
 | `handler_opts` key | Default | Meaning |
 |---|---|---|
 | `bind_address` | `any` | Interface of the bind socket. |
 | `bind_port` | `0` | Port of the bind socket. |
 | `bind_socket_opts` | `[]` | Extra `gen_udp` options. |
-| `public_addresses` | none | `[{IP, Port}]` sent in `proxy-public-address`. Required when the socket is bound to a wildcard address; otherwise the socket name is used. With neither, the tunnel is refused. |
+| `public_addresses` | none | `[{IP, Port}]` sent in `proxy-public-address`, as given (behind NAT, list the public address; families are not checked against the socket). Required when the socket is bound to a wildcard address; otherwise the socket name is used. With neither, the tunnel is refused. |
 | `public_address_fun` | none | `fun(SockName) -> [{IP, Port}]`, takes precedence over `public_addresses`. |
 | `peer_filter_fun` | public peers only | `fun(IP, Port) -> ok \| {drop, Reason}`, called for every packet the client sends. |
 | `allow` | accept all | The listener target policy, `fun({HostBin, Port}) -> boolean()`, asked once per peer (host as text, for example `<<"192.0.2.1">>`). A refused peer is dropped (`peer_filter`). |
@@ -36,6 +36,8 @@ With `accept_bind => true`, a CONNECT-UDP request carrying `connect-udp-bind: ?1
 | `active_n` | `32` | Datagrams read before the socket pauses until the session relayed them. |
 | `dont_fragment` | `true` | Forbid IP fragmentation on the bind socket (RFC 9298 section 3.1); a packet larger than the path MTU is dropped. |
 | `max_compression_contexts` | `1024` | Entries per compression table. |
+| `max_compression_contexts_in` | `max_compression_contexts` | Contexts the client may open; past it a COMPRESSION_ASSIGN is rejected (`assign_rejected`). |
+| `max_compression_contexts_out` | `max_compression_contexts` | Contexts the proxy handler may open toward the client. |
 | `max_pending_compression_responses` | `16` | Proxy compression assigns waiting for an ACK (h3 and h2). |
 
 Packets from a peer whose address family is not in the advertised public addresses are dropped.
@@ -62,7 +64,7 @@ receive {masque_bind_packet, Sess, {IP, Port}, Bytes} -> {IP, Port, Bytes} end.
 
 - The target is `unscoped` (any peer the proxy's policy allows) or `{Host, Port}` (a scoped bind).
 - `bind_connect/3` takes the same options as `connect/3` (transports, TLS, `owner`, `mode`, `request_headers`, `timeout`); `upstream_pool` has no effect, each bind has its own connection.
-- The 2xx (101 on h1) must carry both `connect-udp-bind` and `proxy-public-address`, otherwise the call returns `{error, missing_bind_response_header}` or `{error, missing_proxy_public_address}`.
+- The 2xx (101 on h1) must carry both `connect-udp-bind` and `proxy-public-address`, otherwise the call returns `{error, missing_bind_response_header}` or `{error, missing_proxy_public_address}`. This holds for a scoped bind too: the client does not fall back to plain CONNECT-UDP when the proxy ignores the bind header (draft -16 section 2 allows it). Call `masque:connect/3` for that.
 - In queue mode `masque:recv/2` returns `{ok, {IP, Port}, Bytes}`.
 - On a scoped bind, `masque:send/2` (and `send_to/3` to a peer with no context) sends a plain UDP payload on context 0, as CONNECT-UDP does; what the target sends back on context 0 reaches you as `masque_bind_packet` from the scoped target.
 
@@ -75,7 +77,7 @@ On a scoped bind the default `masque_udp_bind_proxy_handler` resolves the scoped
 Every datagram in a bind tunnel travels on a context id that tells the receiver which peer it is for. The library never opens contexts on its own; you decide.
 
 - **Uncompressed context.** `open_uncompressed_context/1` opens the one context whose datagrams carry the peer address inline. It works for every peer. Open it first.
-- **Compressed context.** `assign_compression(Sess, {IP, Port})` opens a context for one peer; datagrams on it carry only the payload, which saves the address bytes for a busy peer.
+- **Compressed context.** `assign_compression(Sess, {IP, Port})` opens a context for one peer; datagrams on it carry only the payload, which saves the address bytes for a busy peer. A peer has one context at most: for a peer the proxy already opened a context for, the call returns `{error, tuple_open_by_peer}`, and `send_to/3` already uses the proxy's context.
 - **ACK before use.** Both calls return `{ok, ContextId}` at once, but the session only uses a context after the proxy acknowledged it with `{masque_compression_acked, Sess, ContextId}`. Until then `send_to/3` falls back to another installed context, and returns `{error, no_compression_context}` if there is none.
 - **Close.** `close_compression(Sess, ContextId)` retires a context; `{masque_compression_closed, Sess, ContextId}` tells you the proxy closed one.
 - **Proxy-opened contexts.** A proxy handler can open contexts toward you (`{compression_assign, {IP, Port}}` action); the session acknowledges them itself and tells you with `{masque_compression_assigned, Sess, ContextId, {IP, Port}}`. The default handler does not open any, so datagrams from the proxy come on your uncompressed context.
@@ -111,8 +113,8 @@ On h3 and h2 the proxy session counts every packet or assign it drops:
 | `malformed` | Undecodable datagram or uncompressed payload. |
 | `peer_filter` | The peer filter refused the destination. |
 | `pending_limit` | A proxy compression assign past `max_pending_compression_responses`. |
-| `uncompressed_closed` | A proxy compression assign after the client closed its uncompressed context. |
-| `assign_rejected` | A client COMPRESSION_ASSIGN answered with COMPRESSION_CLOSE: past `max_compression_contexts`, a family the proxy did not advertise, or a peer the handler refuses. |
+| `uncompressed_closed` | A proxy compression assign while the client's uncompressed context is closed (by either side), until the client opens a new one. |
+| `assign_rejected` | A client COMPRESSION_ASSIGN answered with COMPRESSION_CLOSE: past `max_compression_contexts_in`, a family the proxy did not advertise, or a peer the handler refuses. |
 | `other` | Any other reason, including drops returned by `scrub_fun` or a custom handler. |
 
 ## Owner messages

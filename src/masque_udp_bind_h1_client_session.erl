@@ -484,7 +484,7 @@ handle_assign_compression(From, {IP, Port}, Data) ->
     Tuple = {family_of(IP), IP, Port},
     case
         masque_compression_table:open_compressed(
-            Data#data.own_table, Tuple
+            Data#data.own_table, Tuple, Data#data.peer_table
         )
     of
         {ok, Entry, T2} ->
