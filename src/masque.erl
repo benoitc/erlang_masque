@@ -15,7 +15,7 @@ versions.
 """.
 
 -export([version/0]).
--export([connect/3, connect/2, close/1, info/1]).
+-export([connect/3, connect/2, close/1, abort/1, info/1]).
 -export([send/2, send/3, recv/2, set_mode/2]).
 -export([send_capsule/3, shutdown_write/1]).
 -export([migrate/1]).
@@ -563,6 +563,31 @@ close(Sess) when is_pid(Sess) ->
             _:_ -> ok
         end),
     ok.
+
+-doc """
+Abort a CONNECT-TCP tunnel instead of closing it.
+
+`close/1` ends the tunnel gracefully: the proxy sees a FIN, or
+FINAL_DATA in capsule framing, and closes the target with a FIN. `abort/1`
+ends it abruptly, as draft-ietf-httpbis-connect-tcp-18 section 3.5 asks
+when the TCP side failed: the stream is reset with `H3_CONNECT_ERROR`
+(h3) or `CONNECT_ERROR` (h2), or on h1 the connection closes without
+FINAL_DATA, so the proxy resets the target. Use it when the connection
+you relay was reset or timed out. A tunnel whose owner exits with a
+reason other than `normal`, `shutdown` or `{shutdown, _}` is aborted
+the same way.
+
+Returns `ok`, also for a session that already ended. Other kinds of
+session are left open and answer `{error, not_supported}` (or
+`{error, not_ready}` while connecting); end them with `close/1`.
+""".
+-spec abort(session()) -> ok | {error, term()}.
+abort(Sess) when is_pid(Sess) ->
+    try
+        gen_statem:call(Sess, abort, 5000)
+    catch
+        exit:_ -> ok
+    end.
 
 -doc """
 Return a map describing the session's current state and peers.

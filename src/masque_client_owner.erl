@@ -15,7 +15,7 @@
 -module(masque_client_owner).
 -moduledoc false.
 
--export([init/1, send/2, send_bounded/2, send_datagram/2, release/1]).
+-export([init/1, send/2, send_bounded/2, send_datagram/2, release/1, clean_exit/1]).
 
 -define(HELD_KEY, {?MODULE, held}).
 %% Owner mailbox length past which `send_bounded/2' drops, as the h3
@@ -74,3 +74,12 @@ release(Owner) ->
         Held ->
             lists:foreach(fun(Msg) -> Owner ! Msg end, lists:reverse(Held))
     end.
+
+%% Whether an owner's exit reason is a clean one. A CONNECT-TCP tunnel
+%% closes gracefully when its owner exits so, and aborts otherwise
+%% (draft-ietf-httpbis-connect-tcp-18 section 3.5).
+-spec clean_exit(term()) -> boolean().
+clean_exit(normal) -> true;
+clean_exit(shutdown) -> true;
+clean_exit({shutdown, _}) -> true;
+clean_exit(_) -> false.

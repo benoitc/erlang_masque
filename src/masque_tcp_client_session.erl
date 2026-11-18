@@ -6,6 +6,9 @@
 %%% Stream END_STREAM = TCP FIN, one per direction: after the peer's
 %%% FIN the owner can keep sending until it calls `shutdown_write/1`
 %%% or closes the session, and after its own FIN it keeps receiving.
+%%% Any other end (`masque:abort/1', an owner crash, a reset or invalid
+%%% data from the proxy) resets the stream with H3_CONNECT_ERROR or
+%%% CONNECT_ERROR (draft-ietf-httpbis-connect-tcp-18 section 3.5).
 %%%
 %%% Supports both HTTP/3 (quic_h3) and HTTP/2 (h2) as the outer
 %%% transport, selected by `transport => h3 | h2` in opts.
@@ -37,6 +40,8 @@
 %% How long a closed tunnel waits for the proxy's FIN before closing
 %% its own connection.
 -define(CLOSE_LINGER_MS, 2000).
+%% RFC 9114 section 8.1: the reset code of an aborted CONNECT stream.
+-define(H3_CONNECT_ERROR, 16#10f).
 %% While the owner is behind, how often the session checks whether it
 %% caught up (doubling from the first to the second).
 -define(RECHECK_MIN_MS, 5).
@@ -291,6 +296,8 @@ connecting_inner({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, connecting)}]};
 connecting_inner({call, From}, stop, Data) ->
     {stop_and_reply, normal, [{reply, From, ok}], Data};
+connecting_inner({call, From}, abort, Data) ->
+    {stop_and_reply, normal, [{reply, From, ok}], abort_now(Data)};
 connecting_inner({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]}.
 
@@ -345,10 +352,10 @@ open_inner({call, From}, shutdown_write, #data{read_closed = true} = Data) ->
         ok ->
             case masque_client_rx:keep_unread(Data#data.mode, Data#data.rx_buf) of
                 true ->
-                    {next_state, closed, Data2, Actions} = park_unread(closed, Data),
+                    {next_state, closed, Data2, Actions} = park_unread(closed, graceful, Data),
                     {next_state, closed, Data2, [{reply, From, ok} | Actions]};
                 false ->
-                    {stop_and_reply, normal, [{reply, From, ok}], Data}
+                    {stop_and_reply, normal, [{reply, From, ok}], Data#data{write_closed = true}}
             end;
         Err ->
             {keep_state, Data, [{reply, From, Err}]}
@@ -365,6 +372,10 @@ open_inner({call, From}, stop, Data) ->
         {reply, From, ok},
         {next_event, internal, do_close}
     ]};
+%% Section 3.5: an abrupt end resets the stream, so the proxy resets the
+%% target instead of closing it.
+open_inner({call, From}, abort, Data) ->
+    {stop_and_reply, normal, [{reply, From, ok}], abort_now(Data)};
 %% Incoming stream data in capsule mode: DATA and FINAL_DATA payloads
 %% are the TCP bytes. A stream that ends without FINAL_DATA is an abort
 %% (draft-ietf-httpbis-connect-tcp-18 section 3.5), and so is invalid
@@ -414,6 +425,16 @@ open_inner(
     Tag =:= quic_h3; Tag =:= h2
 ->
     end_tunnel(peer_reset, {stop, peer_reset, Data}, Data);
+%% Section 4.3: no trailers on a CONNECT-TCP stream. The transports
+%% refuse them on a tunnel themselves; any that get here abort it.
+open_inner(
+    info,
+    {Tag, _Conn, {trailers, StreamId, _}},
+    #data{stream_id = StreamId} = Data
+) when
+    Tag =:= quic_h3; Tag =:= h2
+->
+    end_tunnel(trailers_received, {stop, trailers_received, Data}, Data);
 %% A ticket to resume this QUIC connection later, for the owner to keep
 %% and pass back as `quic_opts => #{session_ticket => T}'.
 open_inner(info, {quic_h3, _Conn, {session_ticket, Ticket}}, #data{owner = Owner}) ->
@@ -441,12 +462,17 @@ open_inner(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
 open_inner(info, {timeout, TRef, rx_recheck}, Data) ->
     {keep_state, recheck(TRef, Data)};
+%% An owner that exits cleanly closes the tunnel; one that crashes
+%% aborts it.
 open_inner(
     info,
-    {'DOWN', Ref, process, _, _},
+    {'DOWN', Ref, process, _, Why},
     #data{owner_ref = Ref} = Data
 ) ->
-    {next_state, closing, Data, [{next_event, internal, do_close}]};
+    case masque_client_owner:clean_exit(Why) of
+        true -> {next_state, closing, Data, [{next_event, internal, do_close}]};
+        false -> {stop, normal, abort_now(Data)}
+    end;
 open_inner(info, _Msg, Data) ->
     {keep_state, Data};
 %% A late `handshake_await' (the handshake already succeeded).
@@ -470,25 +496,16 @@ closing_inner(internal, do_close, #data{write_closed = true} = Data) ->
     %% Write FIN already sent.
     finish(Data);
 closing_inner(internal, do_close, Data) ->
-    _ =
-        try transport_send_data(Data, frame(Data, <<>>, true), true) of
-            ok ->
-                ok;
-            _ ->
-                try
-                    transport_cancel(Data)
-                catch
-                    _:_ -> ok
-                end
+    Sent =
+        try
+            transport_send_data(Data, frame(Data, <<>>, true), true)
         catch
-            _:_ ->
-                try
-                    transport_cancel(Data)
-                catch
-                    _:_ -> ok
-                end
+            _:_ -> error
         end,
-    finish(Data);
+    case Sent of
+        ok -> finish(Data#data{write_closed = true});
+        _ -> {stop, normal, abort_now(Data)}
+    end;
 %% Our FIN is out: stop once the proxy has finished too, or after the
 %% linger time. `terminate/3' closes the connection.
 closing_inner(state_timeout, linger_done, Data) ->
@@ -520,7 +537,7 @@ closing_inner(_Event, _Msg, Data) ->
 %% connection of our own is closed only once the proxy finished the
 %% stream, so our last bytes and FIN are not cut off by the close.
 finish(#data{pool_owner = Pool} = Data) when is_pid(Pool) ->
-    _ = session_teardown(Data, graceful),
+    _ = teardown(Data, graceful),
     {stop, normal, Data#data{stream_id = undefined}};
 finish(Data) ->
     {keep_state, Data, [{state_timeout, ?CLOSE_LINGER_MS, linger_done}]}.
@@ -530,6 +547,9 @@ closed(Type, Event, Data) ->
 
 closed_inner({call, From}, info, Data) ->
     {keep_state_and_data, [{reply, From, session_info(Data, closed)}]};
+%% The transport is already gone: an abort only ends the session.
+closed_inner({call, From}, abort, _Data) ->
+    {stop_and_reply, normal, [{reply, From, ok}]};
 closed_inner(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
     masque_client_rx:closed(Type, Event, Buf, Ref, fun(B) -> Data#data{rx_buf = B} end).
 
@@ -538,29 +558,43 @@ terminate(Reason, StateName, Data) ->
 
 terminate_inner(_Reason, _State, #data{conn = undefined} = D) ->
     cancel_all_waiters(D);
-terminate_inner(_Reason, _State, Data) ->
+terminate_inner(Reason, _State, Data) ->
     cancel_all_waiters(Data),
-    _ = session_teardown(Data),
+    _ = teardown(Data, teardown_kind(Reason, Data)),
     ok.
 
+%% A session that stops normally after its FIN ended cleanly; any other
+%% end is an abort (section 3.5).
+teardown_kind(normal, #data{write_closed = true}) -> graceful;
+teardown_kind(_Reason, _Data) -> abort.
+
 %% Close path abstraction: release the pooled stream back to the
-%% owner, or shut down the owned transport connection.
-%% After our FIN a pooled stream is handed back without a reset, so
-%% bytes still in flight reach the proxy.
-session_teardown(#data{pool_owner = Pool, stream_id = StreamId}, graceful) when
+%% owner, or shut down the owned transport connection. After our FIN
+%% a pooled stream is handed back without a reset, so bytes still in
+%% flight reach the proxy. An abort resets the stream with the
+%% CONNECT-TCP code; the pool owner got it at acquire time.
+teardown(#data{pool_owner = Pool, stream_id = StreamId}, graceful) when
     is_pid(Pool), is_integer(StreamId)
 ->
     masque_upstream_owner:release_stream(Pool, StreamId, graceful);
-session_teardown(Data, graceful) ->
-    session_teardown(Data).
-
-session_teardown(#data{pool_owner = Pool, stream_id = StreamId}) when
+teardown(#data{pool_owner = Pool, stream_id = StreamId}, abort) when
     is_pid(Pool), is_integer(StreamId)
 ->
     masque_upstream_owner:release_stream(Pool, StreamId);
-session_teardown(#data{pool_owner = Pool}) when is_pid(Pool) ->
+teardown(#data{pool_owner = Pool}, _Kind) when is_pid(Pool) ->
     ok;
-session_teardown(#data{conn = Conn} = Data) when is_pid(Conn) ->
+teardown(#data{conn = Conn, stream_id = StreamId} = Data, Kind) when is_pid(Conn) ->
+    _ =
+        case Kind of
+            abort when is_integer(StreamId) ->
+                try
+                    transport_cancel(Data)
+                catch
+                    _:_ -> ok
+                end;
+            _ ->
+                ok
+        end,
     _ =
         (try
             transport_close(Data)
@@ -568,8 +602,14 @@ session_teardown(#data{conn = Conn} = Data) when is_pid(Conn) ->
             _:_ -> ok
         end),
     ok;
-session_teardown(_) ->
+teardown(_Data, _Kind) ->
     ok.
+
+%% Reset the stream now and forget the transport, so `terminate/3' has
+%% nothing left to do.
+abort_now(Data) ->
+    _ = teardown(Data, abort),
+    Data#data{conn = undefined, stream_id = undefined}.
 
 cancel_all_waiters(#data{rx_waiters = Ws}) ->
     _ = queue:fold(
@@ -599,9 +639,11 @@ do_connect(#data{pool_owner = PoolOwner} = Data, _Opts) when
             h3 -> #{end_stream => false, flow_control => manual};
             h2 -> #{protocol => Data#data.token, flow_control => manual}
         end,
+    %% The pool resets this stream the CONNECT-TCP way (section 3.5).
+    ReqOpts1 = ReqOpts#{reset_code => reset_code(Data#data.transport)},
     case
         masque_upstream_owner:acquire_stream(
-            PoolOwner, ReqHeaders, self(), ReqOpts
+            PoolOwner, ReqHeaders, self(), ReqOpts1
         )
     of
         {ok, StreamId, Conn} -> {ok, Conn, StreamId};
@@ -737,10 +779,15 @@ transport_send_data(#data{transport = h3, conn = C, stream_id = S}, Bytes, Fin) 
 transport_send_data(#data{transport = h2, conn = C, stream_id = S}, Bytes, Fin) ->
     h2:send_data(C, S, Bytes, Fin).
 
+%% Section 3.5: an aborted CONNECT-TCP stream is reset with
+%% H3_CONNECT_ERROR or CONNECT_ERROR.
 transport_cancel(#data{transport = h3, conn = C, stream_id = S}) ->
-    quic_h3:cancel(C, S);
+    quic_h3:cancel(C, S, reset_code(h3));
 transport_cancel(#data{transport = h2, conn = C, stream_id = S}) ->
-    h2:cancel(C, S).
+    h2:cancel(C, S, reset_code(h2)).
+
+reset_code(h3) -> ?H3_CONNECT_ERROR;
+reset_code(h2) -> connect_error.
 
 transport_close(#data{transport = h3, conn = C}) -> quic_h3:close(C);
 transport_close(#data{transport = h2, conn = C}) -> h2:close(C).
@@ -945,7 +992,12 @@ notify_owner_closed(_Reason, _Data) ->
 end_tunnel(Reason, Result, #data{mode = Mode, rx_buf = Buf} = Data) ->
     case masque_client_rx:keep_unread(Mode, Buf) of
         true ->
-            park_unread(closed, Data);
+            Kind =
+                case Reason of
+                    peer_fin -> graceful;
+                    _ -> abort
+                end,
+            park_unread(closed, Kind, Data);
         false ->
             _ = notify_owner_closed(Reason, Data),
             Result
@@ -955,19 +1007,14 @@ end_tunnel(Reason, Result, #data{mode = Mode, rx_buf = Buf} = Data) ->
 %% stream, so reset the tunnel. `recv/2' returns what is queued, then
 %% `{error, rx_overflow}'.
 rx_overflow(Data) ->
-    _ =
-        (try
-            transport_cancel(Data)
-        catch
-            _:_ -> ok
-        end),
-    park_unread(rx_overflow, Data).
+    park_unread(rx_overflow, abort, Data).
 
-park_unread(EndReason, #data{rx_buf = Buf} = Data) ->
-    _ = session_teardown(Data),
+park_unread(EndReason, Kind, #data{rx_buf = Buf} = Data) ->
+    _ = teardown(Data, Kind),
     {next_state, closed,
         Data#data{
             conn = undefined,
+            stream_id = undefined,
             rx_buf = masque_client_rx:close_queue(Buf, EndReason)
         },
         masque_client_rx:closed_enter()}.

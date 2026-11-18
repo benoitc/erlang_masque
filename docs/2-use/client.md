@@ -27,7 +27,7 @@ This page covers everything you do on the client side of a tunnel: open it with 
 | `verify` | `verify_peer` | `verify_none` turns certificate checks off. All transports. |
 | `cacerts` | system store | DER trust anchors. All transports. |
 | `ssl_opts` | `[]` | Extra `ssl` client options, merged over the defaults. h2 and h1 only; h3 ignores it. An IPv6 literal proxy (`https://[::1]:443`) gets `inet6` by default. |
-| `owner` | caller | Application owner: the process that gets the session's messages. The session monitors it and closes when it exits. |
+| `owner` | caller | Application owner: the process that gets the session's messages. The session monitors it and closes when it exits (a CONNECT-TCP session aborts when the exit is not `normal` or a shutdown). |
 | `mode` | `message` | Delivery mode, `message` or `queue`. Change later with `masque:set_mode/2`. |
 | `tcp_framing` | `capsule` on h3 and h2 | CONNECT-TCP framing: `capsule` (draft-ietf-httpbis-connect-tcp-18), or `raw` for h3 and h2 proxies of earlier drafts. On h1 the client sends a classic CONNECT first and switches to the capsule upgrade when the proxy asks for it with 426 or 501. See [connect-tcp](connect-tcp.md#two-framings). |
 | `tcp_protocol` | `<<"connect-tcp">>` | CONNECT-TCP token in capsule framing, which also picks the capsule codes. See [connect-tcp](connect-tcp.md#tokens-and-capsule-codes). |
@@ -36,7 +36,7 @@ This page covers everything you do on the client side of a tunnel: open it with 
 | `request_headers` | `[]` | Extra headers on the CONNECT (or h1 Upgrade) request, for example an `authorization` token. |
 | `uri_template` | per protocol | Request path template. Must match the proxy's. CONNECT-IP needs an absolute URI. |
 | `capsule_protocol` | `true` | UDP: send `capsule-protocol: ?1` and require it back. IP: must stay `true`. TCP: ignored. |
-| `proxy_authorization` | none | `Proxy-Authorization` value for CONNECT-TCP over h1. CR or LF in it is refused. |
+| `proxy_authorization` | none | Credential for CONNECT-TCP over h1: sent as `Proxy-Authorization` on a classic CONNECT, and as `Authorization` on the capsule upgrade (draft-ietf-httpbis-connect-tcp-18 section 3.4.2), where it replaces an `authorization` in `request_headers`. CR or LF in it is refused. |
 | `max_capsule_size` | `65536` | Largest buffered capsule before the stream is aborted. |
 | `upstream_pool` | `false` | Share one h2 or h3 connection per proxy across tunnels. See below. |
 | `upstream_pool_opts` | `#{}` | `idle_timeout_ms` (30000), `max_streams` (integer or `dynamic`), `checkout_timeout_ms` (60000). |
@@ -159,7 +159,22 @@ Capsule types the session itself understands (DATAGRAM, CONNECT-IP control capsu
 
 `masque:close(Sess)` ends the tunnel: the session sends FIN on its stream and closes its connection (or gives the stream back to the pool). It always returns `ok`, within 5 seconds even if the session is stuck. You do not get a `masque_closed` message for your own close, except on Connect-UDP-Bind sessions in message mode, which report `{masque_closed, Sess, normal}`.
 
-The session also closes when the owner process exits.
+The session also closes when the owner process exits. A CONNECT-TCP session closes gracefully only when the owner exits with `normal`, `shutdown` or `{shutdown, _}`; any other exit aborts it (see below).
+
+### Abort a TCP tunnel
+
+Use `masque:abort/1` when the TCP connection you relay failed (reset, timed out) and the far side must not take the end for a clean close.
+
+```erlang
+case gen_tcp:recv(Local, 0) of
+    {ok, Bytes} -> ok = masque:send(Sess, Bytes);
+    {error, _} -> ok = masque:abort(Sess)
+end.
+```
+
+- On h3 the stream is reset with `H3_CONNECT_ERROR` (`0x10f`), on h2 with `CONNECT_ERROR`; on h1 the connection closes without `FINAL_DATA`. The proxy then resets its connection to the target instead of closing it with a FIN.
+- It returns `ok`, also for a session that already ended. Only CONNECT-TCP sessions abort; others answer `{error, not_supported}` (`{error, not_ready}` while connecting) and stay open.
+- On h1 in raw framing (classic `CONNECT`) an abort looks like a close to the proxy: TLS gives no way to tell them apart.
 
 When the other side ends the tunnel, a message-mode owner gets `{masque_closed, Sess, Reason}`. The common reasons:
 
@@ -170,6 +185,7 @@ When the other side ends the tunnel, a message-mode owner gets `{masque_closed, 
 | `peer_closed` | The connection to the proxy closed. |
 | `goaway` | The proxy is shutting the connection down and did not process this request. |
 | `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` | The proxy sent a bad stream; the session aborted it. |
+| `{bad_capsule, Why}`, `trailers_received` | CONNECT-TCP: the proxy sent invalid data or trailer fields; the session aborted the tunnel. |
 
 In queue mode no message is sent. `recv/2` returns what is still buffered, then `{error, closed}` (or `{error, rx_overflow}`). A closed session keeps unread data for at most 30 seconds, then stops. To learn when the session process is gone, monitor it.
 

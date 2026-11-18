@@ -594,6 +594,14 @@ handle_traffic(Msg, #state{pending_actions = Actions, early = Early} = S) when
     %% the 2xx, so keep the message for `finalize'. A TCP target's
     %% `{active, N}' window bounds how many pile up.
     {noreply, S#state{early = [Msg | Early]}};
+%% draft-ietf-httpbis-connect-tcp-18 section 4.3: no trailers on a
+%% CONNECT-TCP stream. Ones that get here (h2 delivers those sent before
+%% the 2xx) are malformed, and the end of stream they carry is not a
+%% FIN: abort.
+handle_traffic({Tag, _Conn, {trailers, StreamId, _}}, #state{stream_id = StreamId} = S) when
+    Tag =:= quic_h3; Tag =:= h2
+->
+    {stop, trailers_received, S};
 handle_traffic(Msg, S) ->
     dispatch(handle_info, [Msg], S).
 
@@ -619,6 +627,9 @@ terminate_inner(
     Reason =:= peer_reset;
     Reason =:= peer_closed
 ->
+    %% No reset of our own here: an h2 RST_STREAM closes both halves, and
+    %% quic_h3 answers a RESET_STREAM on an unfinished request stream by
+    %% resetting ours (H3_REQUEST_INCOMPLETE).
     maybe_release_h2_tunnel(Transport, Conn),
     try_callback(Handler, terminate, [Reason, HState]),
     emit_tunnel_closed(S),

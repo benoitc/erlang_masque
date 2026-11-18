@@ -377,6 +377,7 @@ terminate_inner(
 ) ->
     _ = cancel_idle(S),
     _ = final_data(Reason, S),
+    _ = abort_linger(Reason, S),
     _ = safe_close_socket(S),
     try_callback(Handler, terminate, [Reason, HState]),
     _ = emit_tunnel_closed(Start),
@@ -390,6 +391,16 @@ final_data(Reason, #state{framing = capsule, fin_sent = false} = S) when
 ->
     proxy_send(S, frame(S, <<>>, true));
 final_data(_Reason, _S) ->
+    ok.
+
+%% Section 3.5: without TLS an aborted capsule tunnel closes with a TCP
+%% RST (`SO_LINGER' 0), not a FIN. Over TLS the abort is the close
+%% without FINAL_DATA.
+abort_linger(Reason, #state{framing = capsule, transport = gen_tcp, socket = Sock}) when
+    Reason =/= normal, Reason =/= target_closed
+->
+    inet:setopts(Sock, [{linger, {true, 0}}]);
+abort_linger(_Reason, _S) ->
     ok.
 
 code_change(_OldVsn, S, _Extra) ->

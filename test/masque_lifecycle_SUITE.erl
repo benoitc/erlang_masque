@@ -81,6 +81,8 @@
     h2_tcp_continue_then_refused_target/1,
     h3_tcp_target_reset_resets_tunnel/1,
     h2_tcp_target_reset_resets_tunnel/1,
+    h3_tcp_pooled_abort_resets_target/1,
+    h2_tcp_pooled_abort_resets_target/1,
     h3_tcp_client_fin_half_closes/1,
     h2_tcp_client_fin_half_closes/1,
     h3_tcp_target_fin_half_closes/1,
@@ -167,6 +169,8 @@ all() ->
         h2_tcp_continue_then_refused_target,
         h3_tcp_target_reset_resets_tunnel,
         h2_tcp_target_reset_resets_tunnel,
+        h3_tcp_pooled_abort_resets_target,
+        h2_tcp_pooled_abort_resets_target,
         h3_tcp_client_fin_half_closes,
         h2_tcp_client_fin_half_closes,
         h3_tcp_target_fin_half_closes,
@@ -1444,6 +1448,70 @@ tcp_target_reset_resets_tunnel(Config, Transport) ->
     after 5000 -> ct:fail(no_reset)
     end,
     gen_tcp:close(LSock).
+
+%% `masque:abort/1' on a pooled tunnel resets only its stream (with the
+%% CONNECT-TCP code): the target gets an RST, the session is gone, and
+%% the shared connection carries the next tunnel.
+h3_tcp_pooled_abort_resets_target(Config) ->
+    tcp_pooled_abort_resets_target(Config, h3).
+
+h2_tcp_pooled_abort_resets_target(Config) ->
+    tcp_pooled_abort_resets_target(Config, h2).
+
+tcp_pooled_abort_resets_target(Config, Transport) ->
+    {LSock, TPort} = tcp_target_listen(),
+    Self = self(),
+    Target = spawn(fun() -> abort_target(LSock, Self) end),
+    ok = gen_tcp:controlling_process(LSock, Target),
+    Port = maps:get(port, ?config(Transport, Config)),
+    Connect = fun() ->
+        {ok, S} = masque:connect(
+            iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+            {<<"127.0.0.1">>, TPort},
+            #{
+                verify => verify_none,
+                transports => [Transport],
+                protocol => tcp,
+                upstream_pool => true
+            }
+        ),
+        S
+    end,
+    Sess = Connect(),
+    ok = masque:send(Sess, <<"x">>),
+    timer:sleep(200),
+    ok = masque:abort(Sess),
+    receive
+        {target_end, R} -> ?assertEqual({error, econnreset}, R)
+    after 5000 -> ct:fail(target_not_reset)
+    end,
+    ?assertNot(is_process_alive(Sess)),
+    Next = Connect(),
+    ok = masque:send(Next, <<"y">>),
+    receive
+        {target_got, <<"y">>} -> ok
+    after 5000 -> ct:fail(pool_connection_lost)
+    end,
+    ok = masque:close(Next),
+    exit(Target, kill),
+    gen_tcp:close(LSock).
+
+%% The first connection reports how it ended; the next one what it got.
+abort_target(LSock, Parent) ->
+    {ok, A} = gen_tcp:accept(LSock, 10000),
+    ok = inet:setopts(A, [{show_econnreset, true}]),
+    Parent ! {target_end, drain_error(A)},
+    {ok, B} = gen_tcp:accept(LSock, 10000),
+    {ok, Got} = gen_tcp:recv(B, 0, 5000),
+    Parent ! {target_got, Got},
+    _ = gen_tcp:recv(B, 0, 5000),
+    gen_tcp:close(B).
+
+drain_error(Sock) ->
+    case gen_tcp:recv(Sock, 0, 5000) of
+        {ok, _} -> drain_error(Sock);
+        Err -> Err
+    end.
 
 %% The client's FIN reaches the target as a TCP FIN; the target's
 %% reply still reaches the client.

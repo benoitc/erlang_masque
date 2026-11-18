@@ -33,6 +33,9 @@
 %% caught up (doubling up to the maximum).
 -define(RECHECK_MIN_MS, 5).
 -define(RECHECK_MAX_MS, 100).
+%% How long a capsule close waits for its FINAL_DATA to be written
+%% before closing the connection anyway.
+-define(FINAL_WRITE_MS, 2000).
 
 -record(data, {
     owner :: pid(),
@@ -183,14 +186,15 @@ connecting_inner(
         {ok, Socket, InitialBuffer, DataC} ->
             case setopts_active_once(Socket) of
                 ok ->
-                    Data1 = DataC#data{socket = Socket},
-                    Data2 =
-                        case incoming(InitialBuffer, Data1) of
-                            {error, _} -> Data1;
-                            {{overflow, D}, _} -> D;
-                            {D, _} -> D
+                    %% Bytes read past the response go through `open'
+                    %% like any others, so invalid data or a FINAL_DATA
+                    %% among them is acted on.
+                    Seed =
+                        case InitialBuffer of
+                            <<>> -> [];
+                            _ -> [{next_event, info, {ssl, Socket, InitialBuffer}}]
                         end,
-                    {next_state, open, Data2, [{reply, From, ok}]};
+                    {next_state, open, DataC#data{socket = Socket}, [{reply, From, ok} | Seed]};
                 {error, Reason} ->
                     _ =
                         (try
@@ -208,6 +212,8 @@ connecting_inner({call, From}, {set_owner, NewOwner}, Data) ->
 connecting_inner({call, From}, info, Data) ->
     {keep_state, Data, [{reply, From, session_info(Data, connecting)}]};
 connecting_inner({call, From}, stop, Data) ->
+    {stop_and_reply, normal, [{reply, From, ok}], Data};
+connecting_inner({call, From}, abort, Data) ->
     {stop_and_reply, normal, [{reply, From, ok}], Data};
 connecting_inner({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, not_ready}}]};
@@ -253,12 +259,15 @@ open_inner({call, From}, {set_owner, NewOwner}, Data) ->
     {keep_state, swap_owner(NewOwner, Data), [{reply, From, ok}]};
 open_inner({call, From}, stop, Data) ->
     {next_state, closing, Data, [{reply, From, ok}, {next_event, internal, do_close}]};
+%% Section 3.5: an abrupt end closes the connection without FINAL_DATA.
+open_inner({call, From}, abort, Data) ->
+    {stop_and_reply, normal, [{reply, From, ok}], abort_now(Data)};
 open_inner(info, {ssl, Sock, Bytes}, #data{socket = Sock} = Data) ->
     case incoming(Bytes, Data) of
         {error, Reason} ->
             end_tunnel(Reason, {stop, Reason, Data}, Data);
         {{overflow, Data1}, _} ->
-            park_unread(rx_overflow, Data1);
+            park_unread(rx_overflow, abort_now(Data1));
         {#data{write_closed = true} = Data1, true} ->
             end_tunnel(peer_fin, {stop, normal, Data1}, Data1);
         {Data1, true} ->
@@ -290,12 +299,17 @@ open_inner(info, {timeout, TRef, {recv_timeout, From}}, Data) ->
     {keep_state, drop_waiter(TRef, From, Data)};
 open_inner(info, {timeout, TRef, rx_recheck}, #data{recheck = {TRef, Ms}} = Data) ->
     {keep_state, rearm(Data#data{recheck = undefined}, min(2 * Ms, ?RECHECK_MAX_MS))};
+%% An owner that exits cleanly closes the tunnel; one that crashes
+%% aborts it.
 open_inner(
     info,
-    {'DOWN', Ref, process, _, _},
+    {'DOWN', Ref, process, _, Why},
     #data{owner_ref = Ref} = Data
 ) ->
-    {next_state, closing, Data, [{next_event, internal, do_close}]};
+    case masque_client_owner:clean_exit(Why) of
+        true -> {next_state, closing, Data, [{next_event, internal, do_close}]};
+        false -> {stop, normal, abort_now(Data)}
+    end;
 open_inner(info, _Msg, Data) ->
     {keep_state, Data};
 open_inner({call, From}, _Other, Data) ->
@@ -304,19 +318,25 @@ open_inner({call, From}, _Other, Data) ->
 closing(Type, Event, Data) ->
     masque_quiet:stop(closing_inner(Type, Event, Data)).
 
-closing_inner(internal, do_close, #data{socket = Socket} = Data) ->
-    _ =
-        case Socket of
-            undefined ->
-                ok;
-            _ ->
-                try
-                    ssl:close(Socket)
-                catch
-                    _:_ -> ok
-                end
-        end,
-    {stop, normal, Data};
+%% Capsule mode: a graceful close ends the write side with FINAL_DATA
+%% (section 3.5), written behind any send still in progress. The
+%% connection closes once it is written, or after `FINAL_WRITE_MS'.
+closing_inner(
+    internal, do_close, #data{framing = capsule, write_closed = false, socket = Sock} = Data
+) when Sock =/= undefined ->
+    Data2 = ensure_writer(Data),
+    Data2#data.writer ! {final, self(), frame(Data2, <<>>, true)},
+    {keep_state, Data2#data{write_closed = true}, [
+        {state_timeout, ?FINAL_WRITE_MS, final_write_timeout}
+    ]};
+closing_inner(internal, do_close, Data) ->
+    {stop, normal, close_socket(Data)};
+closing_inner(info, {masque_final_written, _Result}, Data) ->
+    {stop, normal, close_socket(Data)};
+closing_inner(state_timeout, final_write_timeout, Data) ->
+    {stop, normal, close_socket(Data)};
+closing_inner({call, From}, abort, Data) ->
+    {stop_and_reply, normal, [{reply, From, ok}], abort_now(Data)};
 closing_inner({call, From}, _Other, Data) ->
     {keep_state, Data, [{reply, From, {error, closing}}]};
 closing_inner(_Event, _Msg, Data) ->
@@ -347,6 +367,10 @@ writer_loop(Sock, Ref, Session) ->
         {shutdown_write, From} ->
             gen_statem:reply(From, ssl:shutdown(Sock, write)),
             writer_loop(Sock, Ref, Session);
+        %% The FINAL_DATA of a closing session, which waits for it.
+        {final, Pid, Payload} ->
+            Pid ! {masque_final_written, ssl:send(Sock, Payload)},
+            writer_loop(Sock, Ref, Session);
         {'DOWN', Ref, process, _, _} ->
             ok
     after infinity ->
@@ -370,6 +394,9 @@ closed(Type, Event, Data) ->
 
 closed_inner({call, From}, info, Data) ->
     {keep_state_and_data, [{reply, From, session_info(Data, closed)}]};
+%% The socket is already closed: an abort only ends the session.
+closed_inner({call, From}, abort, _Data) ->
+    {stop_and_reply, normal, [{reply, From, ok}]};
 closed_inner(Type, Event, #data{rx_buf = Buf, owner_ref = Ref} = Data) ->
     masque_client_rx:closed(Type, Event, Buf, Ref, fun(B) -> Data#data{rx_buf = B} end).
 
@@ -379,16 +406,31 @@ terminate(Reason, StateName, Data) ->
 terminate_inner(_Reason, _State, #data{socket = undefined} = D) ->
     _ = erlang:demonitor(D#data.owner_ref, [flush]),
     cancel_all_waiters(D);
-terminate_inner(_Reason, _State, #data{socket = Socket} = D) ->
+%% A session that stops without having sent FINAL_DATA (invalid data
+%% from the proxy, a failed write, an owner gone mid-handshake) aborts
+%% by closing without it.
+terminate_inner(_Reason, _State, D) ->
     _ = erlang:demonitor(D#data.owner_ref, [flush]),
     cancel_all_waiters(D),
+    _ = close_socket(D),
+    ok.
+
+close_socket(#data{socket = undefined} = Data) ->
+    Data;
+close_socket(#data{socket = Socket} = Data) ->
     _ =
         (try
             ssl:close(Socket)
         catch
             _:_ -> ok
         end),
-    ok.
+    Data#data{socket = undefined}.
+
+%% Section 3.5: an abort over TLS is the connection closing without
+%% FINAL_DATA. The draft asks for no `close_notify' either, which OTP
+%% `ssl' cannot do: it always sends one.
+abort_now(Data) ->
+    close_socket(Data).
 
 cancel_all_waiters(#data{rx_waiters = Ws}) ->
     _ = queue:fold(
@@ -567,12 +609,21 @@ upgrade_request(#data{
     Path = request_path(Template, UriVars, Host, Port),
     ProxyAuthority = masque_uri:build_authority(ProxyHost, ProxyPort),
     nomatch = binary:match(Path, [<<"\r">>, <<"\n">>, <<" ">>]),
-    AuthLine =
+    %% Section 3.4.2: the upgrade is an ordinary request to the proxy,
+    %% so the credential goes in `Authorization', not in the
+    %% `Proxy-Authorization' of classic CONNECT; it replaces any
+    %% `Authorization' among the extra headers.
+    {AuthLine, Extra1} =
         case Auth of
-            undefined -> <<>>;
-            V when is_binary(V) -> <<"Proxy-Authorization: ", V/binary, "\r\n">>
+            undefined ->
+                {<<>>, Extra};
+            V when is_binary(V) ->
+                {<<"Authorization: ", V/binary, "\r\n">>, [
+                    H
+                 || {N, _} = H <- Extra, lowercase_bin(N) =/= <<"authorization">>
+                ]}
         end,
-    ExtraLines = iolist_to_binary([[N, <<": ">>, Val, <<"\r\n">>] || {N, Val} <- Extra]),
+    ExtraLines = iolist_to_binary([[N, <<": ">>, Val, <<"\r\n">>] || {N, Val} <- Extra1]),
     <<"GET ", Path/binary, " HTTP/1.1\r\n", "Host: ", ProxyAuthority/binary, "\r\n",
         "Connection: Upgrade\r\n", "Upgrade: ", Token/binary, "\r\n", "Capsule-Protocol: ?1\r\n",
         AuthLine/binary, ExtraLines/binary, "\r\n">>.
@@ -811,8 +862,10 @@ notify_owner_closed(_Reason, _Data) ->
 %% otherwise notify the owner and return `Result'.
 end_tunnel(Reason, Result, #data{mode = Mode, rx_buf = Buf} = Data) ->
     case masque_client_rx:keep_unread(Mode, Buf) of
-        true ->
+        true when Reason =:= peer_fin ->
             park_unread(closed, Data);
+        true ->
+            park_unread(closed, abort_now(Data));
         false ->
             _ = notify_owner_closed(Reason, Data),
             Result
@@ -821,23 +874,9 @@ end_tunnel(Reason, Result, #data{mode = Mode, rx_buf = Buf} = Data) ->
 %% Close the socket and keep the queue for `recv/2', which returns
 %% it and then `{error, EndReason}'. `rx_overflow': the owner did not
 %% keep up and dropping bytes would corrupt the stream.
-park_unread(EndReason, #data{rx_buf = Buf, socket = Socket} = Data) ->
-    _ =
-        case Socket of
-            undefined ->
-                ok;
-            _ ->
-                try
-                    ssl:close(Socket)
-                catch
-                    _:_ -> ok
-                end
-        end,
-    {next_state, closed,
-        Data#data{
-            socket = undefined,
-            rx_buf = masque_client_rx:close_queue(Buf, EndReason)
-        },
+park_unread(EndReason, Data) ->
+    #data{rx_buf = Buf} = Data2 = close_socket(Data),
+    {next_state, closed, Data2#data{rx_buf = masque_client_rx:close_queue(Buf, EndReason)},
         masque_client_rx:closed_enter()}.
 
 swap_owner(NewOwner, #data{owner_ref = OldRef} = Data) ->

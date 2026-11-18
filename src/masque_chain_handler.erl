@@ -514,6 +514,12 @@ map_assign(#ip_assignment{request_id = UpId} = E, {Acc, Map}) ->
     end.
 
 -spec terminate(term(), #state{}) -> ok.
+%% A CONNECT-TCP downstream that did not end cleanly aborts the
+%% upstream too, so the target sees a reset and not a clean close
+%% (draft-ietf-httpbis-connect-tcp-18 section 3.5).
+terminate(Reason, #state{upstream = Sess, protocol = tcp}) when Reason =/= normal ->
+    _ = masque:abort(Sess),
+    ok;
 terminate(_Reason, #state{upstream = Sess}) ->
     _ = masque:close(Sess),
     ok.

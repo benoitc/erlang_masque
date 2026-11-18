@@ -122,8 +122,11 @@ Two sessions differ. The h1 sessions (`masque_h1_client_session`, `masque_ip_h1_
 | Stream reset | stops `peer_reset` | `{masque_closed, S, peer_reset}` |
 | Connection closed | stops `peer_closed` | `{masque_closed, S, peer_closed}` |
 | GOAWAY | h3: stops if its stream id is at or above the GOAWAY id; h2: if above the last-stream-id; lower ids keep running | `{masque_closed, S, goaway}` |
-| Owner exits | `closing` | nothing |
+| Owner exits | `closing`; CONNECT-TCP only when the exit is `normal` or a shutdown, otherwise an abort | nothing |
 | `masque:close/1` | `closing` | nothing |
+| `masque:abort/1` (CONNECT-TCP) | resets the stream with `H3_CONNECT_ERROR` / `CONNECT_ERROR` (h1: closes without `FINAL_DATA`) and stops | nothing |
+
+CONNECT-TCP sessions decide in `terminate/3` how to end the stream: a normal stop after their own FIN (`write_closed`) is graceful, anything else is an abort that resets the stream with the CONNECT-TCP code before the connection closes. A pooled TCP stream passes `reset_code` in its acquire options, and `masque_upstream_owner` uses it whenever it resets that stream (release, session crash, peer reset).
 
 In queue mode `{masque_closed, _, _}` is not sent; `recv/2` reports the end instead.
 
