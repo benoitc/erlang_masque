@@ -110,6 +110,6 @@ On the client, `close/1` sends the FIN and returns at once; the session then wai
 | `socket_opts` | `[]` | Extra `gen_tcp` options. |
 | `active_n` | `16` | Segments read before the socket pauses until the session wrote them to the tunnel. |
 
-A failed connection to the target refuses the tunnel with 502.
+A failed connection to the target refuses the tunnel with 502 and Proxy-Status `connection_refused` (the target refused it), `destination_ip_unroutable` (no route) or `destination_unavailable`; a connection that times out answers 504 `connection_timeout`. A refused private or own address answers 502 with `destination_ip_prohibited` in raw framing.
 
 Next: [connect-ip](connect-ip.md).

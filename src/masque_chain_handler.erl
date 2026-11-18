@@ -224,7 +224,7 @@ upstream_connect_opts(Req, Opts, Proto) ->
      || {K, V} <- maps:get(request_headers, UpstreamOpts, []),
         string:lowercase(K) =/= <<"via">>
     ],
-    Via = {<<"via">>, via_value(token(Opts), maps:get(headers, Req, []))},
+    Via = {<<"via">>, via_value(token(Opts), Req)},
     UpstreamOpts#{
         timeout => maps:get(upstream_timeout, Opts, 5000),
         owner => self(),
@@ -233,10 +233,18 @@ upstream_connect_opts(Req, Opts, Proto) ->
     }.
 
 %% The upstream leg keeps the hops already listed and appends this
-%% listener, so a loop through several proxies is caught too.
-via_value(Token, Headers) ->
-    Own = <<"1.1 ", Token/binary>>,
-    case via_values(Headers) of
+%% listener, so a loop through several proxies is caught too. The
+%% received-protocol is the version the request came in on (RFC 9110
+%% section 7.6.3).
+via_value(Token, Req) ->
+    Version =
+        case maps:get(transport, Req, h1) of
+            h3 -> <<"3">>;
+            h2 -> <<"2">>;
+            _ -> <<"1.1">>
+        end,
+    Own = <<Version/binary, " ", Token/binary>>,
+    case via_values(maps:get(headers, Req, [])) of
         [] -> Own;
         Prev -> iolist_to_binary(lists:join(<<", ">>, Prev ++ [Own]))
     end.
@@ -259,6 +267,14 @@ upstream_error({handshake_rejected, ?MASQUE_STATUS_LOOP_DETECTED}) ->
     {reject, loop_detected};
 upstream_error({handshake_rejected, ?MASQUE_STATUS_LOOP_DETECTED, _}) ->
     {reject, loop_detected};
+%% RFC 9209 section 2: the upstream's refusal is passed on with its
+%% status, and this hop adds its own member.
+upstream_error({handshake_rejected, Status}) when Status >= 400, Status =< 599 ->
+    {reject, {upstream_status, Status}};
+upstream_error({handshake_rejected, Status, _}) when
+    is_integer(Status), Status >= 400, Status =< 599
+->
+    {reject, {upstream_status, Status}};
 upstream_error(Reason) ->
     {resolution_failed, {upstream, Reason}}.
 

@@ -191,14 +191,28 @@ dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch) ->
         true ->
             reject(Conn, StreamId, overload);
         false ->
-            dispatch_request_1(
-                Conn,
-                StreamId,
-                Method,
-                Path,
-                Headers,
-                Dispatch
-            )
+            case check_request(Headers) of
+                ok ->
+                    dispatch_request_1(
+                        Conn,
+                        StreamId,
+                        Method,
+                        Path,
+                        Headers,
+                        Dispatch
+                    );
+                {error, Reason} ->
+                    reject(Conn, StreamId, Reason)
+            end
+    end.
+
+%% RFC 9112 section 3.2 (and RFC 9298 section 3.2): more than one Host
+%% field line is a 400. RFC 9297 section 3.2: a capsule-protocol
+%% request with a body field is malformed.
+check_request(Headers) ->
+    case masque_http:count(<<"host">>, Headers) > 1 of
+        true -> {error, bad_request};
+        false -> masque_http:capsule_request(Headers)
     end.
 
 %% Reverse connect requests (`accept_listen') take their own path; every
@@ -279,8 +293,10 @@ dispatch_masque(Conn, StreamId, Method, Path, Headers, Dispatch) ->
             end
     end.
 
-%% The client address, as h3 and h2 give it in the request map.
-add_peer(Conn, Req) ->
+%% The client address, as h3 and h2 give it in the request map, and the
+%% transport the request came in on.
+add_peer(Conn, Req0) ->
+    Req = Req0#{transport => h1},
     Req1 =
         try h1:peername(Conn) of
             {ok, Peer} -> Req#{peer => Peer};
@@ -324,10 +340,10 @@ map_init_error({shutdown, {masque_quiet, _}} = Quiet) ->
 %% answer in time (504), not a name that failed to resolve.
 map_init_error({start_timeout, _}) ->
     upstream_timeout;
-map_init_error({reject, Err}) ->
-    Err;
-map_init_error(_) ->
-    resolution_failed.
+%% `{reject, R}', `{resolution_failed, Why}' and the rest, crashes
+%% included (RFC 9209: the most specific error type).
+map_init_error(Reason) ->
+    masque_errors:start_error(Reason).
 
 validate(<<"GET">>, Path, Headers, UdpTemplate, IpTemplate) ->
     validate_get(Path, Headers, UdpTemplate, IpTemplate, false);
@@ -452,16 +468,17 @@ has_upgrade_token(Value) ->
 
 validate_upgrade(Path, Headers, UdpTemplate, IpTemplate, AcceptBind) ->
     Upgrade = header(<<"upgrade">>, Headers),
-    Capsule = header(<<"capsule-protocol">>, Headers),
+    %% A Structured Field Boolean: `?1' with any parameters.
+    Capsule = masque_http:capsule_protocol(Headers),
     UpgradeLc = lowercase_bin(Upgrade),
     case {UpgradeLc, Capsule} of
-        {?MASQUE_CONNECT_UDP_PROTOCOL, <<"?1">>} when
+        {?MASQUE_CONNECT_UDP_PROTOCOL, true} when
             AcceptBind
         ->
             match_udp_or_bind_path(Path, Headers, UdpTemplate);
-        {?MASQUE_CONNECT_UDP_PROTOCOL, <<"?1">>} ->
+        {?MASQUE_CONNECT_UDP_PROTOCOL, true} ->
             match_path(Path, Headers, UdpTemplate);
-        {?MASQUE_CONNECT_IP_PROTOCOL, <<"?1">>} ->
+        {?MASQUE_CONNECT_IP_PROTOCOL, true} ->
             match_ip_path(Path, Headers, IpTemplate);
         {Upgrade1, _} when
             Upgrade1 =:= ?MASQUE_CONNECT_UDP_PROTOCOL;
@@ -626,7 +643,7 @@ reject(Conn, StreamId, Reason, ExtraHeaders) ->
         %% draft-ietf-httpbis-connect-tcp-18 section 3.4.3: a rejected
         %% upgrade is a GET, so its response must not be cached.
         {<<"cache-control">>, <<"no-store">>},
-        {<<"proxy-status">>, proxy_status_field(Reason)}
+        {<<"proxy-status">>, masque_errors:proxy_status(Reason)}
     ],
     Headers = merge_extra_headers(Base, ExtraHeaders),
     _ =
@@ -655,21 +672,3 @@ merge_extra_headers(Base, Extra) ->
     Keys = [K || {K, _} <- Extra],
     Kept = [Pair || {K, _} = Pair <- Base, not lists:member(K, Keys)],
     Extra ++ Kept.
-
-proxy_status_field(Reason) ->
-    Error = proxy_status_error(Reason),
-    <<"masque; error=", Error/binary>>.
-
-proxy_status_error(bad_method) -> <<"http_protocol_error">>;
-proxy_status_error(bad_protocol) -> <<"http_protocol_error">>;
-proxy_status_error(bad_path) -> <<"http_protocol_error">>;
-proxy_status_error(bad_port) -> <<"http_protocol_error">>;
-proxy_status_error(bad_host) -> <<"http_protocol_error">>;
-proxy_status_error(bad_request) -> <<"http_protocol_error">>;
-proxy_status_error(unknown_request) -> <<"http_request_error">>;
-proxy_status_error(resolution_failed) -> <<"dns_error">>;
-proxy_status_error(upstream_timeout) -> <<"connection_timeout">>;
-proxy_status_error(forbidden) -> <<"destination_ip_prohibited">>;
-proxy_status_error(loop_detected) -> <<"proxy_loop_detected">>;
-proxy_status_error(overload) -> <<"proxy_internal_error">>;
-proxy_status_error(_) -> <<"proxy_internal_error">>.

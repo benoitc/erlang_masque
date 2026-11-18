@@ -27,7 +27,9 @@
     chain_h1_listener_echo/1,
     chain_h3_self_loop_detected/1,
     chain_h1_own_via_rejected/1,
-    chain_h3_two_listeners_same_node/1
+    chain_h3_two_listeners_same_node/1,
+    chain_via_names_ingress_protocol/1,
+    chain_upstream_status_passed_through/1
 ]).
 
 all() ->
@@ -38,7 +40,9 @@ all() ->
         chain_h1_listener_echo,
         chain_h3_self_loop_detected,
         chain_h1_own_via_rejected,
-        chain_h3_two_listeners_same_node
+        chain_h3_two_listeners_same_node,
+        chain_via_names_ingress_protocol,
+        chain_upstream_status_passed_through
     ].
 
 init_per_suite(Config) ->
@@ -214,6 +218,128 @@ chain_h1_listener_echo(Config) ->
         end,
     Config1 = [{ingress_h1_keeper, Keeper} | Config],
     exchange_echo_through(h1, IngressPort, Config1).
+
+%% RFC 9110 section 7.6.3: the `via' entry a chain listener adds names
+%% the protocol the request came in on (`3', `2', `1.1').
+chain_via_names_ingress_protocol(Config) ->
+    Certs = ?config(certs, Config),
+    {ok, Egress} = masque_test_helpers:start_masque_server(
+        maps:merge(Certs, #{
+            handler => masque_report_handler,
+            handler_opts => #{report_to => self()}
+        })
+    ),
+    UpOpts = #{verify => verify_none, transports => [h3], alpn => [<<"h3">>]},
+    HOpts = #{upstream_proxy => upstream_uri(maps:get(port, Egress)), upstream_opts => UpOpts},
+    try
+        [
+            begin
+                {Port, Stop} = start_ingress(Transport, Certs, HOpts),
+                try
+                    {ok, Sess} = loop_connect(Transport, Port, ?config(udp_port, Config)),
+                    Via =
+                        receive
+                            {masque_req, #{headers := H}} -> proplists:get_value(<<"via">>, H)
+                        after 5000 -> ct:fail({no_request, Transport})
+                        end,
+                    ?assertMatch({0, _}, binary:match(Via, <<Version/binary, " masque-">>), Via),
+                    masque:close(Sess)
+                after
+                    Stop()
+                end
+            end
+         || {Transport, Version} <- [{h3, <<"3">>}, {h2, <<"2">>}, {h1, <<"1.1">>}]
+        ]
+    after
+        masque_test_helpers:stop_masque_server(Egress)
+    end.
+
+%% RFC 9209 section 2: an upstream refusal keeps its status, and the
+%% chain listener adds its own member naming the status it received.
+chain_upstream_status_passed_through(Config) ->
+    Certs = ?config(certs, Config),
+    %% The egress refuses the private target with 403.
+    {ok, Egress} = masque_test_helpers:start_masque_server(
+        maps:merge(Certs, #{
+            handler => masque_udp_proxy_handler,
+            handler_opts => #{allow_private => false}
+        })
+    ),
+    UpOpts = #{verify => verify_none, transports => [h3], alpn => [<<"h3">>]},
+    HOpts = #{upstream_proxy => upstream_uri(maps:get(port, Egress)), upstream_opts => UpOpts},
+    try
+        {Port3, Stop3} = start_ingress(h3, Certs, HOpts),
+        try
+            ?assertMatch(
+                {error, {handshake_rejected, 403}},
+                loop_connect(h3, Port3, ?config(udp_port, Config))
+            )
+        after
+            Stop3()
+        end,
+        {Port1, Stop1} = start_ingress(h1, Certs, HOpts),
+        try
+            {ok, Sock} = ssl:connect(
+                "127.0.0.1", Port1, [binary, {active, false}, {verify, verify_none}], 5000
+            ),
+            Path = iolist_to_binary([
+                "/.well-known/masque/udp/127.0.0.1/",
+                integer_to_list(?config(udp_port, Config)),
+                "/"
+            ]),
+            ok = ssl:send(Sock, [
+                <<"GET ">>,
+                Path,
+                <<" HTTP/1.1\r\nhost: localhost\r\nconnection: Upgrade\r\n">>,
+                <<"upgrade: connect-udp\r\ncapsule-protocol: ?1\r\n\r\n">>
+            ]),
+            {ok, Resp} = ssl:recv(Sock, 0, 5000),
+            _ = ssl:close(Sock),
+            ?assertMatch(<<"HTTP/1.1 403", _/binary>>, Resp),
+            ?assertNotEqual(nomatch, binary:match(Resp, <<"masque; received-status=403">>))
+        after
+            Stop1()
+        end
+    after
+        masque_test_helpers:stop_masque_server(Egress)
+    end.
+
+%% A chain listener on `Transport': its port and a fun that stops it.
+start_ingress(h3, Certs, HOpts) ->
+    Name = unique_name("ingress_h3"),
+    {ok, _} = masque:start_chain_listener(Name, #{
+        port => 0, cert => maps:get(cert, Certs), key => maps:get(key, Certs), handler_opts => HOpts
+    }),
+    {ok, Port} = quic:get_server_port(Name),
+    {Port, fun() -> masque:stop_listener(Name) end};
+start_ingress(h2, Certs, HOpts) ->
+    Name = unique_name("ingress_h2"),
+    {ok, {_, _, Port} = Ref} = masque:start_chain_listener_h2(Name, #{
+        port => 0,
+        cert => maps:get(cert_file, Certs),
+        key => maps:get(key_file, Certs),
+        handler_opts => HOpts
+    }),
+    {Port, fun() -> masque:stop_listener_h2(Ref) end};
+start_ingress(h1, Certs, HOpts) ->
+    Name = unique_name("ingress_h1"),
+    Parent = self(),
+    Keeper = erlang:spawn(fun() ->
+        {ok, R} = masque:start_chain_listener_h1(Name, #{
+            port => 0,
+            cert => maps:get(cert_file, Certs),
+            key => maps:get(key_file, Certs),
+            handler_opts => HOpts
+        }),
+        Parent ! {self(), started, h1:server_port(R)},
+        receive
+            stop -> _ = masque:stop_listener_h1(Name)
+        end
+    end),
+    receive
+        {Keeper, started, Port} -> {Port, fun() -> Keeper ! stop end}
+    after 5000 -> ct:fail(h1_keeper_timeout)
+    end.
 
 %% An h3 chain listener whose upstream is itself: the second hop sees
 %% its own `via' entry and answers 508 instead of dialing again.

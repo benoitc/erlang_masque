@@ -37,7 +37,12 @@
     silent_proxy_times_out/1,
     no_session_left_after_failure/1,
     bind_h1_bad_responses_rejected/1,
-    bind_h1_request_ipv6_authority_and_headers/1
+    bind_h1_request_ipv6_authority_and_headers/1,
+    h1_bad_upgrade_responses_rejected/1,
+    h1_capsule_protocol_parameters_accepted/1,
+    no_extended_connect_h3/1,
+    no_h3_datagram_h3/1,
+    no_extended_connect_h2/1
 ]).
 
 -define(TARGET, {<<"192.0.2.6">>, 443}).
@@ -64,7 +69,12 @@ all() ->
         silent_proxy_times_out,
         no_session_left_after_failure,
         bind_h1_bad_responses_rejected,
-        bind_h1_request_ipv6_authority_and_headers
+        bind_h1_request_ipv6_authority_and_headers,
+        h1_bad_upgrade_responses_rejected,
+        h1_capsule_protocol_parameters_accepted,
+        no_extended_connect_h3,
+        no_h3_datagram_h3,
+        no_extended_connect_h2
     ].
 
 init_per_suite(Config) ->
@@ -238,6 +248,110 @@ bind_h1_bad_responses_rejected(Config) ->
         end
      || {Reply, Expected} <- Cases
     ].
+
+%% RFC 9298 section 3.3, RFC 9484 section 4.3 and
+%% draft-ietf-httpbis-connect-tcp section 3.2: a 101 without
+%% `Connection: Upgrade', or without a single `Upgrade' naming the token
+%% asked for, fails the tunnel on the UDP, IP and TCP h1 clients.
+h1_bad_upgrade_responses_rejected(Config) ->
+    Head = <<"HTTP/1.1 101 Switching Protocols\r\n">>,
+    Cap = <<"capsule-protocol: ?1\r\n">>,
+    Cases = [
+        {udp, <<Head/binary, "upgrade: connect-udp\r\n", Cap/binary, "\r\n">>},
+        {udp, <<Head/binary, "connection: upgrade\r\n", Cap/binary, "\r\n">>},
+        {udp,
+            <<Head/binary, "connection: upgrade\r\nupgrade: connect-ip\r\n", Cap/binary, "\r\n">>},
+        {udp,
+            <<Head/binary, "connection: upgrade\r\nupgrade: connect-udp\r\n",
+                "upgrade: connect-udp\r\n", Cap/binary, "\r\n">>},
+        {ip, <<Head/binary, "upgrade: connect-ip\r\n", Cap/binary, "\r\n">>},
+        {ip,
+            <<Head/binary, "connection: upgrade\r\nupgrade: connect-udp\r\n", Cap/binary, "\r\n">>},
+        {tcp, <<Head/binary, "upgrade: connect-tcp\r\n", Cap/binary, "\r\n">>},
+        {tcp,
+            <<Head/binary, "connection: upgrade\r\nupgrade: connect-udp\r\n", Cap/binary, "\r\n">>}
+    ],
+    [
+        begin
+            Port = start_fake_h1_proxy(Config, Reply),
+            URI = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+            ?assertEqual(
+                {error, bad_upgrade_response},
+                dial(URI, h1, Protocol, h1_opts(Protocol)),
+                {Protocol, Reply}
+            )
+        end
+     || {Protocol, Reply} <- Cases
+    ],
+    assert_no_close_messages().
+
+%% RFC 9297 section 3.4: the h1 clients read the acknowledgement as a
+%% Boolean, so parameters do not fail the tunnel.
+h1_capsule_protocol_parameters_accepted(Config) ->
+    [
+        begin
+            Reply = iolist_to_binary([
+                "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: ",
+                Token,
+                "\r\nCapsule-Protocol: ?1; foo=bar\r\n\r\n"
+            ]),
+            Port = start_fake_h1_proxy(Config, Reply),
+            URI = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+            {ok, Sess} = dial(URI, h1, Protocol, h1_opts(Protocol)),
+            ok = masque:close(Sess)
+        end
+     || {Protocol, Token} <- [{udp, <<"connect-udp">>}, {ip, <<"connect-ip">>}]
+    ].
+
+h1_opts(tcp) -> #{verify => verify_none, timeout => 1000, tcp_framing => capsule};
+h1_opts(_) -> #{verify => verify_none, timeout => 1000}.
+
+%% RFC 8441 section 3, RFC 9220 section 3 and RFC 9297 section 2.1.1:
+%% the client refuses a proxy whose SETTINGS do not enable Extended
+%% CONNECT (h3, h2) or HTTP Datagrams (h3).
+no_extended_connect_h3(Config) ->
+    with_h3_server(Config, #{h3_datagram => 1}, fun(URI) ->
+        ?assertEqual({error, no_extended_connect}, dial(URI, h3, udp, #{verify => verify_none}))
+    end).
+
+no_h3_datagram_h3(Config) ->
+    with_h3_server(Config, #{enable_connect_protocol => 1}, fun(URI) ->
+        ?assertEqual({error, no_h3_datagram}, dial(URI, h3, udp, #{verify => verify_none})),
+        ?assertEqual({error, no_h3_datagram}, dial(URI, h3, ip, #{verify => verify_none}))
+    end).
+
+no_extended_connect_h2(Config) ->
+    #{cert_file := CertFile, key_file := KeyFile} = ?config(certs, Config),
+    Name = unique_name("plain_h2"),
+    {ok, {_, _, Port} = Ref} = h2:start_server(Name, 0, #{
+        cert => CertFile,
+        key => KeyFile,
+        handler => fun(_Conn, _Sid, _Method, _Path, _Headers) -> ok end
+    }),
+    URI = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    try
+        ?assertEqual({error, no_extended_connect}, dial(URI, h2, udp, #{verify => verify_none}))
+    after
+        h2:stop_server(Ref)
+    end.
+
+%% A plain HTTP/3 server with `Settings' and no MASQUE handler.
+with_h3_server(Config, Settings, Fun) ->
+    #{cert := Cert, key := Key} = ?config(certs, Config),
+    Name = unique_name("plain_h3"),
+    {ok, _} = quic_h3:start_server(Name, 0, #{
+        cert => Cert,
+        key => Key,
+        settings => Settings,
+        quic_opts => #{alpn => [<<"h3">>], max_datagram_frame_size => 65535},
+        handler => fun(_Conn, _Sid, _Method, _Path, _Headers) -> ok end
+    }),
+    {ok, Port} = quic:get_server_port(Name),
+    try
+        Fun(iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]))
+    after
+        quic_h3:stop_server(Name)
+    end.
 
 %% The udp-bind h1 client brackets an IPv6 proxy host and drops extra
 %% headers that would rewrite or inject request headers.

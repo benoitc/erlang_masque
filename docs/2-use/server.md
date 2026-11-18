@@ -102,7 +102,7 @@ check(#{headers := Headers}) ->
 ```
 
 - `{ok, Identity}` puts `identity` in the request map, so `accept/1` and `init/2` can use it.
-- A crash in `authenticate` refuses the request with 403; the request is not logged.
+- Any other return, or a crash, refuses the request with 403 (`denied`, Proxy-Status `http_request_denied`); after a crash the request is not logged.
 - Listeners whose handlers are your own modules are not checked: your `accept/1` carries the policy.
 - Reverse connect requests are authenticated by the `listen_handler` instead.
 - For a node that relays on purpose everywhere, set the application env `{masque, [{public_relay, true}]}`; a listener's own `public_relay` wins.
@@ -120,21 +120,30 @@ The reject reasons and their status codes:
 
 | Reason | Status | Proxy-Status error |
 |---|---|---|
-| `bad_method` | 405 | `http_protocol_error` |
+| `bad_method` | 405 | `http_request_error` |
 | `bad_protocol` | 501 | `http_protocol_error` |
-| `bad_path` | 404 | `http_protocol_error` |
-| `bad_port`, `bad_host` | 400 | `http_protocol_error` |
+| `bad_path` | 404 | `http_request_error` |
+| `bad_port`, `bad_host` | 400 | `http_request_error` |
+| `bad_request` | 400 | `http_request_error` |
+| `unknown_request` | 404 | `http_request_error` |
 | `forbidden` | 403 | `destination_ip_prohibited` |
+| `denied` | 403 | `http_request_denied` |
 | `resolution_failed` | 502 | `dns_error` |
+| `connection_refused` | 502 | `connection_refused` |
+| `destination_unavailable` | 502 | `destination_unavailable` |
+| `destination_unroutable` | 502 | `destination_ip_unroutable` |
+| `ip_prohibited` | 502 | `destination_ip_prohibited` |
 | `upstream_timeout` | 504 | `connection_timeout` |
 | `loop_detected` | 508 | `proxy_loop_detected` |
 | `overload` | 503 | `proxy_internal_error` |
-| `bad_request` | 400 | `http_protocol_error` |
-| `unknown_request` | 404 | `http_request_error` |
+| `internal_error` | 502 | `proxy_internal_error` |
+| `{upstream_status, Status}` | `Status` (400..599) | none; the member is `masque; received-status=Status` |
 | `{other, Status}` | `Status` (400..599) | `proxy_internal_error` |
 | anything else | 502 | `proxy_internal_error` |
 
 Every rejection carries a `proxy-status: masque; error=...` header (RFC 9209) and a one-line text body. On h1 the listener also closes the connection after a rejection.
+
+The listeners refuse some requests before routing them: a request with `capsule-protocol: ?1` that also carries `content-length`, `content-type` or `transfer-encoding` (RFC 9297 section 3.2), and on h1 a request with more than one `Host` field. Both answer 400 (`bad_request`).
 
 `accept/1` runs in the request handling process, before any session exists, so keep it fast and do not raise: `masque` does not catch exceptions from it. Refusals that need work (opening a socket, dialing an upstream) belong in `init/2`, where `{stop, Reason}` also refuses the tunnel (see [handlers](handlers.md#init-runs-before-the-2xx)).
 
@@ -182,12 +191,12 @@ Draining works by listener name on all three transports. Tunnels already open ke
 | `max_tunnels_per_connection` | listener, h3 and h2 | 100 (`0`: no limit) | 503 `overload`. h1 carries one tunnel per connection anyway. |
 | `max_capsule_size` | `handler_opts` | 65536 bytes | A capsule larger than this aborts the tunnel. |
 | `idle_timeout_ms` | `handler_opts`, every session | 300000 | A tunnel with no traffic in either direction for this long ends with `idle_timeout` (the stream is reset; on h1 the socket is closed). `infinity` disables it. |
-| Session `init/2` time | h3 | 30 s | The request is refused with 502. |
+| Session `init/2` time | h3 | 30 s | The request is refused with 504 (`upstream_timeout`). |
 
 ## Security defaults
 
 - A listener with the built-in handlers does not start on a non-loopback address without `authenticate` or `public_relay => true` (see [public listeners](#public-listeners)).
-- The built-in UDP and TCP handlers refuse targets that resolve to non-public addresses (private, loopback, link-local, CGNAT, documentation, multicast; see `masque_ip:is_public/1`). The tunnel is refused with 502 `resolution_failed`. Set `allow_private => true` in `handler_opts` to allow them.
+- The built-in UDP and TCP handlers refuse targets that resolve to non-public addresses (private, loopback, link-local, CGNAT, documentation, multicast; see `masque_ip:is_public/1`). CONNECT-UDP and capsule-framed CONNECT-TCP answer 403, raw CONNECT-TCP 502; both with Proxy-Status `destination_ip_prohibited`. Set `allow_private => true` in `handler_opts` to allow them.
 - The built-in IP handler refuses the `*` target and non-public targets with 403 unless `allow_private` is set, and filters packets per tunnel. See [connect-ip](connect-ip.md#target-scoping).
 - The built-in udp-bind handler only exchanges packets with public peers; `allow_loopback` and `allow_private` widen that. See [connect-udp-bind](connect-udp-bind.md#peer-filter).
 - The chain handler verifies the upstream proxy certificate by default.

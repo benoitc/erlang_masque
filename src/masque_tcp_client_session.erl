@@ -250,7 +250,7 @@ connecting_inner(
     cancel_timer(Data#data.timeout_ref),
     case Status of
         S when S >= 200, S < 300 ->
-            case check_response(Headers, Data#data.framing) of
+            case check_response(S, Headers, Data#data.framing) of
                 ok ->
                     reply_handshake(Data, ok),
                     {next_state, open, Data#data{
@@ -778,14 +778,16 @@ request_path(Template, Vars, _Host, _Port) ->
 framing_headers(capsule) -> [{<<"capsule-protocol">>, <<"?1">>}];
 framing_headers(raw) -> [].
 
-%% A CONNECT-TCP 2xx must not switch the stream to capsules: the
-%% tunnel carries raw bytes (draft-ietf-httpbis-connect-tcp).
-check_response(_Headers, capsule) ->
-    ok;
-check_response(Headers, raw) ->
-    case proplists:get_value(<<"capsule-protocol">>, Headers) of
-        <<"?1", _/binary>> -> {error, {bad_response, capsule_protocol}};
-        _ -> ok
+%% A capsule-framed 2xx follows RFC 9297 section 3.2 (no body fields,
+%% not 204, 205 or 206). A raw CONNECT-TCP 2xx must not switch the
+%% stream to capsules: the tunnel carries raw bytes
+%% (draft-ietf-httpbis-connect-tcp).
+check_response(Status, Headers, capsule) ->
+    masque_http:capsule_response(Status, Headers);
+check_response(_Status, Headers, raw) ->
+    case masque_http:capsule_protocol(Headers) of
+        true -> {error, {bad_response, capsule_protocol}};
+        false -> ok
     end.
 
 sanitise_extra_headers(List) when is_list(List) ->

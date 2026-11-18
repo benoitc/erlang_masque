@@ -98,6 +98,24 @@ validate_rejects_content_type_test() ->
         ?M:validate_response(Hs, Data)
     ).
 
+%% RFC 9297 section 3.4: a Boolean, unknown parameters ignored.
+validate_accepts_capsule_protocol_parameters_test() ->
+    Data = ?M:build_data(#{capsule_protocol => true}),
+    Hs = [{<<"capsule-protocol">>, <<"?1; foo=bar">>}],
+    ?assertEqual(ok, ?M:validate_response(Hs, Data)).
+
+validate_rejects_false_capsule_protocol_test() ->
+    Data = ?M:build_data(#{capsule_protocol => true}),
+    ?assertEqual(
+        {error, capsule_protocol_not_acknowledged},
+        ?M:validate_response([{<<"capsule-protocol">>, <<"?0">>}], Data)
+    ).
+
+validate_rejects_transfer_encoding_test() ->
+    Data = ?M:build_data(#{capsule_protocol => true}),
+    Hs = [{<<"capsule-protocol">>, <<"?1">>}, {<<"transfer-encoding">>, <<"chunked">>}],
+    ?assertEqual({error, malformed_response}, ?M:validate_response(Hs, Data)).
+
 validate_accepts_mixed_case_header_names_test() ->
     Data = ?M:build_data(#{capsule_protocol => true}),
     Hs = [{<<"Capsule-Protocol">>, <<"?1">>}],

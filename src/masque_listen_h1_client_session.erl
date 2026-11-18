@@ -44,8 +44,8 @@ init({#{proxy := {Host, Port}, listen_path := Path} = Opts, Owner}) ->
                 ok ->
                     case read_response(Socket, <<>>, Deadline) of
                         {ok, 101, Headers, Rest} ->
-                            case proplists:get_value(<<"capsule-protocol">>, Headers) of
-                                <<"?1", _/binary>> ->
+                            case masque_http:capsule_protocol(Headers) of
+                                true ->
                                     S = #state{
                                         owner = Owner,
                                         owner_mon = OwnerMon,
@@ -65,7 +65,7 @@ init({#{proxy := {Host, Port}, listen_path := Path} = Opts, Owner}) ->
                                             _ = ssl:close(Socket),
                                             {stop, Reason}
                                     end;
-                                _ ->
+                                false ->
                                     _ = ssl:close(Socket),
                                     {stop, {bad_response, capsule_protocol}}
                             end;

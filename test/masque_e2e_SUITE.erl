@@ -71,7 +71,25 @@
     h3_goaway_transfer_continues/1,
     h2_goaway_tells_client/1,
     goaway_refuses_new_requests/1,
-    goaway_pool_moves_on/1
+    goaway_pool_moves_on/1,
+    udp_body_fields_refused/1,
+    udp_capsule_protocol_parameters/1,
+    udp_truncated_capsule_at_fin/1,
+    udp_unknown_capsule_skipped/1,
+    unknown_protocol_not_implemented/1,
+    h1_duplicate_host_refused/1,
+    ps_request_error/1,
+    ps_policy_refusal/1,
+    ps_dns_error/1,
+    ps_connection_refused/1,
+    ps_internal_error/1,
+    ps_denied/1,
+    client_capsule_parameters_accepted/1,
+    client_truncated_capsule_at_fin/1,
+    client_bad_udp_responses/1,
+    client_bad_ip_responses/1,
+    client_bad_tcp_responses/1,
+    client_h1_transfer_encoding_refused/1
 ]).
 %% Called through a fun in `handler_opts'.
 -export([ip_router/2]).
@@ -183,17 +201,48 @@ groups() ->
         | HalfClose
     ],
     Fallback = [tcp_fallback_on_426, tcp_fallback_on_501, tcp_no_fallback_on_plain_426],
+    %% RFC 9297, RFC 9298, RFC 9209 and RFC 9110 wire vectors: listener
+    %% checks, Proxy-Status types, and clients against a scripted proxy.
+    Framing = [
+        udp_body_fields_refused,
+        udp_capsule_protocol_parameters,
+        udp_truncated_capsule_at_fin,
+        ps_request_error,
+        ps_policy_refusal,
+        ps_dns_error,
+        ps_connection_refused,
+        ps_internal_error,
+        ps_denied,
+        client_capsule_parameters_accepted,
+        client_truncated_capsule_at_fin
+    ],
+    ExtendedConnect = [
+        unknown_protocol_not_implemented,
+        client_bad_udp_responses,
+        client_bad_ip_responses,
+        client_bad_tcp_responses
+    ],
     [
         {h3, [],
-            Tcp ++ HalfClose ++ Other ++
+            Tcp ++ HalfClose ++ Other ++ Framing ++ ExtendedConnect ++
                 [
                     h3_client_vanishes,
                     h3_udp_quiet_tunnel,
                     h3_goaway_transfer_continues
                     | GoAway
                 ]},
-        {h2, [], Tcp ++ HalfClose ++ Other ++ [h2_goaway_tells_client | GoAway]},
-        {h1, [], Tcp ++ Other ++ [h1_udp_stalled_client | Fallback]},
+        {h2, [],
+            Tcp ++ HalfClose ++ Other ++ Framing ++ ExtendedConnect ++
+                [udp_unknown_capsule_skipped, h2_goaway_tells_client | GoAway]},
+        {h1, [],
+            Tcp ++ Other ++ Framing ++
+                [
+                    udp_unknown_capsule_skipped,
+                    h1_duplicate_host_refused,
+                    client_h1_transfer_encoding_refused,
+                    h1_udp_stalled_client
+                    | Fallback
+                ]},
         %% CONNECT-TCP in capsules (draft-ietf-httpbis-connect-tcp-18),
         %% with the client's default token, `connect-tcp'.
         {h3_capsule, [], Tcp ++ HalfClose ++ Capsule ++ Vectors},
@@ -269,8 +318,25 @@ init_per_testcase(Case, Config) ->
     true = register(?PROBE, self()),
     Transport = ?config(transport, Config),
     Certs = ?config(certs, Config),
-    Server = start_server(Transport, Certs, case_opts(Case)),
+    Server = start_server(Transport, Certs, case_opts(Case, Transport)),
     [{server, Server} | Config].
+
+%% Clients run against a listener whose templates match nothing, so its
+%% `fallback' answers every request with the response the case scripts.
+case_opts(Case, Transport) ->
+    case atom_to_list(Case) of
+        "client_" ++ _ ->
+            #{
+                uri_template => <<"/fake/udp/{target_host}/{target_port}/">>,
+                tcp_uri_template => <<"/fake/tcp/{target_host}/{target_port}/">>,
+                ip_uri_template => <<"/fake/ip/{target}/{ipproto}/">>,
+                fallback => fun(Conn, Sid, _Method, _Path, _Headers) ->
+                    fake_reply(Transport, Conn, Sid)
+                end
+            };
+        _ ->
+            case_opts(Case)
+    end.
 
 case_opts(capsule_listener_without_header) ->
     #{tcp_framing => capsule};
@@ -287,6 +353,14 @@ case_opts(vec_continue_before_dial) ->
 case_opts(ip_full_assign_set) ->
     Pools = [{4, {10, 200, 0, 0}, 24}, {6, {16#fd00, 0, 0, 0, 0, 0, 0, 0}, 64}],
     #{handler_opts => (default_handler_opts())#{address_pool => Pools}};
+case_opts(ps_policy_refusal) ->
+    #{handler_opts => #{allow_private => false}};
+case_opts(ps_dns_error) ->
+    #{resolver => fun(_Host) -> {error, nxdomain} end};
+case_opts(ps_internal_error) ->
+    #{handler => masque_stop_init_handler};
+case_opts(ps_denied) ->
+    #{authenticate => fun(_Req) -> false end};
 case_opts(bind_peer_filter) ->
     #{accept_bind => true, handler_opts => #{bind_address => {127, 0, 0, 1}}};
 case_opts(_) ->
@@ -2345,3 +2419,411 @@ target_echo(Sock) ->
 target_hold(Sock) ->
     _ = gen_tcp:recv(Sock, 0),
     gen_tcp:close(Sock).
+
+%%====================================================================
+%% HTTP framing (RFC 9297, RFC 9298, RFC 9209, RFC 9110)
+%%
+%% Listener cases drive the listener with hand-built requests; client
+%% cases run the real client against a listener whose `fallback' sends
+%% the response the case scripts.
+%%====================================================================
+
+%% RFC 9297 section 3.2: a capsule-protocol request carrying a body
+%% field is malformed (400). h2 and h3 forbid `transfer-encoding'
+%% already, so it is sent on h1 only.
+udp_body_fields_refused(Config) ->
+    Fields =
+        [{<<"content-length">>, <<"0">>}, {<<"content-type">>, <<"text/plain">>}] ++
+            [{<<"transfer-encoding">>, <<"chunked">>} || ?config(transport, Config) =:= h1],
+    lists:foreach(
+        fun(Field) ->
+            {Status, Hdrs, H} = udp_attempt(Config, udp_target(Config), <<"?1">>, [Field]),
+            ?assertEqual({400, <<"masque; error=http_request_error">>}, {
+                Status, proplists:get_value(<<"proxy-status">>, Hdrs)
+            }),
+            attempt_close(H)
+        end,
+        Fields
+    ).
+
+%% RFC 9297 section 3.4: `Capsule-Protocol' is a Boolean and unknown
+%% parameters are ignored.
+udp_capsule_protocol_parameters(Config) ->
+    {Status, Hdrs, H} = udp_attempt(Config, udp_target(Config), <<"?1; foo=bar;x">>, []),
+    ?assertEqual(success_status(Config), Status),
+    ?assertEqual(<<"?1">>, proplists:get_value(<<"capsule-protocol">>, Hdrs)),
+    %% On h3 the reply comes back as a QUIC datagram, not a capsule.
+    case H of
+        {quic_h3, _, _} ->
+            ok;
+        _ ->
+            ok = attempt_send(H, datagram_capsule(<<"param">>)),
+            ?assertEqual({0, <<0, "param">>}, attempt_capsule(H))
+    end,
+    attempt_close(H).
+
+%% RFC 9297 section 3.3: a stream that ends inside a capsule is
+%% malformed; the listener resets it (h3, h2) or the connection is gone
+%% (h1), and the session ends.
+udp_truncated_capsule_at_fin(Config) ->
+    {Status, _, H} = udp_attempt(Config, udp_target(Config), <<"?1">>, []),
+    ?assertEqual(success_status(Config), Status),
+    ok = attempt_send(H, <<0, 10, "abc">>),
+    case H of
+        {h1, Sock, _} ->
+            ssl:close(Sock);
+        {Tag, Conn, Sid} ->
+            ok = raw_end(Tag, Conn, Sid),
+            receive
+                {Tag, Conn, {stream_reset, Sid, _}} -> ok
+            after 5000 -> ct:fail(no_reset)
+            end,
+            raw_close(Tag, Conn)
+    end,
+    await_no_server_sessions(?LEAK_MS).
+
+%% RFC 9297 section 3.3: capsules of an unknown type are skipped; the
+%% DATAGRAM capsule behind one still reaches the target.
+udp_unknown_capsule_skipped(Config) ->
+    {Status, _, H} = udp_attempt(Config, udp_target(Config), <<"?1">>, []),
+    ?assertEqual(success_status(Config), Status),
+    Unknown = iolist_to_binary(masque_capsule:encode(16#2a5f, <<"ignore me">>)),
+    ok = attempt_send(H, <<Unknown/binary, (datagram_capsule(<<"after">>))/binary>>),
+    ?assertEqual({0, <<0, "after">>}, attempt_capsule(H)),
+    attempt_close(H).
+
+%% RFC 8441 section 4 and RFC 9220: an Extended CONNECT with a
+%% `:protocol' the listener does not implement is a 501.
+unknown_protocol_not_implemented(Config) ->
+    #{port := Port} = ?config(server, Config),
+    Headers = [
+        {<<":method">>, <<"CONNECT">>},
+        {<<":scheme">>, <<"https">>},
+        {<<":authority">>, iolist_to_binary(["127.0.0.1:", integer_to_list(Port)])},
+        {<<":path">>, <<"/.well-known/masque/udp/127.0.0.1/9/">>}
+    ],
+    Token = <<"x-unknown-protocol">>,
+    Req =
+        case ?config(transport, Config) of
+            h3 -> Headers ++ [{<<":protocol">>, Token}];
+            h2 -> Headers
+        end,
+    {Tag, Conn, Sid} = raw_request(Config, Req, Token),
+    {Status, Hdrs} = raw_response(Tag, Conn, Sid),
+    ?assertEqual({501, <<"masque; error=http_protocol_error">>}, {
+        Status, proplists:get_value(<<"proxy-status">>, Hdrs)
+    }),
+    raw_close(Tag, Conn).
+
+%% RFC 9112 section 3.2 and RFC 9298 section 3.2: one Host field line.
+h1_duplicate_host_refused(Config) ->
+    {Status, Hdrs, H} = udp_attempt(
+        Config, udp_target(Config), <<"?1">>, [{<<"Host">>, <<"other.example">>}]
+    ),
+    ?assertEqual({400, <<"masque; error=http_request_error">>}, {
+        Status, proplists:get_value(<<"proxy-status">>, Hdrs)
+    }),
+    attempt_close(H).
+
+%% RFC 9209 section 2.3: the most specific error type for each refusal.
+ps_request_error(Config) ->
+    expect_refusal(Config, {<<"127.0.0.1">>, <<"0">>}, 400, <<"http_request_error">>).
+
+ps_policy_refusal(Config) ->
+    expect_refusal(Config, udp_target(Config), 403, <<"destination_ip_prohibited">>).
+
+ps_dns_error(Config) ->
+    expect_refusal(Config, {<<"nx.test">>, <<"53">>}, 502, <<"dns_error">>).
+
+ps_internal_error(Config) ->
+    expect_refusal(Config, udp_target(Config), 502, <<"proxy_internal_error">>).
+
+ps_denied(Config) ->
+    expect_refusal(Config, udp_target(Config), 403, <<"http_request_denied">>).
+
+%% A target that refuses the connection, on CONNECT-TCP: classic
+%% CONNECT on h1, the raw template on h3 and h2.
+ps_connection_refused(Config) ->
+    {ok, Closed} = gen_tcp:listen(0, [{ip, {127, 0, 0, 1}}]),
+    {ok, ClosedPort} = inet:port(Closed),
+    ok = gen_tcp:close(Closed),
+    {Status, Hdrs} =
+        case ?config(transport, Config) of
+            h1 ->
+                Target = iolist_to_binary(["127.0.0.1:", integer_to_list(ClosedPort)]),
+                {Sock, Heads, _} = h1_raw(Config, [
+                    <<"CONNECT ">>, Target, <<" HTTP/1.1\r\nHost: ">>, Target, <<"\r\n\r\n">>
+                ]),
+                ssl:close(Sock),
+                lists:last(Heads);
+            _ ->
+                {Tag, Conn, Sid} = raw_request(
+                    Config, tcp_request(Config, <<"connect-tcp">>, ClosedPort), <<"connect-tcp">>
+                ),
+                Result = raw_response(Tag, Conn, Sid),
+                raw_close(Tag, Conn),
+                Result
+        end,
+    ?assertEqual({502, <<"masque; error=connection_refused">>}, {
+        Status, proplists:get_value(<<"proxy-status">>, Hdrs)
+    }).
+
+expect_refusal(Config, Target, Want, Type) ->
+    {Status, Hdrs, H} = udp_attempt(Config, Target, <<"?1">>, []),
+    attempt_close(H),
+    ?assertEqual({Want, <<"masque; error=", Type/binary>>}, {
+        Status, proplists:get_value(<<"proxy-status">>, Hdrs)
+    }).
+
+%%--------------------------------------------------------------------
+%% Clients against a scripted proxy
+%%--------------------------------------------------------------------
+
+%% RFC 9297 section 3.4: the client reads the acknowledgement as a
+%% Boolean, so parameters do not fail the tunnel.
+client_capsule_parameters_accepted(Config) ->
+    fake_script(Config, {success_status(Config), [{<<"capsule-protocol">>, <<"?1; foo=bar">>}]}),
+    {ok, Sess} = fake_connect(Config, udp),
+    close(Sess).
+
+%% RFC 9297 section 3.3: a proxy stream that ends inside a capsule
+%% aborts the tunnel (h3 and h2); on h1 the connection just ends.
+client_truncated_capsule_at_fin(Config) ->
+    fake_script(
+        Config,
+        {success_status(Config), [{<<"capsule-protocol">>, <<"?1">>}], <<0, 10, "abc">>}
+    ),
+    {ok, Sess} = fake_connect(Config, udp),
+    receive
+        {masque_closed, Sess, Reason} ->
+            case ?config(transport, Config) of
+                h1 -> ok;
+                _ -> ?assertEqual(truncated_capsule, Reason)
+            end
+    after 5000 -> ct:fail(not_closed)
+    end.
+
+%% RFC 9297 section 3.2 and RFC 9298 section 3.5: a 2xx that carries a
+%% body field, is a 204, 205 or 206, or does not acknowledge the
+%% Capsule Protocol fails the tunnel.
+client_bad_udp_responses(Config) ->
+    Ack = {<<"capsule-protocol">>, <<"?1">>},
+    fake_cases(
+        Config,
+        udp,
+        content_length_case(Config, Ack) ++
+            [
+                {{200, [Ack, {<<"content-type">>, <<"text/plain">>}]}, {error, malformed_response}},
+                {{204, [Ack]}, {error, malformed_response}},
+                {{205, [Ack]}, {error, malformed_response}},
+                {{206, [Ack]}, {error, malformed_response}},
+                {{200, []}, {error, capsule_protocol_not_acknowledged}},
+                {
+                    {200, [{<<"capsule-protocol">>, <<"?0">>}]},
+                    {error, capsule_protocol_not_acknowledged}
+                }
+            ]
+    ).
+
+client_bad_ip_responses(Config) ->
+    Ack = {<<"capsule-protocol">>, <<"?1">>},
+    fake_cases(
+        Config,
+        ip,
+        content_length_case(Config, Ack) ++
+            [
+                {{204, [Ack]}, {error, malformed_response}},
+                {{200, []}, {error, capsule_protocol_missing}}
+            ]
+    ),
+    fake_script(Config, {200, [{<<"capsule-protocol">>, <<"?1;v=2">>}]}),
+    {ok, Sess} = fake_connect(Config, ip),
+    close(Sess).
+
+%% CONNECT-TCP: a capsule-framed 2xx follows RFC 9297 section 3.2; a
+%% raw one must not start the Capsule Protocol, parameters or not.
+client_bad_tcp_responses(Config) ->
+    Ack = {<<"capsule-protocol">>, <<"?1">>},
+    fake_cases(Config, {tcp, capsule}, [
+        {{204, [Ack]}, {error, malformed_response}},
+        {{200, [Ack, {<<"content-type">>, <<"text/plain">>}]}, {error, malformed_response}}
+    ]),
+    fake_cases(Config, {tcp, raw}, [
+        {{200, [{<<"capsule-protocol">>, <<"?1;x=1">>}]}, {error, {bad_response, capsule_protocol}}}
+    ]).
+
+%% h2 refuses to send `content-length' on a 2xx to CONNECT (RFC 9110
+%% section 8.6), so only the h3 proxy can script it.
+content_length_case(Config, Ack) ->
+    [
+        {{200, [Ack, {<<"content-length">>, <<"0">>}]}, {error, malformed_response}}
+     || ?config(transport, Config) =:= h3
+    ].
+
+client_h1_transfer_encoding_refused(Config) ->
+    fake_cases(Config, udp, [
+        {
+            {101, [{<<"capsule-protocol">>, <<"?1">>}, {<<"transfer-encoding">>, <<"chunked">>}]},
+            {error, malformed_response}
+        }
+    ]).
+
+fake_cases(Config, Protocol, Cases) ->
+    lists:foreach(
+        fun({Script, Expected}) ->
+            fake_script(Config, Script),
+            ?assertEqual(Expected, fake_connect(Config, Protocol), Script)
+        end,
+        Cases
+    ).
+
+fake_script(_Config, Script) ->
+    persistent_term:put({?MODULE, fake}, Script).
+
+fake_connect(Config, Protocol) ->
+    #{port := Port} = ?config(server, Config),
+    Uri = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    {Target, Opts} =
+        case Protocol of
+            udp -> {{<<"fake.test">>, 443}, #{}};
+            ip -> {{'*', '*'}, #{protocol => ip}};
+            {tcp, Framing} -> {{<<"fake.test">>, 443}, #{protocol => tcp, tcp_framing => Framing}}
+        end,
+    masque:connect(
+        Uri,
+        Target,
+        Opts#{transports => [?config(transport, Config)], verify => verify_none, timeout => 3000}
+    ).
+
+%% The listener's `fallback': the scripted status and headers, then the
+%% scripted bytes and the end of the stream (or connection).
+fake_reply(Transport, Conn, Sid) ->
+    {Status, Headers, Bytes} =
+        case persistent_term:get({?MODULE, fake}) of
+            {S, H} -> {S, H, none};
+            {S, H, B} -> {S, H, B}
+        end,
+    fake_send(Transport, Conn, Sid, Status, Headers, Bytes).
+
+fake_send(h3, Conn, Sid, Status, Headers, Bytes) ->
+    ok = quic_h3:send_response(Conn, Sid, Status, Headers),
+    _ = [quic_h3:send_data(Conn, Sid, Bytes, true) || Bytes =/= none],
+    ok;
+fake_send(h2, Conn, Sid, Status, Headers, Bytes) ->
+    ok = h2:send_response(Conn, Sid, Status, Headers),
+    _ = [h2:send_data(Conn, Sid, Bytes, true) || Bytes =/= none],
+    ok;
+fake_send(h1, Conn, Sid, 101, Headers, Bytes) ->
+    {ok, Sock, _} = h1:accept_upgrade(Conn, Sid, Headers),
+    _ = [ssl:send(Sock, Bytes) || Bytes =/= none],
+    %% The client reads the 101 before the connection ends.
+    timer:sleep(500),
+    ssl:close(Sock).
+
+%%--------------------------------------------------------------------
+%% Raw CONNECT-UDP requests on every transport
+%%--------------------------------------------------------------------
+
+udp_target(Config) ->
+    {<<"127.0.0.1">>, integer_to_binary(?config(udp_port, Config))}.
+
+success_status(Config) ->
+    case ?config(transport, Config) of
+        h1 -> 101;
+        _ -> 200
+    end.
+
+%% A CONNECT-UDP request with `Capsule-Protocol: Cap' and `Extra'
+%% fields: the final status and headers, and a handle on the stream.
+udp_attempt(Config, {Host, Port}, Cap, Extra) ->
+    #{port := ProxyPort} = ?config(server, Config),
+    Authority = iolist_to_binary(["127.0.0.1:", integer_to_list(ProxyPort)]),
+    Path = <<"/.well-known/masque/udp/", Host/binary, "/", Port/binary, "/">>,
+    case ?config(transport, Config) of
+        h1 ->
+            Fields = [{<<"Capsule-Protocol">>, Cap} | Extra],
+            {Sock, Heads, Rest} = h1_raw(Config, [
+                <<"GET ">>,
+                Path,
+                <<" HTTP/1.1\r\nHost: ">>,
+                Authority,
+                <<"\r\nConnection: Upgrade\r\nUpgrade: connect-udp\r\n">>,
+                [[K, <<": ">>, V, <<"\r\n">>] || {K, V} <- Fields],
+                <<"\r\n">>
+            ]),
+            {Status, Hdrs} = lists:last(Heads),
+            Ref = make_ref(),
+            put({h1_rest, Ref}, Rest),
+            {Status, Hdrs, {h1, Sock, Ref}};
+        Transport ->
+            Base = [
+                {<<":method">>, <<"CONNECT">>},
+                {<<":scheme">>, <<"https">>},
+                {<<":authority">>, Authority},
+                {<<":path">>, Path}
+            ],
+            Proto = [{<<":protocol">>, <<"connect-udp">>} || Transport =:= h3],
+            Req = Base ++ Proto ++ [{<<"capsule-protocol">>, Cap} | Extra],
+            {Tag, Conn, Sid} = raw_request(Config, Req, <<"connect-udp">>),
+            {Status, Hdrs} = raw_response(Tag, Conn, Sid),
+            {Status, Hdrs, {Tag, Conn, Sid}}
+    end.
+
+attempt_send({h1, Sock, _}, Bin) -> ssl:send(Sock, Bin);
+attempt_send({Tag, Conn, Sid}, Bin) -> raw_send(Tag, Conn, Sid, Bin).
+
+%% The next capsule from the listener, as `{Type, Value}'.
+attempt_capsule(H) ->
+    attempt_capsule(H, <<>>).
+
+attempt_capsule(H, Buf) ->
+    case masque_capsule:decode(Buf) of
+        {ok, {Type, Value, _Rest}} ->
+            {Type, Value};
+        {more, _} ->
+            attempt_capsule(H, <<Buf/binary, (attempt_recv(H))/binary>>)
+    end.
+
+attempt_recv({h1, Sock, Ref}) ->
+    case erase({h1_rest, Ref}) of
+        Rest when is_binary(Rest), Rest =/= <<>> ->
+            Rest;
+        _ ->
+            {ok, Bin} = ssl:recv(Sock, 0, 5000),
+            Bin
+    end;
+attempt_recv({Tag, Conn, Sid}) ->
+    receive
+        {Tag, Conn, {data, Sid, Bin, _}} -> Bin
+    after 5000 -> ct:fail(no_capsule)
+    end.
+
+attempt_close({h1, Sock, _}) -> ssl:close(Sock);
+attempt_close({Tag, Conn, _}) -> raw_close(Tag, Conn).
+
+datagram_capsule(Payload) ->
+    iolist_to_binary(
+        masque_capsule:encode(0, iolist_to_binary(masque_datagram:encode(0, Payload)))
+    ).
+
+raw_end(quic_h3, Conn, Sid) -> quic_h3:send_data(Conn, Sid, <<>>, true);
+raw_end(h2, Conn, Sid) -> h2:send_data(Conn, Sid, <<>>, true).
+
+%% Any request head on h1: the responses read (interim ones first) and
+%% the bytes past the last one.
+h1_raw(Config, Request) ->
+    #{port := Port} = ?config(server, Config),
+    {ok, Sock} = ssl:connect(
+        "127.0.0.1",
+        Port,
+        [
+            binary,
+            {active, false},
+            {verify, verify_none},
+            {alpn_advertised_protocols, [<<"http/1.1">>]}
+        ],
+        5000
+    ),
+    ok = ssl:send(Sock, Request),
+    {Heads, Rest} = h1_heads(Sock, <<>>, [], fun(_) -> ok end),
+    {Sock, Heads, Rest}.

@@ -51,7 +51,8 @@ check_start(Opts) ->
 
 %% Authenticate a tunnel request, then resolve its target as before
 %% (`masque_ip:resolve_target/3'). A refusal comes back as
-%% `{error, Reason}', answered like any other.
+%% `{error, Reason}', answered like any other: a plain refusal is
+%% `denied' (403, RFC 9209 `http_request_denied').
 -spec resolve(map(), atom(), map(), fun()) -> {ok, map()} | {error, term()}.
 resolve(Dispatch, Protocol, Req, Resolver) ->
     case authenticate(maps:get(authenticate, Dispatch, undefined), Req) of
@@ -66,12 +67,12 @@ authenticate(Fun, Req) ->
         ok -> {ok, Req};
         {ok, Identity} -> {ok, Req#{identity => Identity}};
         {reject, Reason} -> {error, Reason};
-        _ -> {error, forbidden}
+        _ -> {error, denied}
     catch
         Class:Reason ->
             %% The request (headers, tokens) is not logged.
             logger:error("masque authenticate fun failed: ~p:~0P", [Class, Reason, 6]),
-            {error, forbidden}
+            {error, denied}
     end.
 
 relaying(Opts) ->

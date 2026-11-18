@@ -105,6 +105,7 @@ Actions run in list order. Unknown actions are ignored. A closing action ends th
 | `reverse_id` | reverse connect accept stream | The request id. |
 | `ip_target`, `ip_ipproto` | IP | `'*'`, an address, `{Version, Address, PrefixLen}` or a host name binary; `'*'` or `0..255`. |
 | `resolved_addresses` | IP | The listener resolver's answer for a host name target, the address itself for an address target, `[]` otherwise. |
+| `transport` | always | `h3`, `h2` or `h1`: the transport the request came in on. |
 | `peer` | all | `{Address, Port}` of the client. |
 | `peer_cert` | every transport, with a client certificate | DER leaf certificate, checked against the listener's trust anchors. |
 | `identity` | every transport, when the listener's `authenticate` returned `{ok, Identity}` | Whatever `authenticate` returned. |
@@ -115,7 +116,7 @@ On every transport the session calls `init/2` first and sends the 2xx (101 for h
 
 On h3 the router asks the session to finalize once `init/2` returned. Messages that reach the session in between (for example the first reply from a socket opened in `init/2`) are held, then passed to `handle_info/2` in order after the init actions. On h2 and h1 the session sends the 2xx inside its own start-up, so nothing can arrive earlier.
 
-`{stop, Reason}` from `init/2` refuses the tunnel. `{stop, {reject, E}}` answers with the status of `E` (as in [server](server.md#accept-refuse-authenticate)); any other reason answers 502. On h3, `init/2` must return within 30 seconds or the request is refused with 502.
+`{stop, Reason}` from `init/2` refuses the tunnel. `{stop, {reject, E}}` answers with the status of `E` (as in [server](server.md#accept-refuse-authenticate)). `{stop, {resolution_failed, Why}}` answers 502 with the most specific Proxy-Status for `Why`: `dns_error` for `{resolve, _}`, `connection_refused` for `{tcp_connect, econnrefused}` or `{connect, econnrefused}`, 504 `connection_timeout` for a connect timeout, `destination_ip_prohibited` for `private_address` or `self_address`, `destination_unavailable` for another connect failure. Any other reason answers 502 `proxy_internal_error`. On h3, `init/2` must return within 30 seconds or the request is refused with 504.
 
 ## Ending a tunnel
 

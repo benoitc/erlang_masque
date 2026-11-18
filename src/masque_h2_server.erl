@@ -202,14 +202,21 @@ dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch) ->
         true ->
             reject(Conn, StreamId, overload);
         false ->
-            dispatch_request_1(
-                Conn,
-                StreamId,
-                Method,
-                Path,
-                Headers,
-                Dispatch
-            )
+            %% RFC 9297 section 3.2: a capsule-protocol request with a
+            %% body field is malformed.
+            case masque_http:capsule_request(Headers) of
+                ok ->
+                    dispatch_request_1(
+                        Conn,
+                        StreamId,
+                        Method,
+                        Path,
+                        Headers,
+                        Dispatch
+                    );
+                {error, Reason} ->
+                    reject(Conn, StreamId, Reason)
+            end
     end.
 
 %% Reverse connect requests (`accept_listen') take their own path; every
@@ -359,16 +366,14 @@ is_supervisor_error(_) -> false.
 %% A session that stopped in `init/1' exits quietly (`masque_quiet').
 map_init_error({shutdown, {masque_quiet, _}} = Quiet) ->
     map_init_error(masque_quiet:reason(Quiet));
-map_init_error({resolution_failed, _}) ->
-    resolution_failed;
 %% The handler's `init' ran past the start deadline: the target did not
 %% answer in time (504), not a name that failed to resolve.
 map_init_error({start_timeout, _}) ->
     upstream_timeout;
-map_init_error({reject, Err}) ->
-    Err;
-map_init_error(_) ->
-    resolution_failed.
+%% `{reject, R}', `{resolution_failed, Why}' and the rest, crashes
+%% included (RFC 9209: the most specific error type).
+map_init_error(Reason) ->
+    masque_errors:start_error(Reason).
 
 validate(
     Method,
@@ -516,8 +521,10 @@ match_ip_path(Path, Headers, Template) ->
             {error, bad_path}
     end.
 
-%% The client address, as the h3 listener gives it in the request map.
-add_peer(Conn, Req) ->
+%% The client address, as the h3 listener gives it in the request map,
+%% and the transport the request came in on.
+add_peer(Conn, Req0) ->
+    Req = Req0#{transport => h2},
     Req1 =
         try h2:peername(Conn) of
             {ok, Peer} -> Req#{peer => Peer};
@@ -552,7 +559,7 @@ reject(Conn, StreamId, Reason, ExtraHeaders) ->
     Base = [
         {<<"content-type">>, <<"text/plain; charset=utf-8">>},
         {<<"content-length">>, integer_to_binary(byte_size(Body))},
-        {<<"proxy-status">>, proxy_status_field(Reason)}
+        {<<"proxy-status">>, masque_errors:proxy_status(Reason)}
     ],
     Headers = merge_extra_headers(Base, ExtraHeaders),
     %% The stream, or the whole connection, may already be gone (client
@@ -567,24 +574,6 @@ merge_extra_headers(Base, Extra) ->
     Keys = [K || {K, _} <- Extra],
     Kept = [Pair || {K, _} = Pair <- Base, not lists:member(K, Keys)],
     Extra ++ Kept.
-
-proxy_status_field(Reason) ->
-    Error = proxy_status_error(Reason),
-    <<"masque; error=", Error/binary>>.
-
-proxy_status_error(bad_method) -> <<"http_protocol_error">>;
-proxy_status_error(bad_protocol) -> <<"http_protocol_error">>;
-proxy_status_error(bad_path) -> <<"http_protocol_error">>;
-proxy_status_error(bad_port) -> <<"http_protocol_error">>;
-proxy_status_error(bad_host) -> <<"http_protocol_error">>;
-proxy_status_error(bad_request) -> <<"http_protocol_error">>;
-proxy_status_error(unknown_request) -> <<"http_request_error">>;
-proxy_status_error(resolution_failed) -> <<"dns_error">>;
-proxy_status_error(upstream_timeout) -> <<"connection_timeout">>;
-proxy_status_error(forbidden) -> <<"destination_ip_prohibited">>;
-proxy_status_error(loop_detected) -> <<"proxy_loop_detected">>;
-proxy_status_error(overload) -> <<"proxy_internal_error">>;
-proxy_status_error(_) -> <<"proxy_internal_error">>.
 
 header(Name, Headers) ->
     case lists:keyfind(Name, 1, Headers) of
