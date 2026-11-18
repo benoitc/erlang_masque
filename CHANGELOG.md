@@ -23,6 +23,21 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - A CONNECT-UDP peer that sends a UDP payload larger than 65527 bytes now
   has its tunnel aborted, on the proxy and on the client, as RFC 9298
   requires. Such payloads used to be dropped and the tunnel kept going.
+- Refusals carry a more precise Proxy-Status, as RFC 9209 asks: a
+  malformed request is a request error, an authentication refusal a denied
+  request, an unreachable target says whether it refused, was unroutable or
+  timed out, and a handler crash is an internal error. Only a name that does
+  not resolve is still a DNS error. A CONNECT-UDP request for a private or
+  the proxy's own address now gets 403 instead of 502, and a CONNECT-TCP
+  connect timeout 504 instead of 502.
+- CONNECT-IP proxies now lower the TTL or hop limit of the packets they send
+  into the tunnel, not of the client's packets, as RFC 9484 says. Replies
+  and injected packets reach the client one hop lower, and a client packet
+  with one hop left is forwarded. `ttl_decrement => decapsulation` keeps the
+  old behaviour.
+- A CONNECT-TCP tunnel whose owner process crashes is now aborted, so the
+  target sees a reset instead of a clean close. An owner that exits normally
+  still closes it gracefully.
 
 ### Changed
 
@@ -39,6 +54,20 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `masque:abort/1` ends a CONNECT-TCP tunnel abruptly, so the proxy resets
+  the target instead of closing it cleanly. Use it when the connection you
+  relay was reset or timed out.
+- CONNECT-IP proxies answer ICMPv6 echo requests to the all-nodes address or
+  their link-local address (new `link_local_address` option), so a client's
+  tunnel MTU check succeeds, and send ICMP Destination Unreachable for
+  packets their policy drops, at most 10 a second per tunnel by default
+  (`icmp_rate_limit`).
+- CONNECT-IP clients take `source_filter` to drop packets from the proxy
+  whose source is outside the prefixes the client assigned to it.
+- Reverse connect agents drop requests their owner never answers after
+  `pending_request_timeout_ms` (30 seconds by default), and accept templates
+  may hold other variables, filled from `uri_vars`.
+- The request map handlers get has a `transport` key: `h3`, `h2` or `h1`.
 - Listeners take an `authenticate` fun, called for every tunnel request
   with its headers, peer and certificate; what it returns reaches handlers
   as `identity`. Listeners also take `ip` to bind one address.
@@ -88,6 +117,64 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- HTTP/1.1 clients now refuse a 101 that does not carry `Connection: Upgrade`
+  and a single `Upgrade` naming the protocol they asked for, as RFC 9298,
+  RFC 9484 and the CONNECT-TCP draft require.
+- The Capsule-Protocol header is read as a Structured Field Boolean, so a
+  peer that adds parameters to it is no longer refused.
+- Clients refuse a 204, 205 or 206 answer and any success answer with
+  Transfer-Encoding, and listeners answer 400 to a capsule request that
+  carries a body field (RFC 9297). The HTTP/1.1 listener also refuses a
+  request with more than one Host header.
+- Chained proxies pass an upstream refusal on with its status, and their Via
+  entry names the protocol the request arrived on.
+- URI templates with spaces, control characters or DEL are refused.
+- CONNECT-IP: ICMP now passes a tunnel scoped to one IP protocol; it used to
+  be dropped.
+- CONNECT-IP: protocol scoping looks past every IPv6 extension header,
+  including Mobility, HIP and Shim6.
+- CONNECT-IP: a "no address" answer from the proxy, the client or a relay
+  withdrew every address the peer held. Such answers now repeat the
+  addresses still assigned.
+- CONNECT-IP: every address request now gets an answer, also when the
+  handler has no address callback or leaves some requests out, and a client
+  answers proxy requests beyond 64 instead of ignoring them.
+- CONNECT-IP: overlapping routes made the route advertisement fail without a
+  trace. Routes are now sorted and merged first, and an advertisement that
+  cannot be sent is logged.
+- CONNECT-IP over HTTP/3: a packet too big for the tunnel is dropped and ICMP
+  Packet Too Big goes back to its sender, instead of being lost silently.
+- CONNECT-IP relays now pass the client's address assignments and route
+  advertisements upstream, relay upstream address requests and their
+  answers, and pass on empty address assignments.
+- CONNECT-TCP over HTTP/1.1 in capsule framing: closing a tunnel now ends it
+  cleanly. The proxy used to take it as an abort and reset the target.
+- CONNECT-TCP clients reset aborted streams with the error codes the draft
+  requires, pooled streams included.
+- The HTTP/1.1 CONNECT-TCP upgrade sends the proxy credential as
+  Authorization, as the draft requires; classic CONNECT still sends
+  Proxy-Authorization.
+- CONNECT-TCP: trailer fields on a tunnel, and invalid capsules that arrive
+  with the HTTP/1.1 101, now abort the tunnel instead of being ignored. On a
+  cleartext HTTP/1.1 listener an aborted capsule tunnel ends with a TCP
+  reset.
+- Connect-UDP-Bind: the proxy always sends the Connect-UDP-Bind header on an
+  accepted bind, and a custom handler that gives no public address gets a
+  500 instead of a bind the client would refuse. A Proxy-Public-Address
+  spread over several header lines is read in full.
+- Connect-UDP-Bind: neither side registers a compression context for a peer
+  the other side already registered, and the proxy no longer opens
+  compressed contexts after closing the client's uncompressed one itself.
+- Connect-UDP-Bind: the `max_compression_contexts_in` and
+  `max_compression_contexts_out` listener options now work; they were
+  accepted and ignored.
+- Connect-UDP-Bind: an HTTP/2 or HTTP/3 client crashed when a context-zero
+  datagram arrived in a capsule on an unscoped bind, instead of closing the
+  tunnel.
+- Reverse connect: a bad accept template is refused when the channel opens,
+  not at the first accept, and a decline that arrives after the proxy timed
+  the request out no longer ends the control channel. An agent that ignored
+  64 requests used to decline every new one for good.
 - CONNECT-TCP over HTTP/2 in capsule framing moved data far more slowly
   than it should (a large upload took minutes instead of under a second):
   the proxy returned flow-control credit in pieces of a few bytes, so the

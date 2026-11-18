@@ -25,9 +25,9 @@ In `queue` mode, data is not sent as messages: you pull it with `masque:recv/2`,
 | Message | When |
 | --- | --- |
 | `{masque_ip_packet, Sess, Packet}` | An IP packet (context id 0) arrived, in `message` mode. |
-| `{masque_address_assign, Sess, [#ip_assignment{}]}` | The proxy sent ADDRESS_ASSIGN. Each one replaces the previous set; after the first, you get one only when the set changes. |
-| `{masque_address_request, Sess, [#ip_prefix_request{}]}` | The proxy asked you for addresses (ADDRESS_REQUEST). Answer with `masque:assign_addresses/2`. At most 64 requests are outstanding; the list is never empty. |
-| `{masque_route_advertisement, Sess, [#ip_route{}]}` | The proxy sent ROUTE_ADVERTISEMENT. Each one replaces the previous set; after the first, you get one only when the set changes. |
+| `{masque_address_assign, Sess, [#ip_assignment{}]}` | The proxy sent ADDRESS_ASSIGN. Each one replaces the previous set; after the first, you get one only when the set changes. Dropped while you have 10 000 messages waiting. |
+| `{masque_address_request, Sess, [#ip_prefix_request{}]}` | The proxy asked you for addresses (ADDRESS_REQUEST). Answer with `masque:assign_addresses/2`. At most 64 wait for you; the session answers the rest at once with the no-address entry. The list is never empty. |
+| `{masque_route_advertisement, Sess, [#ip_route{}]}` | The proxy sent ROUTE_ADVERTISEMENT. Each one replaces the previous set; after the first, you get one only when the set changes. Dropped while you have 10 000 messages waiting. |
 
 The records are defined in `include/masque_ip.hrl`. The moduledoc of `masque_ip_client_session` also lists `{masque_ip_error, Sess, Reason}`; no code sends it.
 
@@ -56,7 +56,7 @@ When `transports` lists more than one transport, the session first belongs to a 
 
 ## Close reasons
 
-`{masque_closed, Sess, Reason}` is sent when the proxy side ends the tunnel. You do not get one when you call `masque:close/1` yourself (except on udp-bind, below), and none is sent when the session stops because its owner died.
+`{masque_closed, Sess, Reason}` is sent when the proxy side ends the tunnel. You do not get one when you call `masque:close/1` or `masque:abort/1` yourself (except on udp-bind, below), and none is sent when the session stops or aborts because its owner died.
 
 | Reason | Meaning | Protocols |
 | --- | --- | --- |
@@ -69,6 +69,7 @@ When `transports` lists more than one transport, the session first belongs to a 
 | `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` | The proxy sent a bad capsule, ended the stream mid-capsule, or a capsule larger than `max_capsule_size` (default 65536). The session resets the stream. | UDP and IP on h2/h3 |
 | `{bad_capsule, data_after_final}`, `{bad_capsule, truncated_capsule}` | CONNECT-TCP in capsule framing: the proxy sent `DATA` or `FINAL_DATA` after `FINAL_DATA`, or ended the stream inside a capsule. The tunnel is aborted. | TCP, all |
 | `udp_payload_too_large` | The proxy sent a context-zero UDP payload over 65527 bytes (RFC 9298 section 5). The session aborts the stream. | UDP, all |
+| `trailers_received` | CONNECT-TCP: the proxy sent trailer fields, which the draft forbids. The tunnel is aborted. | TCP on h2/h3 |
 
 udp-bind sessions report differently: they send `{masque_closed, Sess, Reason}` from `terminate/3` whenever they stop in `message` mode, with the process exit reason. A clean end (the proxy's FIN, or your own `masque:close/1`) arrives as `normal`; other values include `peer_reset`, `peer_closed`, `goaway`, `malformed_capsule`, `truncated_capsule`, `capsule_buffer_overflow` and `{ssl_error, _}`. A failed handshake is only reported as the `{error, _}` returned by `bind_connect/3`; no `masque_closed` follows it.
 
@@ -116,13 +117,14 @@ The proxy answered, but not with a usable 2xx:
 | --- | --- |
 | `{handshake_rejected, Status}` | non-2xx status on h2/h3 |
 | `{handshake_rejected, Status, Detail}` | non-2xx status on h1 (`Detail` is the h1 error or reason phrase) |
-| `malformed_response` | 2xx carrying `content-length` or `content-type` |
+| `malformed_response` | 2xx carrying `content-length`, `content-type` or `transfer-encoding`, or a 204, 205 or 206 (RFC 9297 section 3.2) |
+| `bad_upgrade_response` | h1 (CONNECT-UDP, CONNECT-IP, CONNECT-TCP in capsule framing, udp-bind): a 101 without `Connection: Upgrade` and a single `Upgrade` naming the requested token |
 | `capsule_protocol_not_acknowledged` | CONNECT-UDP: `capsule-protocol: ?1` requested but not echoed |
 | `capsule_protocol_missing` | CONNECT-IP: 2xx without `capsule-protocol: ?1` |
 | `{bad_response, capsule_protocol}` | CONNECT-TCP: 2xx that switches to capsules |
 | `bad_status`, `headers_too_large` | CONNECT-TCP on h1: unreadable status line, response head over the limit |
 | `{bad_status, Status}` | udp-bind on h2/h3: non-2xx status |
-| `bad_status_line`, `bad_upgrade_response`, `headers_too_large` | udp-bind on h1: unreadable status line, 101 without the right `Upgrade` / `Connection`, response head over the limit |
+| `bad_status_line`, `headers_too_large` | udp-bind on h1: unreadable status line, 101 without the right `Upgrade` / `Connection`, response head over the limit |
 | `missing_bind_response_header`, `missing_proxy_public_address` | udp-bind: 2xx without `Connect-UDP-Bind: ?1` or `Proxy-Public-Address` |
 
 Racing and pooling (`upstream_pool => true`):
@@ -158,9 +160,14 @@ When several transports race, the reason you get is the last attempt's reason, n
 | `shutdown_write/1` | `{error, not_supported}` | CONNECT-UDP, CONNECT-IP and udp-bind sessions |
 | `shutdown_write/1` | `{error, not_ready}` / `{error, closing}` / `{error, already_closed}` | TCP session still connecting, closing, or already shut down |
 | `send_capsule/3` | `{error, not_supported}` | CONNECT-TCP |
+| `abort/1` | `ok` | CONNECT-TCP: the stream was reset (H3_CONNECT_ERROR, CONNECT_ERROR; on h1 closed without FINAL_DATA), or the session had already ended |
+| `abort/1` | `{error, not_supported}` / `{error, not_ready}` | not a CONNECT-TCP session / still connecting |
+| `assign_compression/2` | `{error, tuple_open_by_peer}` | udp-bind: the proxy already opened a context for this peer (draft section 3.1) |
 | `reverse_accept/2,3`, `reverse_decline/2` | `{error, unknown_request}` | the id was not offered on this channel, or was already answered |
 | `reverse_accept/2,3` | `{error, {handshake_rejected, 404, _}}` (h3/h2 `{handshake_rejected, 404}`) | the proxy no longer waits for the id (its request timed out) |
 | `reverse_listen/3` | `{error, {invalid_opts, {transports, T}}}` | `transports` is not a single transport |
+| `reverse_listen/3` | `{error, bad_template}` | the accept template is not a valid template with `request_id` |
+| `reverse_accept/2,3` | `{error, unknown_request}` | also once a request expired after `pending_request_timeout_ms` |
 | reverse connect calls | `{error, closed}` | the control channel is gone |
 | `request_connection/2,3` | `{error, declined}`, `{error, timeout}`, `{error, closed}` | proxy side: the agent declined, did not accept in time, or the channel ended |
 | `consumed/2` | `ok` | also on a stream that already ended |
@@ -183,24 +190,31 @@ When a request is refused before the tunnel opens, the listener answers with a s
 
 | Reason | Status | Proxy-Status `error` | Produced by |
 | --- | --- | --- | --- |
-| `bad_method` | 405 | `http_protocol_error` | listener validation: not `CONNECT` (h1: not `GET` or `CONNECT`) |
+| `bad_method` | 405 | `http_request_error` | listener validation: not `CONNECT` (h1: not `GET` or `CONNECT`) |
 | `bad_protocol` | 501 | `http_protocol_error` | unknown `:protocol`; h1 upgrade without `Connection: Upgrade` or `Capsule-Protocol: ?1` |
-| `bad_path` | 404 | `http_protocol_error` | path does not match the template; missing `:scheme` / `:authority` |
-| `bad_port` | 400 | `http_protocol_error` | port out of range; bad `ipproto` for CONNECT-IP |
-| `bad_host` | 400 | `http_protocol_error` | empty or malformed host or IP target; h1 `Host` missing or not matching the CONNECT target |
-| `resolution_failed` | 502 | `dns_error` | hostname target did not resolve; handler `init/2` failed; session could not start |
-| `upstream_timeout` | 504 | `connection_timeout` | a handler's `{reject, upstream_timeout}`; on h3 and h2, a handler whose `init/2` did not return within 30 s |
-| `forbidden` | 403 | `destination_ip_prohibited` | built-in handlers' `accept/1`: the `allow` fun said no (UDP, TCP, chain), or a CONNECT-IP target is `'*'` or non-public without `allow_private` |
+| `bad_path` | 404 | `http_request_error` | path does not match the template; missing `:scheme` / `:authority` |
+| `bad_port` | 400 | `http_request_error` | port out of range; bad `ipproto` for CONNECT-IP |
+| `bad_host` | 400 | `http_request_error` | empty or malformed host or IP target; h1 `Host` missing or not matching the CONNECT target |
+| `bad_request` | 400 | `http_request_error` | a capsule-protocol request carrying `Content-Length`, `Content-Type` or `Transfer-Encoding`; h1 request with more than one `Host`; reverse connect: no `:scheme`, `:authority` or `Host`, or a malformed listen target or request id |
+| `resolution_failed` | 502 | `dns_error` | a hostname target did not resolve |
+| `connection_refused` | 502 | `connection_refused` | the target refused the connection (`econnrefused` from a TCP connect, a UDP connect or an upstream proxy) |
+| `destination_unroutable` | 502 | `destination_ip_unroutable` | no route to the target (`ehostunreach`, `enetunreach`) |
+| `destination_unavailable` | 502 | `destination_unavailable` | any other failure to reach the target |
+| `upstream_timeout` | 504 | `connection_timeout` | the target did not answer in time; a handler's `{reject, upstream_timeout}`; on h3 and h2, a handler whose `init/2` did not return within 30 s |
+| `forbidden` | 403 | `destination_ip_prohibited` | built-in handlers: the `allow` fun said no (UDP, TCP, chain), a CONNECT-UDP target is private or the proxy's own address, or a CONNECT-IP target is `'*'` or non-public without `allow_private` |
+| `ip_prohibited` | 502 | `destination_ip_prohibited` | CONNECT-TCP in raw framing: the target is private or the proxy's own address (capsule framing answers 403) |
+| `denied` | 403 | `http_request_denied` | the listener's `authenticate` fun refused the request or crashed |
 | `loop_detected` | 508 | `proxy_loop_detected` | `masque_chain_handler`: the `via` header already names this listener, or the upstream answered 508 |
+| `{upstream_status, S}` | `S` | `masque; received-status=S` | `masque_chain_handler`: the upstream proxy refused the request with status `S` |
 | `overload` | 503 | `proxy_internal_error` | listener draining; `max_tunnels_per_connection` reached |
-| `bad_request` | 400 | `http_protocol_error` | reverse connect: no `:scheme`, `:authority` or `Host`, or a malformed listen target or request id |
+| `internal_error` | 502 | `proxy_internal_error` | a handler crash in `init/2`, a session that failed to start for another reason, no h3 router |
 | `unknown_request` | 404 | `http_request_error` | reverse connect: an accept for an id that is not pending, or that comes on another connection (h3/h2) or with another identity (h1) |
 | `{other, Status}` | `Status` (400..599) | `proxy_internal_error` | handler rejection with an explicit status |
 | anything else | 502 | `proxy_internal_error` | unknown `{reject, _}` reason |
 
 `accept/1` can return `{reject, Reason}` or `{reject, Reason, Headers}`; `Headers` are added to the response and win over the library headers of the same name (`content-type`, `content-length`, `proxy-status`).
 
-How a failed session start is mapped: an `init/2` returning `{stop, {reject, R}}` answers with `R`; `{stop, {resolution_failed, _}}` and any other stop reason answer 502 (`resolution_failed`). On h3 the router's `too_many_tunnels` becomes `overload`. A session that does not start within 30 s becomes `upstream_timeout` (504) on h3 and h2; on h1 the session already owns the connection, so it is closed without a response.
+How a failed session start is mapped (`masque_errors:start_error/1`): an `init/2` returning `{stop, {reject, R}}` answers with `R`. `{stop, {resolution_failed, Why}}` answers the most specific reason for `Why`: `resolution_failed` for a name that did not resolve, `ip_prohibited` for a private or own address, `connection_refused`, `destination_unroutable`, `upstream_timeout` or `destination_unavailable` for a failed connect, `internal_error` for a socket that could not be opened. Any other stop reason, a handler crash included, answers `internal_error`. On h3 the router's `too_many_tunnels` becomes `overload`. A session that does not start within 30 s becomes `upstream_timeout` (504) on h3 and h2; on h1 the session already owns the connection, so it is closed without a response.
 
 Each rejection increments `masque.tunnels.rejected` with the attribute `reason`.
 
@@ -222,6 +236,8 @@ None of them is a crash, so the process exits with `{shutdown, {masque_quiet, Re
 | `stream_dead` | h3: the 2xx or the stream claim failed during finalize |
 | `idle_timeout` | no traffic in either direction for `idle_timeout_ms` in `handler_opts` (default 300000), every transport |
 | `{tunnel_send_failed, R}` | CONNECT-TCP: a write to the client failed or stayed blocked for 30 s without progress (150 s at most in all) |
+| `trailers_received` | CONNECT-TCP: the client sent trailer fields before the 2xx; the stream is reset (`CONNECT_ERROR`) and the target gets an RST |
+| `{no_public_address, absent \| malformed \| empty}` | udp-bind: the handler's response carries no valid `Proxy-Public-Address`; the request is answered 500 and `terminate/2` gets this reason |
 | `abandoned` | a reverse connect accept stream whose request was already given up (declined or timed out meanwhile); the stream is reset |
 | `{handler_crash, R}` | a handler callback raised. In `init/2` this fails the handshake (502). In later callbacks only udp-bind sessions stop; the other sessions log the crash and keep running. |
 | `{bad_init, Other}` | `init/2` returned an unexpected shape; the handshake fails (502) |
@@ -237,10 +253,10 @@ Reasons used by the built-in handlers:
 
 | Handler | Reasons |
 | --- | --- |
-| `masque_udp_proxy_handler` | `{resolution_failed, private_address}`, `{resolution_failed, {resolve, R}}`, `{resolution_failed, {connect, R}}`, `{resolution_failed, {udp_open, R}}` (from `init/2`); `{target_socket_lost, R}`, `{target_socket_error, R}`, `target_socket_closed` |
-| `masque_tcp_proxy_handler` | `{resolution_failed, private_address}`, `{resolution_failed, {resolve, R}}`, `{resolution_failed, {tcp_connect, R}}` (from `init/2`, all 502); in capsule framing a policy refusal is `{reject, forbidden}` (403) and a connect timeout `{reject, upstream_timeout}` (504) instead; `target_closed`, `{target_error, R}`, `eof_timeout` (a half-closed tunnel idle for 30 s) |
+| `masque_udp_proxy_handler` | `{reject, forbidden}` for a private or own address (403), `{resolution_failed, {resolve, R}}`, `{resolution_failed, {connect, R}}`, `{resolution_failed, {udp_open, R}}` (from `init/2`); `{target_socket_lost, R}`, `{target_socket_error, R}`, `target_socket_closed` |
+| `masque_tcp_proxy_handler` | `{resolution_failed, private_address}`, `{resolution_failed, {resolve, R}}`, `{resolution_failed, {tcp_connect, R}}` (from `init/2`; mapped as above: `ip_prohibited`, `resolution_failed`, `connection_refused`, `destination_unroutable`, `upstream_timeout` or `destination_unavailable`); in capsule framing a policy refusal is `{reject, forbidden}` (403) and a connect timeout `{reject, upstream_timeout}` (504) instead; `target_closed`, `{target_error, R}`, `eof_timeout` (a half-closed tunnel idle for 30 s) |
 | `masque_udp_bind_proxy_handler` | `{udp_open, R}` (from `init/2`); `{bind_socket_error, R}`, `bind_socket_closed` |
-| `masque_chain_handler` | `{resolution_failed, {upstream, R}}` or `{reject, loop_detected}` (from `init/2`); `upstream_closed`; `{upstream_send_failed, send_timeout}` (CONNECT-TCP: the upstream took none of the waiting bytes for `stream_send_timeout_ms`, default 30 s), `{upstream_send_failed, R}` (a write to the upstream failed) |
+| `masque_chain_handler` | `{resolution_failed, {upstream, R}}`, `{reject, loop_detected}` or `{reject, {upstream_status, S}}` when the upstream refused with status `S` (from `init/2`); `upstream_closed`; `{upstream_send_failed, send_timeout}` (CONNECT-TCP: the upstream took none of the waiting bytes for `stream_send_timeout_ms`, default 30 s), `{upstream_send_failed, R}` (a write to the upstream failed) |
 | `masque_reverse_accept_handler`, `masque_reverse_accept_udp_handler` | `{reject, unknown_request}` (from `init/2`, 404); `requester_gone` (the process that requested the connection died) |
 
 Connect-UDP-Bind sessions also end with `context_zero_datagram` (a datagram on context 0 of an unscoped bind, which aborts the stream) and `{control_send_failed, R}` (a compression capsule that could not be written within 30 s; the capsules after it are not written). Client sessions report them in `{masque_closed, Sess, Reason}`.
@@ -260,6 +276,7 @@ The router (`masque_server_connection`) owns the h3 connection and forwards per-
 | `{masque_datagram_in, StreamId, Payload}` | router to session | an HTTP datagram for the stream |
 | `{masque_stream_data, StreamId, Data, Fin}` | router to session | stream bytes that arrived before the session claimed the stream |
 | `{masque_stream_reset, StreamId, Code}` | router to session | the client reset the stream |
+| `{masque_ip_icmp, Icmp}` | IP server session to its handler's `handle_info/2` | an ICMP error (Packet Too Big, Fragmentation Needed or Time Exceeded) for the source of a packet that could not go into the tunnel; the default handler passes it to `forward_fun`, the chain handler sends it upstream |
 | cast `{finalize, Router}` | router to session | send the 2xx, claim the stream, run init actions |
 | `{masque_finalized, StreamId, Pid, ok \| {error, stream_dead}}` | session to router | finalize result; on `ok` the router replays the buffer |
 | cast `connection_closed` | router to session | the connection is gone; stop |

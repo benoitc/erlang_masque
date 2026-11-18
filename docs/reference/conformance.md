@@ -32,7 +32,7 @@ Deviations and additions:
 
 | Section | Requirement | Behaviour in masque | Module |
 | --- | --- | --- | --- |
-| §2 | HTTP/3 datagrams carry a quarter stream id | Handled by `quic_h3`. | `quic_h3` (dependency) |
+| §2, §2.1 | HTTP/3 datagrams carry a quarter stream id; a malformed or too large one is an `H3_DATAGRAM_ERROR` connection error | Handled by `quic_h3`, which drops such a datagram instead (see deviations). | `quic_h3` (dependency) |
 | §2.1.1 | `SETTINGS_H3_DATAGRAM = 1` | The h3 listener merges `h3_datagram => 1` into its settings; h3 clients refuse a peer without it (`no_h3_datagram`). | `masque_server`, `masque_client_session`, `masque_ip_client_session` |
 | §3.2 | Capsule framing: type, length, value | Encoding and decoding go through `quic_h3_capsule`, wrapped by `masque_capsule`. h2 and h1 sessions use `h2_capsule` and `h1_capsule`. | `masque_capsule` |
 | §3.2 | The Capsule Protocol is not used with `Content-Length`, `Content-Type` or `Transfer-Encoding`; a 204, 205 or 206 response to a capsule-protocol request is malformed | Listeners refuse a request with `capsule-protocol: ?1` and one of these fields with 400 (`bad_request`). Clients refuse such a 2xx or 101, and a 204, 205 or 206 (`malformed_response`), on UDP, IP and capsule-framed TCP. Listeners only put these fields on rejections. | `masque_http`, listeners, client sessions |
@@ -43,6 +43,7 @@ Deviations and additions:
 Deviations:
 - §2: an HTTP/3 datagram for a CONNECT-TCP stream, which does not use datagrams, is dropped instead of closing the connection with `H3_DATAGRAM_ERROR`.
 - §3.3: a capsule of an unknown type larger than `max_capsule_size` aborts the stream like any other oversized capsule, instead of being skipped.
+- §2.1: `quic_h3` (quic 3.1.2) drops an HTTP/3 datagram that is too short for a quarter stream id, or whose quarter stream id is above 2^60-1, instead of closing the connection with `H3_DATAGRAM_ERROR`. The fix belongs in erlang_quic.
 
 ## RFC 9484: Proxying IP in HTTP
 
@@ -218,7 +219,7 @@ Reverse connect is off unless a listener sets `accept_listen => true`. The draft
 | §5.1 | CONNECTION_REQUEST_DECLINED; one for no outstanding request is an error | The requester gets `{error, declined}`; an unknown id or a malformed capsule aborts the channel (`H3_MESSAGE_ERROR`, `PROTOCOL_ERROR`, on h1 the connection closes). A DECLINED for a request that timed out on the proxy is ignored: it crossed the timeout. | `masque_listen_server_session` |
 | §5.2 | Accept template with `request_id`, MAY contain other variables | Default `/.well-known/masque/accept/{request_id}/`; a template without `request_id` is refused, by the listener at start and by `masque:reverse_listen/3` before it connects (`bad_template`). Other variables are allowed; the agent fills them from `uri_vars`. | `masque_uri_reverse` |
 | §5.2.1, §5.2.2 | Malformed accept: 400; unknown id: 404 | `bad_request` (400) and `unknown_request` (404). An accept on another connection (h2, h3) or with another identity (h1) also gets 404. | `masque_reverse_listener` |
-| §5.2.1, §5.2.2 | A non-conforming accept response is a failed accept | A UDP accept that is not answered with the capsule protocol fails (`capsule_protocol_not_acknowledged`) on h3, h2 and h1. See the deviations for TCP accepts and the h1 `Upgrade` token. | UDP client sessions |
+| §5.2.1, §5.2.2 | A non-conforming accept response is a failed accept | A UDP accept that is not answered with the capsule protocol fails (`capsule_protocol_not_acknowledged`) on h3, h2 and h1. See the deviations for TCP accepts. | UDP client sessions |
 | §5.2.2 | h2/h3 accepts run on the control channel's connection | The client opens the channel on a connection of its own and every accept stream on it; the proxy checks the connection. | `masque_upstream_owner`, `masque_reverse_listener` |
 | §5.3 | TCP in connect-tcp DATA and FINAL_DATA capsules | Accept streams run as CONNECT-TCP in capsule framing with the draft -18 codes (`0x08`, `0x09`), with its half-close, abort and flow control. No `100 Continue` is sent. | `masque_tcp_*_session`, `masque_reverse_accept_handler` |
 | §5.3 | UDP like CONNECT-UDP | Accept streams for UDP services run as CONNECT-UDP sessions: QUIC datagrams on h3, DATAGRAM capsules on h2 and h1. Datagrams too large for the path are dropped. | `masque_*_server_session`, `masque_reverse_accept_udp_handler`, UDP client sessions |
@@ -232,4 +233,15 @@ Deviations and open points:
 - Past `max_pending_requests` unanswered requests the client declines new ones itself (CONNECTION_REQUEST_DECLINED), so a proxy cannot grow the agent's memory or its owner's mailbox. The draft does not require a limit.
 - A request the owner leaves unanswered expires on the client after `pending_request_timeout_ms` with no capsule sent: the proxy has given up on it by then, and a late DECLINED would be an error for a strict proxy.
 - The proxy remembers the last 4,096 requests that timed out on a channel and ignores a DECLINED for them; a DECLINED for an older one aborts the channel.
-- On a TCP accept (h3, h2, h1) the client does not check that the response starts the capsule protocol, and on h1 no accept checks the `Upgrade` token of the 101. Both checks belong to the generic CONNECT-TCP and CONNECT-UDP clients.
+- On a TCP accept (h3, h2, h1) the client does not require `Capsule-Protocol: ?1` on the response: draft-ietf-httpbis-connect-tcp-18 sections 3.2 and 3.3 make it a SHOULD for the proxy, so a response without it is still accepted. On h1 every accept checks `Connection: Upgrade` and the `connect-accept` token of the 101.
+
+## Related drafts masque does not implement
+
+These MASQUE drafts touch what masque does but are not implemented. Each would be a new, opt-in feature; they are listed as candidates in [features](../features.md).
+
+| Draft | State (November 2026) | What it adds |
+| --- | --- | --- |
+| draft-ietf-masque-connect-ip-dns-07 | MASQUE working group | DNS configuration capsules for CONNECT-IP (resolver addresses and search domains for the client) |
+| draft-ietf-masque-http-datagram-compression-02 | MASQUE working group | Context-ID based compression of CONNECT-UDP payloads (the idea udp-bind uses for its peers) |
+| draft-ietf-masque-quic-proxy-10 | MASQUE working group | QUIC-aware proxying: forwarding QUIC packets by connection ID without re-encapsulation |
+| draft-ietf-masque-connect-ethernet-18 | MASQUE working group | Proxying Ethernet frames over HTTP |
