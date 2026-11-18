@@ -25,6 +25,7 @@ generate_certs() ->
     TmpDir = filename:join(
         [
             "/tmp",
+            %% The OS pid keeps runs in parallel VMs apart.
             "masque_test_" ++ os:getpid() ++ "_" ++
                 integer_to_list(erlang:unique_integer([positive]))
         ]

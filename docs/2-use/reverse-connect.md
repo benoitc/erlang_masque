@@ -137,6 +137,18 @@ end.
 - For a TCP service the accept stream is a CONNECT-TCP tunnel: `masque:send/2`, `{masque_data, Stream, Bytes}`, `shutdown_write/1`, `close/1`. For a UDP service it is a CONNECT-UDP tunnel, one datagram per message. Connect it to the service the request named; if that fails, close the stream.
 - `masque:migrate(Listen)` moves the HTTP/3 connection to a new address; the accept streams on it move too.
 - `{masque_closed, Listen, Reason}` arrives if the proxy ends the channel; `masque:close(Listen)` ends it from your side.
+- Answer each request in time. One you neither accept nor decline is dropped after `pending_request_timeout_ms` (default 30 s, longer than the proxy's 10 s request timeout); `reverse_accept/2,3` then returns `{error, unknown_request}`. At most `max_pending_requests` (64) wait at once; the agent declines the rest.
+
+### Accept template
+
+`accept_uri_template` (default `/.well-known/masque/accept/{request_id}/`) must contain `request_id`; `reverse_listen/3` returns `{error, bad_template}` before it connects otherwise. Other variables are allowed; fill them with `uri_vars`, and give the listener the same template:
+
+```erlang
+{ok, Listen} = masque:reverse_listen(Proxy, {local, tcp}, #{
+    accept_uri_template => <<"/.well-known/masque/accept/{user}/{request_id}/">>,
+    uri_vars => #{user => <<"bob">>}
+}).
+```
 
 Accept first, then dial the service, and close the stream if the service is down. On the agent side no credit calls are needed: the stream stops reading from the proxy while your process has `rx_backlog` messages waiting (64 by default), so a slow local service slows the edge.
 
@@ -152,7 +164,8 @@ agent_stream(Listen, Id, Port) ->
 ## Notes
 
 - On HTTP/3 and HTTP/2 the channel gets a connection of its own, and every accept stream runs on it, as the draft requires. Closing the channel closes them all. On HTTP/1.1 each accept is a new TLS connection, matched to the channel by the identity `authenticate/1` returns.
-- An accept for an id the proxy did not issue, or one that comes on another connection or with another identity, gets 404.
+- An accept for an id the proxy did not issue, or one that comes on another connection or with another identity, gets 404. A malformed accept request gets 400.
+- A CONNECTION_REQUEST_DECLINED that arrives after the request timed out on the proxy is ignored; one for an id the proxy never issued ends the channel.
 - On HTTP/3 and HTTP/2 the proxy limits how many streams the connection holds at once. An accept past that limit waits up to 5 s for a stream to free up, then returns `{error, stream_limit}`. Call `reverse_accept/2,3` from a process per request, as above, so a waiting accept does not hold up the streams already open.
 - The control channel has no idle timeout by default (`listen_idle_timeout_ms` sets one). QUIC keepalives keep an HTTP/3 channel up.
 - Capsule writes on the channel wait for the transport instead of being dropped, so a busy connection cannot lose a request.

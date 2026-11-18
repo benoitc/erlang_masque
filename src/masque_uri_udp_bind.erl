@@ -37,7 +37,8 @@ legacy CONNECT-UDP requests.
     parse_bind_header/1,
     format_bind_header/0,
     parse_proxy_public_address/1,
-    format_proxy_public_address/1
+    format_proxy_public_address/1,
+    bind_response_headers/1
 ]).
 
 -include("masque_udp_bind.hrl").
@@ -307,6 +308,27 @@ format_one({{_, _, _, _, _, _, _, _} = V6, Port}) ->
         $"
     ]).
 
+-doc """
+Build the extra headers of a bind 2xx from the handler's
+`{response_headers, _}` list. Draft-16 sections 6 and 7: the proxy
+always sends `Connect-UDP-Bind: ?1` (any handler copy is replaced) and
+a `Proxy-Public-Address` list with at least one valid entry. Returns
+the parsed addresses with the headers, or the
+`Proxy-Public-Address` error when the handler gave no usable list.
+""".
+-spec bind_response_headers([{binary(), binary()}]) ->
+    {ok, [{inet:ip_address(), inet:port_number()}], [{binary(), binary()}]}
+    | {error, proxy_public_address_error()}.
+bind_response_headers(Headers) when is_list(Headers) ->
+    case parse_proxy_public_address(Headers) of
+        {ok, Addrs} ->
+            LName = lowercase_bin(?MASQUE_HF_CONNECT_UDP_BIND),
+            Other = [{K, V} || {K, V} <- Headers, lowercase_bin(K) =/= LName],
+            {ok, Addrs, [format_bind_header() | Other]};
+        {error, _} = Error ->
+            Error
+    end.
+
 %%====================================================================
 %% Internal
 %%====================================================================
@@ -324,16 +346,12 @@ drop_authority(Rest) ->
             <<"/">>
     end.
 
+%% RFC 9651 section 3.1: the lines of a List field combine, in order,
+%% into one value (RFC 9110 section 5.3).
 header_value(Name, Headers) ->
-    LName = lowercase_bin(Name),
-    lookup_ci(LName, Headers).
-
-lookup_ci(_, []) ->
-    undefined;
-lookup_ci(LName, [{K, V} | Rest]) ->
-    case lowercase_bin(K) =:= LName of
-        true -> V;
-        false -> lookup_ci(LName, Rest)
+    case header_values(Name, Headers) of
+        [] -> undefined;
+        Values -> iolist_to_binary(lists:join(<<", ">>, [strip(V) || V <- Values]))
     end.
 
 lowercase_bin(B) when is_binary(B) ->

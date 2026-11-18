@@ -8,7 +8,8 @@
 %%% CONNECT-IP), `*', a wildcard domain `*.example.com', or `.' for local
 %%% services only. `ipproto' is 6, 17 or `*'. A missing variable means `*'.
 %%%
-%%% Accepting Connection (section 5.2): a `request_id' variable, decimal.
+%%% Accepting Connection (section 5.2): a `request_id' variable, decimal,
+%%% and any other variables (the agent expands them from `uri_vars').
 
 -export([parse_listen_template/1, parse_accept_template/1]).
 -export([expand_listen/2, match_listen/2]).
@@ -25,23 +26,27 @@
 parse_listen_template(Bin) ->
     parse(Bin, [target, ipproto], []).
 
-%% Section 5.2: the template MUST contain `request_id'.
+%% Section 5.2: the template MUST contain `request_id' and MAY contain
+%% other variables.
 -spec parse_accept_template(binary()) ->
     {ok, masque_uri_template:template()} | {error, bad_template}.
 parse_accept_template(Bin) ->
-    parse(Bin, [request_id], [request_id]).
+    parse(Bin, any, [request_id]).
 
 parse(Bin, Allowed, Required) ->
     case masque_uri_template:parse_pattern(Bin) of
         {ok, T} ->
             Names = masque_uri_template:var_names(T),
-            case {Names -- Allowed, Required -- Names} of
+            case {unknown(Names, Allowed), Required -- Names} of
                 {[], []} -> {ok, T};
                 _ -> {error, bad_template}
             end;
         {error, _} ->
             {error, bad_template}
     end.
+
+unknown(_Names, any) -> [];
+unknown(Names, Allowed) -> Names -- Allowed.
 
 -spec expand_listen(masque_uri_template:template(), #{target := target(), ipproto := ipproto()}) ->
     binary().

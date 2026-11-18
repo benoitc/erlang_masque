@@ -53,6 +53,10 @@
     max_cap = ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE :: pos_integer(),
     %% Outstanding requests: id -> {caller, timer}.
     requests = #{} :: #{non_neg_integer() => {gen_server:from(), reference()}},
+    %% Requests that timed out: a DECLINED the client sent before it saw
+    %% the timeout is not an error (section 5.1). Bounded like the
+    %% client's reuse window.
+    expired = masque_reverse_ids:new() :: masque_reverse_ids:ids(),
     idle_ms = infinity :: non_neg_integer() | infinity,
     idle :: masque_idle:idle() | undefined,
     start_time :: integer() | undefined,
@@ -303,7 +307,9 @@ handle_info_inner({timeout, _TRef, {request_timeout, Id}}, #state{requests = R} 
         {{From, _}, R2} ->
             ok = masque_reverse_registry:delete(Id),
             gen_server:reply(From, {error, timeout}),
-            {noreply, S#state{requests = R2}};
+            {noreply, S#state{
+                requests = R2, expired = masque_reverse_ids:add(Id, S#state.expired)
+            }};
         error ->
             {noreply, S}
     end;
@@ -380,7 +386,7 @@ capsule(available_services, Value, S) ->
         {ok, {available_services, Services}} -> dispatch(handle_services, [Services], S);
         {error, _} -> {stop, malformed_capsule, S}
     end;
-capsule(connection_request_declined, Value, #state{requests = R} = S) ->
+capsule(connection_request_declined, Value, #state{requests = R, expired = Expired} = S) ->
     case masque_reverse_capsule:decode(connection_request_declined, Value) of
         {ok, {connection_request_declined, Id}} ->
             case maps:take(Id, R) of
@@ -390,9 +396,13 @@ capsule(connection_request_declined, Value, #state{requests = R} = S) ->
                     gen_server:reply(From, {error, declined}),
                     {noreply, S#state{requests = R2}};
                 error ->
-                    %% Section 5.1: a DECLINED for no outstanding request
-                    %% is a stream error.
-                    {stop, malformed_capsule, S}
+                    case masque_reverse_ids:seen(Id, Expired) of
+                        %% It timed out here first: the decline crossed it.
+                        true -> {noreply, S};
+                        %% Section 5.1: a DECLINED for no outstanding
+                        %% request is a stream error.
+                        false -> {stop, malformed_capsule, S}
+                    end
             end;
         {error, _} ->
             {stop, malformed_capsule, S}

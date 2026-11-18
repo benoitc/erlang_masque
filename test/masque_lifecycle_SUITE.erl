@@ -94,7 +94,10 @@
     h3_tcp_data_before_finalize_is_kept/1,
     h3_udp_output_before_finalize_is_kept/1,
     h3_ip_output_before_finalize_is_kept/1,
-    h3_udp_bind_output_before_finalize_is_kept/1
+    h3_udp_bind_output_before_finalize_is_kept/1,
+    h3_bind_without_public_address_is_500/1,
+    h2_bind_without_public_address_is_500/1,
+    h1_bind_without_public_address_is_500/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -180,7 +183,10 @@ all() ->
         h3_tcp_data_before_finalize_is_kept,
         h3_udp_output_before_finalize_is_kept,
         h3_ip_output_before_finalize_is_kept,
-        h3_udp_bind_output_before_finalize_is_kept
+        h3_udp_bind_output_before_finalize_is_kept,
+        h3_bind_without_public_address_is_500,
+        h2_bind_without_public_address_is_500,
+        h1_bind_without_public_address_is_500
     ].
 
 init_per_suite(Config) ->
@@ -274,6 +280,17 @@ extra_opts(h3_udp_bind_output_before_finalize_is_kept) ->
     B#{
         bind_handler => masque_crash_bind_handler,
         handler_opts => HOpts#{early_assign => {{127, 0, 0, 1}, 9}}
+    };
+extra_opts(Case) when
+    Case =:= h3_bind_without_public_address_is_500;
+    Case =:= h2_bind_without_public_address_is_500;
+    Case =:= h1_bind_without_public_address_is_500
+->
+    B = bind_opts(),
+    HOpts = maps:get(handler_opts, B),
+    B#{
+        bind_handler => masque_crash_bind_handler,
+        handler_opts => HOpts#{response_headers => none}
     };
 extra_opts(h1_bind_handler_crash_closes_tunnel) ->
     (bind_opts())#{bind_handler => masque_crash_bind_handler};
@@ -662,6 +679,37 @@ log(#{level := Level}, #{config := #{counter := Counter}}) when
     counters:add(Counter, 1, 1);
 log(_Event, _Config) ->
     ok.
+
+%% Draft -16 section 7: a handler that gives no Proxy-Public-Address
+%% gets no bind. The session answers 500 before anything else, the
+%% handler's `terminate/2' runs (its socket is closed).
+h3_bind_without_public_address_is_500(Config) ->
+    bind_without_public_address_is_500(Config, h3).
+
+h2_bind_without_public_address_is_500(Config) ->
+    bind_without_public_address_is_500(Config, h2).
+
+h1_bind_without_public_address_is_500(Config) ->
+    bind_without_public_address_is_500(Config, h1).
+
+bind_without_public_address_is_500(Config, Transport) ->
+    Port = maps:get(port, ?config(Transport, Config)),
+    Result = masque:bind_connect(
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+        unscoped,
+        #{transports => [Transport], verify => verify_none, timeout => 5000}
+    ),
+    ?assertMatch({error, {bad_status, 500}}, normalize_bind_error(Result)),
+    receive
+        {bind_handler_terminated, {no_public_address, absent}} -> ok
+    after 5000 -> ct:fail(handler_not_terminated)
+    end.
+
+%% h3 and h2 report the status as `{bad_status, S}', h1 as a rejected
+%% upgrade.
+normalize_bind_error({error, {handshake_rejected, Status, _}}) -> {error, {bad_status, Status}};
+normalize_bind_error({error, {handshake_rejected, Status}}) -> {error, {bad_status, Status}};
+normalize_bind_error(Other) -> Other.
 
 %% The h1 udp-bind session applies the same handler and compression
 %% rules as the h3/h2 one.
