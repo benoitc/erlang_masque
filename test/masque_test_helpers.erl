@@ -22,6 +22,7 @@
 %%====================================================================
 
 generate_certs() ->
+    %% The OS pid keeps test runs in parallel VMs out of each other's way.
     TmpDir = filename:join(
         [
             "/tmp",

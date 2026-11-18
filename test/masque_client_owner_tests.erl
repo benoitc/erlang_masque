@@ -46,3 +46,12 @@ send_datagram_counts_drops_test() ->
         undefined -> persistent_term:erase(masque_owner_drops);
         Ref -> persistent_term:put(masque_owner_drops, Ref)
     end.
+
+%% A CONNECT-TCP tunnel closes on these owner exits and aborts on others.
+clean_exit_test() ->
+    ?assert(masque_client_owner:clean_exit(normal)),
+    ?assert(masque_client_owner:clean_exit(shutdown)),
+    ?assert(masque_client_owner:clean_exit({shutdown, done})),
+    ?assertNot(masque_client_owner:clean_exit(killed)),
+    ?assertNot(masque_client_owner:clean_exit({badarg, []})),
+    ?assertNot(masque_client_owner:clean_exit(noproc)).
