@@ -256,15 +256,22 @@ dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch, Router) ->
         true ->
             reject(Conn, StreamId, overload);
         false ->
-            dispatch_request_1(
-                Conn,
-                StreamId,
-                Method,
-                Path,
-                Headers,
-                Dispatch,
-                Router
-            )
+            %% RFC 9297 section 3.2: a capsule-protocol request with a
+            %% body field is malformed.
+            case masque_http:capsule_request(Headers) of
+                ok ->
+                    dispatch_request_1(
+                        Conn,
+                        StreamId,
+                        Method,
+                        Path,
+                        Headers,
+                        Dispatch,
+                        Router
+                    );
+                {error, Reason} ->
+                    reject(Conn, StreamId, Reason)
+            end
     end.
 
 %% Reverse connect requests (`accept_listen') take their own path; every
@@ -358,8 +365,9 @@ accept_masque({Conn, StreamId, Router, Protocol, HandlerMod, HandlerOpts}, {ok, 
 accept_masque({Conn, StreamId, _, _, _, _}, {error, Reason}) ->
     reject(Conn, StreamId, Reason).
 
+%% A user-owned listener without the connection handler: no router.
 spawn_session(Conn, StreamId, undefined, _Proto, _Handler, _HOpts, _Req) ->
-    reject(Conn, StreamId, resolution_failed);
+    reject(Conn, StreamId, internal_error);
 spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req) ->
     Args = #{
         conn => Conn,
@@ -392,10 +400,11 @@ spawn_session(Conn, StreamId, Router, Protocol, Handler, HOpts, Req) ->
             ok
     end.
 
-%% The peer's address and certificate. A client that resets or drops
-%% the connection while its request is dispatched ends the connection
-%% processes under us: `gone', not a handler crash.
-add_peer_info(Conn, Req) ->
+%% The transport, the peer's address and certificate. A client that
+%% resets or drops the connection while its request is dispatched ends
+%% the connection processes under us: `gone', not a handler crash.
+add_peer_info(Conn, Req0) ->
+    Req = Req0#{transport => h3},
     try
         QuicConn = quic_h3:get_quic_conn(Conn),
         Req1 =
@@ -416,8 +425,6 @@ map_init_error({shutdown, {masque_quiet, _}} = Quiet) ->
     map_init_error(masque_quiet:reason(Quiet));
 map_init_error(too_many_tunnels) ->
     overload;
-map_init_error({resolution_failed, _}) ->
-    resolution_failed;
 %% The handler's `init' ran past the start deadline: the target did not
 %% answer in time (504), not a name that failed to resolve.
 map_init_error({start_timeout, _}) ->
@@ -425,10 +432,10 @@ map_init_error({start_timeout, _}) ->
 %% `gen_server:start/3' in the router's start worker ran out of time.
 map_init_error(timeout) ->
     upstream_timeout;
-map_init_error({reject, Err}) ->
-    Err;
-map_init_error(_) ->
-    resolution_failed.
+%% `{reject, R}', `{resolution_failed, Why}' and the rest, crashes
+%% included (RFC 9209: the most specific error type).
+map_init_error(Reason) ->
+    masque_errors:start_error(Reason).
 
 %% `AcceptBind' is the listener-level switch for Connect-UDP-Bind
 %% (draft-ietf-masque-connect-udp-listen-16). When true, the
@@ -607,7 +614,7 @@ reject(Conn, StreamId, Reason, ExtraHeaders) ->
         %% RFC 9209 structured field - gives clients a machine-readable
         %% tag for the failure beyond the numeric status (RFC 9298 §3
         %% recommendation).
-        {<<"proxy-status">>, proxy_status_field(Reason)}
+        {<<"proxy-status">>, masque_errors:proxy_status(Reason)}
     ],
     Headers = merge_extra_headers(Base, ExtraHeaders),
     %% The stream, or the whole connection, may already be gone (client
@@ -625,27 +632,6 @@ merge_extra_headers(Base, Extra) ->
     Keys = [K || {K, _} <- Extra],
     Kept = [Pair || {K, _} = Pair <- Base, not lists:member(K, Keys)],
     Extra ++ Kept.
-
-%% Map MASQUE handshake errors to a minimal Proxy-Status structured
-%% field value. We use `masque' as the proxy identifier and attach an
-%% RFC 9209 `error' parameter naming the failure class.
-proxy_status_field(Reason) ->
-    Error = proxy_status_error(Reason),
-    <<"masque; error=", Error/binary>>.
-
-proxy_status_error(bad_method) -> <<"http_protocol_error">>;
-proxy_status_error(bad_protocol) -> <<"http_protocol_error">>;
-proxy_status_error(bad_path) -> <<"http_protocol_error">>;
-proxy_status_error(bad_port) -> <<"http_protocol_error">>;
-proxy_status_error(bad_host) -> <<"http_protocol_error">>;
-proxy_status_error(bad_request) -> <<"http_protocol_error">>;
-proxy_status_error(unknown_request) -> <<"http_request_error">>;
-proxy_status_error(resolution_failed) -> <<"dns_error">>;
-proxy_status_error(upstream_timeout) -> <<"connection_timeout">>;
-proxy_status_error(forbidden) -> <<"destination_ip_prohibited">>;
-proxy_status_error(loop_detected) -> <<"proxy_loop_detected">>;
-proxy_status_error(overload) -> <<"proxy_internal_error">>;
-proxy_status_error(_) -> <<"proxy_internal_error">>.
 
 header(Name, Headers) ->
     header(Name, Headers, undefined).

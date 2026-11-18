@@ -780,27 +780,19 @@ check_prefix(V, _, P) ->
 %% Response validation
 %%====================================================================
 
+%% RFC 9484 section 4.3: the 101 carries `Connection: Upgrade' and a
+%% single `Upgrade: connect-ip', or the attempt has failed; then the
+%% Capsule Protocol rules of RFC 9297 sections 3.2 and 3.4.
 validate_response(Headers) ->
-    HasCL = header_present(<<"content-length">>, Headers),
-    HasCT = header_present(<<"content-type">>, Headers),
-    case header_value(<<"capsule-protocol">>, Headers) of
-        <<"?1">> when not HasCL, not HasCT -> ok;
-        <<"?1">> -> {error, malformed_response};
-        _ -> {error, capsule_protocol_missing}
+    case masque_http:upgrade_ack(Headers, ?MASQUE_CONNECT_IP_PROTOCOL) of
+        false ->
+            {error, bad_upgrade_response};
+        true ->
+            case masque_http:capsule_protocol(Headers) of
+                true -> masque_http:capsule_response(101, Headers);
+                false -> {error, capsule_protocol_missing}
+            end
     end.
-
-header_present(Name, Headers) ->
-    lists:any(fun({N, _}) -> ci_eq(N, Name) end, Headers).
-
-header_value(Name, Headers) ->
-    case lists:search(fun({N, _}) -> ci_eq(N, Name) end, Headers) of
-        {value, {_, V}} -> V;
-        false -> undefined
-    end.
-
-ci_eq(A, B) ->
-    string:to_lower(binary_to_list(iolist_to_binary(A))) =:=
-        string:to_lower(binary_to_list(iolist_to_binary(B))).
 
 %%====================================================================
 %% Rx buffering

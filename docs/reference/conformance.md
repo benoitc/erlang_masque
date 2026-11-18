@@ -10,9 +10,11 @@ Section numbers in the RFC 9484 table were checked against the RFC's table of co
 | --- | --- | --- | --- |
 | §2 | URI template with `target_host` and `target_port` | Default `/.well-known/masque/udp/{target_host}/{target_port}/`; client expands, server matches `:path`. Parsing is strict: dotted-quad IPv4 only, no zone ids, digit-only ports, no double decoding. | `masque_uri`, `masque_uri_template`, `include/masque.hrl` |
 | §3 | A 2xx means the proxy is ready to forward | The handler's `init/2` (socket open, target checks) runs before the 2xx. On h3 the 2xx is sent from finalize, and handler output produced earlier is held until after it. | `masque_server_session`, `masque_server_connection` |
-| §3.2, §3.3 | HTTP/1.1: `GET` with `Upgrade: connect-udp`, `Connection: Upgrade`, `Capsule-Protocol: ?1`; 101 response | Listener requires all three headers and a `Host`; the client validates the 101. | `masque_h1_server`, `masque_h1_client_session` |
+| §3.2 | HTTP/1.1: `GET` with a single `Host`, `Upgrade: connect-udp`, `Connection: Upgrade`, `Capsule-Protocol: ?1` | The listener requires all three headers (`Capsule-Protocol` read as a Boolean, parameters allowed) and refuses a missing `Host` or more than one with 400 (`bad_host`, `bad_request`). | `masque_h1_server` |
+| §3.3 | The 101 carries `Connection: Upgrade` and a single `Upgrade: connect-udp`; otherwise the client treats the attempt as failed | The UDP, IP, TCP and udp-bind h1 clients check both on the 101 and fail with `bad_upgrade_response`. | `masque_http`, h1 client sessions |
 | §3.1 | The proxy must not introduce IP fragmentation and sets IPv4 DF where it can | The proxy's UDP sockets set IPv4 Don't Fragment (Linux `IP_PMTUDISC_DO`, `IP_DONTFRAG` on macOS and FreeBSD) and `IPV6_DONTFRAG`. A packet above the path MTU is dropped. `dont_fragment => false` turns it off; other systems keep the kernel default. | `masque_udp_df`, `masque_udp_proxy_handler`, `masque_udp_bind_proxy_handler` |
-| §3.4, §3.5 | HTTP/2 and HTTP/3: Extended CONNECT with `:protocol = connect-udp` | Listeners require `:method = CONNECT`, `:protocol`, `:scheme` and `:authority`. | `masque_server`, `masque_h2_server` |
+| §3.4 | HTTP/2 and HTTP/3: Extended CONNECT with `:protocol = connect-udp` | Listeners require `:method = CONNECT`, `:protocol`, `:scheme` and `:authority`. | `masque_server`, `masque_h2_server` |
+| §3.3, §3.5 | A successful response meets RFC 9297 §3.2; otherwise the client treats the attempt as failed | h3 and h2 clients refuse a 2xx that is a 204, 205 or 206 or carries `content-length`, `content-type` or `transfer-encoding` (`malformed_response`), and one without the `capsule-protocol` acknowledgement (`capsule_protocol_not_acknowledged`); h1 clients apply the same to the 101. | UDP client sessions, `masque_http` |
 | §4 | Context ID 0 is UDP payload; other ids are extensions | Context 0 is delivered to `handle_packet/2` / the owner. Unknown context ids are dropped on receipt. `masque:send/3` lets you send on another id. | `masque_datagram`, UDP sessions |
 | §5 | UDP payload at most 65527 bytes; a receiver aborts the stream on a larger one | Larger payloads are refused on send (`{payload_too_large, _, 65527}` on the client, silent drop in a handler action). A larger context-zero payload received aborts the stream: `H3_DATAGRAM_ERROR` on h3, `PROTOCOL_ERROR` on h2, the connection closed on h1, with reason `udp_payload_too_large`. On h3 a send is also checked against what the path carries now. | UDP sessions, `masque_datagram` |
 | (errors) | Failures are reported as HTTP status codes | See the status mapping in [messages-and-errors](messages-and-errors.md#server-side-handshake-reasons-and-http-status). | `masque_errors` |
@@ -20,6 +22,11 @@ Section numbers in the RFC 9484 table were checked against the RFC's table of co
 Deviations and additions:
 - h2 and h3 listeners do not check that a CONNECT-UDP request carries `capsule-protocol: ?1`; the h1 listener does. Clients send it unless `capsule_protocol => false`.
 - The client refuses a 2xx that omits `capsule-protocol: ?1` when it asked for it (`capsule_protocol_not_acknowledged`).
+- §3.1: an ICMP port unreachable from the target does not close the tunnel; datagrams are unreliable and the target may come back. Other socket errors close it.
+- §6.1: a packet dropped because it is above the path MTU (Don't Fragment set) is not answered with an ICMP Packet Too Big towards the client.
+- §3.2: an h1 request with `Upgrade: connect-udp` but no `Connection: Upgrade` or no `Capsule-Protocol: ?1` is answered 501 (`bad_protocol`), where the RFC suggests 400.
+- An HTTP/1.0 request with `Upgrade` is treated as an upgrade (RFC 9110 §7.8 says to ignore it): the h1 dependency does not tell the listener the request version.
+- ECN: the proxy's UDP sockets leave the ECN field at Not-ECT and do not relay the client's marks.
 
 ## RFC 9297: HTTP Datagrams and the Capsule Protocol
 
@@ -28,9 +35,14 @@ Deviations and additions:
 | §2 | HTTP/3 datagrams carry a quarter stream id | Handled by `quic_h3`. | `quic_h3` (dependency) |
 | §2.1.1 | `SETTINGS_H3_DATAGRAM = 1` | The h3 listener merges `h3_datagram => 1` into its settings; h3 clients refuse a peer without it (`no_h3_datagram`). | `masque_server`, `masque_client_session`, `masque_ip_client_session` |
 | §3.2 | Capsule framing: type, length, value | Encoding and decoding go through `quic_h3_capsule`, wrapped by `masque_capsule`. h2 and h1 sessions use `h2_capsule` and `h1_capsule`. | `masque_capsule` |
-| §3.3 | Unknown capsule types are ignored; a malformed or truncated capsule is a stream error | Unknown types reach the handler's `handle_capsule/3` (server) or the owner as `masque_capsule` (client), and udp-bind drops them. Malformed or truncated capsules reset the stream with `H3_MESSAGE_ERROR` (h3) or `PROTOCOL_ERROR` (h2). The partial capsule a session holds is capped by `max_capsule_size` (default 65536); complete capsules in the same read do not count. | all capsule-carrying sessions |
-| §3.4 | A capsule-protocol response carries no `content-length` / `content-type` | Clients refuse such a 2xx (`malformed_response`). Listeners only put these headers on rejections. | client sessions |
+| §3.2 | The Capsule Protocol is not used with `Content-Length`, `Content-Type` or `Transfer-Encoding`; a 204, 205 or 206 response to a capsule-protocol request is malformed | Listeners refuse a request with `capsule-protocol: ?1` and one of these fields with 400 (`bad_request`). Clients refuse such a 2xx or 101, and a 204, 205 or 206 (`malformed_response`), on UDP, IP and capsule-framed TCP. Listeners only put these fields on rejections. | `masque_http`, listeners, client sessions |
+| §3.3 | Unknown capsule types are ignored; a malformed or truncated capsule is a stream error | Unknown types reach the handler's `handle_capsule/3` (server, skipped when it does not export one) or the owner as `masque_capsule` (client), and udp-bind drops them. Malformed or truncated capsules, at the end of the stream included, reset the stream with `H3_MESSAGE_ERROR` (h3) or `PROTOCOL_ERROR` (h2); on h1 the connection ends. The partial capsule a session holds is capped by `max_capsule_size` (default 65536); complete capsules in the same read do not count. | all capsule-carrying sessions |
+| §3.4 | `Capsule-Protocol` is a Structured Field Boolean; receivers ignore unknown parameters | Every place that reads a received `capsule-protocol` (clients, the h1 listener, CONNECT-TCP framing, reverse connect) takes `?1` with any parameters as true; `?0`, several field lines and anything malformed are false. masque sends a bare `?1`. | `masque_http` |
 | §3.5 | DATAGRAM capsule (type 0) | Used to carry datagrams on h2 and h1. On h3 a DATAGRAM capsule received on the stream is handled as an HTTP datagram too, by server and client sessions. | all datagram-carrying sessions |
+
+Deviations:
+- §2: an HTTP/3 datagram for a CONNECT-TCP stream, which does not use datagrams, is dropped instead of closing the connection with `H3_DATAGRAM_ERROR`.
+- §3.3: a capsule of an unknown type larger than `max_capsule_size` aborts the stream like any other oversized capsule, instead of being skipped.
 
 ## RFC 9484: Proxying IP in HTTP
 
@@ -67,11 +79,14 @@ Deviations and additions:
 
 | Requirement | Behaviour in masque | Module |
 | --- | --- | --- |
-| A proxy names itself and the error type | Every listener rejection carries `proxy-status: masque; error=<type>`, with the type from the reason (`http_protocol_error`, `dns_error`, `connection_timeout`, `destination_ip_prohibited`, `proxy_loop_detected`, `proxy_internal_error`). | `masque_server`, `masque_h2_server`, `masque_h1_server` |
+| §2.1.1: the most specific error type SHOULD be sent | Every listener rejection carries `proxy-status: masque; error=<type>`, the type from the reason (`masque_errors:proxy_status/1`): `http_request_error` for a malformed request (bad method, path, port, host, body fields, duplicate `Host`), `http_request_denied` for an `authenticate` refusal, `dns_error` for a name that did not resolve, `connection_refused`, `connection_timeout`, `destination_ip_unroutable` and `destination_unavailable` for a target that cannot be reached, `destination_ip_prohibited` for a refused address, `proxy_loop_detected`, `http_protocol_error` for an unknown `:protocol`, and `proxy_internal_error` for handler crashes, unknown start failures and overload. | `masque_errors`, listeners |
+| §2: an intermediary SHOULD keep the members it received and add its own | A chain listener passes an upstream refusal on with the upstream's status and adds `masque; received-status=<status>`. | `masque_chain_handler`, `masque_errors` |
 
 Deviations:
 - The proxy identifier is always `masque`; it is not configurable and does not name the listener.
-- No other parameters (`details`, `rcode`, `next-hop`) are sent.
+- No other parameters (`details`, `rcode`, `next-hop`) are sent; `received-status` only on a refusal passed on by a chain listener.
+- A chain listener does not forward the upstream's own Proxy-Status members: the client sessions keep the status of a refused response but not its fields.
+- Some statuses differ from the RFC's recommendations: a loop is 508 (recommended 502), a refused address is 403 on CONNECT-UDP, CONNECT-IP and capsule-framed CONNECT-TCP (recommended 502; raw CONNECT-TCP keeps 502), and request errors tagged `http_protocol_error` or `http_request_error` are 4xx or 501 rather than 502.
 - Proxy-Status is sent on handshake rejections and on the 2xx or 101 of a capsule-framed CONNECT-TCP tunnel (`proxy-status: masque`), not on other success responses or when a tunnel fails later.
 - A handler can replace the header by returning `{reject, Reason, [{<<"proxy-status">>, Value}]}`.
 
@@ -81,8 +96,11 @@ Deviations:
 | --- | --- | --- | --- |
 | §9.3.6 | CONNECT to `host:port`; a 2xx turns the connection into a tunnel | Classic CONNECT-TCP on h1: the listener parses the authority-form target (IPv6 in brackets); the client treats any 2xx as success. `proxy_authorization` is sent as `Proxy-Authorization` on this path only, and refused if it contains CR or LF. | `masque_h1_server`, `masque_tcp_h1_client_session`, `masque_tcp_h1_server_session`, `masque_uri` |
 | §7.2 with RFC 9112 §3.2.3 | `Host` matches the CONNECT target | The h1 listener refuses a missing or different `Host` with 400 (`bad_host`). | `masque_h1_server` |
-| §7.8 | Upgrade needs `Connection: Upgrade`; a 101 names the protocol | The h1 listener requires the token (`bad_protocol` otherwise); the udp-bind h1 client checks both headers on the 101 (`bad_upgrade_response`). | `masque_h1_server`, `masque_udp_bind_h1_client_session` |
-| §7.6.3 | `Via` records the hops | Chain handlers add their pseudonym to `via` on the upstream request and refuse a request that already names them (508, `loop_detected`). | `masque_chain_handler` |
+| §7.2 with RFC 9112 §3.2 | A request with more than one `Host` is a 400 | The h1 listener refuses it before routing (`bad_request`). | `masque_h1_server` |
+| §7.8 | Upgrade needs `Connection: Upgrade`; a 101 names the protocol | The h1 listener requires the token (`bad_protocol` otherwise); every h1 client checks `Connection: Upgrade` and a single `Upgrade` with its token on the 101 (`bad_upgrade_response`). | `masque_h1_server`, `masque_http`, h1 client sessions |
+| §7.6.3 | `Via` records the hops | Chain handlers add their pseudonym to `via` on the upstream request, with the received-protocol of the request they got (`3`, `2` or `1.1`), and refuse a request that already names them (508, `loop_detected`). | `masque_chain_handler` |
+
+Deviation: an `Upgrade` on an HTTP/1.0 request is not ignored (§7.8), because the h1 dependency does not expose the request version; see RFC 9298 above.
 
 A rejected h1 request is answered with `connection: close` and the connection is closed; the code cites RFC 9931 (updates RFC 9298) for this.
 
@@ -91,7 +109,8 @@ A rejected h1 request is answered with `connection: close` and the connection is
 | Requirement | Behaviour in masque | Module |
 | --- | --- | --- |
 | Server advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL = 1` | h3 listener merges `enable_connect_protocol => 1` into its settings; h2 listener sets `enable_connect_protocol => true`. | `masque_server`, `masque_h2_server` |
-| Client uses `:protocol` only when the peer allows it | h2 and h3 clients read the peer SETTINGS and fail with `no_extended_connect`. | client sessions |
+| Client uses `:protocol` only when the peer allows it | h2 and h3 clients read the peer SETTINGS and fail with `no_extended_connect` (and `no_h3_datagram` on h3 without HTTP Datagrams). | client sessions |
+| A `:protocol` the server does not support is refused | Listeners answer 501 (`bad_protocol`, `http_protocol_error`). | `masque_server`, `masque_h2_server` |
 | `:scheme`, `:authority`, `:path` present | Listeners refuse a request without `:scheme` or `:authority` (`bad_path`, 404); the h2 listener no longer falls back to `host` or a fixed scheme. | `masque_server`, `masque_h2_server` |
 
 Stream and connection semantics from RFC 9114 and RFC 9113 that the sessions rely on:

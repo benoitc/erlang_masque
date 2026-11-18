@@ -278,7 +278,7 @@ connecting_inner(
     cancel_timer(Data#data.timeout_ref),
     case Status of
         S when S >= 200, S < 300 ->
-            case validate_response(Headers) of
+            case validate_response(S, Headers) of
                 ok ->
                     case check_datagram_mtu(Data) of
                         ok ->
@@ -1062,25 +1062,14 @@ check_datagram_mtu(#data{transport = h2}) ->
 %% Response validation
 %%====================================================================
 
-%% RFC 9297 §3.4 forbids `content-length` / `content-type` on a
-%% capsule-protocol response. RFC 9484 §4 mandates
-%% `capsule-protocol: ?1` echoed in the 2xx response.
-validate_response(Headers) ->
-    HasCL = header_present(<<"content-length">>, Headers),
-    HasCT = header_present(<<"content-type">>, Headers),
-    case header_value(<<"capsule-protocol">>, Headers) of
-        <<"?1">> when not HasCL, not HasCT -> ok;
-        <<"?1">> -> {error, malformed_response};
-        _ -> {error, capsule_protocol_missing}
-    end.
-
-header_present(Name, Headers) ->
-    lists:keyfind(Name, 1, Headers) =/= false.
-
-header_value(Name, Headers) ->
-    case lists:keyfind(Name, 1, Headers) of
-        {_, V} -> V;
-        false -> undefined
+%% RFC 9297 section 3.2 forbids `content-length', `content-type' and
+%% `transfer-encoding' on a capsule-protocol response, and a 204, 205
+%% or 206. RFC 9484 section 4 mandates `capsule-protocol: ?1' (a
+%% Boolean, so parameters are allowed) echoed in the 2xx response.
+validate_response(Status, Headers) ->
+    case masque_http:capsule_protocol(Headers) of
+        true -> masque_http:capsule_response(Status, Headers);
+        false -> {error, capsule_protocol_missing}
     end.
 
 %%====================================================================

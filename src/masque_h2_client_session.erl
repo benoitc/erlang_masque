@@ -202,7 +202,7 @@ connecting_inner(
     cancel_timer(Data#data.timeout_ref),
     case Status of
         S when S >= 200, S < 300 ->
-            case validate_response(Headers, Data) of
+            case validate_response(S, Headers, Data) of
                 ok ->
                     reply_handshake(Data, ok),
                     {next_state, open, Data#data{
@@ -637,32 +637,15 @@ client_stream_abort(
 %% Response validation (mirrors the h3 session)
 %%====================================================================
 
-validate_response(Headers, #data{capsule_proto = CapsuleRequested}) ->
-    HasContentLength = header_present(<<"content-length">>, Headers),
-    HasContentType = header_present(<<"content-type">>, Headers),
-    CapsuleAck =
-        case header_value(<<"capsule-protocol">>, Headers) of
-            <<"?1">> -> true;
-            _ -> false
-        end,
-    if
-        HasContentLength ->
-            {error, malformed_response};
-        HasContentType ->
-            {error, malformed_response};
-        CapsuleRequested andalso not CapsuleAck ->
-            {error, capsule_protocol_not_acknowledged};
-        true ->
-            ok
-    end.
-
-header_present(Name, Headers) ->
-    lists:keyfind(Name, 1, Headers) =/= false.
-
-header_value(Name, Headers) ->
-    case lists:keyfind(Name, 1, Headers) of
-        {_, V} -> V;
-        false -> undefined
+validate_response(Status, Headers, #data{capsule_proto = CapsuleRequested}) ->
+    case masque_http:capsule_response(Status, Headers) of
+        ok ->
+            case CapsuleRequested andalso not masque_http:capsule_protocol(Headers) of
+                true -> {error, capsule_protocol_not_acknowledged};
+                false -> ok
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 %%====================================================================

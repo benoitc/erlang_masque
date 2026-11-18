@@ -127,10 +127,10 @@ await_response(#state{conn = C, stream_id = Sid} = S, Timeout) ->
         {Tag, C, {response, Sid, Status, Headers}} when
             (Tag =:= quic_h3 orelse Tag =:= h2), Status >= 200, Status < 300
         ->
-            case proplists:get_value(<<"capsule-protocol">>, Headers) of
-                <<"?1", _/binary>> ->
+            case masque_http:capsule_protocol(Headers) of
+                true ->
                     {ok, S};
-                _ ->
+                false ->
                     _ = stop_upstream(S#state.upstream),
                     {stop, {bad_response, capsule_protocol}}
             end;

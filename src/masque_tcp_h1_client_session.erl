@@ -452,10 +452,16 @@ dial(Data, Opts, Deadline) ->
             case ssl:send(Socket, Req) of
                 ok ->
                     case read_status_line(Socket, remaining(Deadline)) of
-                        {ok, 101, _Phrase, _Hdrs, Leftover} when
+                        {ok, 101, _Phrase, Hdrs, Leftover} when
                             Data#data.framing =:= capsule
                         ->
-                            {ok, Socket, Leftover};
+                            case check_upgrade(Hdrs, Data) of
+                                ok ->
+                                    {ok, Socket, Leftover};
+                                {error, _} = Err ->
+                                    _ = ssl:close(Socket),
+                                    Err
+                            end;
                         {ok, Code, _Phrase, _Hdrs, Leftover} when
                             Data#data.framing =:= raw, Code >= 200, Code < 300
                         ->
@@ -481,6 +487,15 @@ dial(Data, Opts, Deadline) ->
             end;
         {error, Reason} ->
             {error, {connect, Reason}}
+    end.
+
+%% draft-ietf-httpbis-connect-tcp section 3.2: the 101 carries
+%% `Connection: Upgrade' and a single `Upgrade' with the token in use,
+%% and starts the Capsule Protocol (RFC 9297 section 3.2).
+check_upgrade(Hdrs, #data{token = Token}) ->
+    case masque_http:upgrade_ack(Hdrs, Token) of
+        true -> masque_http:capsule_response(101, Hdrs);
+        false -> {error, bad_upgrade_response}
     end.
 
 %% A classic CONNECT refused with `501', or with `426' offering

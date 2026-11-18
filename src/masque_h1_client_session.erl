@@ -391,7 +391,7 @@ do_upgrade(Conn, Data, Timeout) ->
     Headers = request_headers(Data),
     case upgrade(Conn, Data#data.token, Headers, Timeout) of
         {ok, _StreamId, Socket, Buffer, RespHeaders} ->
-            case validate_response(RespHeaders, Data) of
+            case check_upgrade(RespHeaders, Data) of
                 ok ->
                     _ = masque_tls:bound_sends(ssl, Socket),
                     {ok, Socket, Buffer};
@@ -546,37 +546,25 @@ abort(Reason, #data{socket = Socket} = Data) ->
 %% Response validation (mirrors the h2 session)
 %%====================================================================
 
+%% RFC 9298 section 3.3: the 101 carries `Connection: Upgrade' and a
+%% single `Upgrade' with our token, or the attempt has failed.
+check_upgrade(Headers, #data{token = Token} = Data) ->
+    case masque_http:upgrade_ack(Headers, Token) of
+        true -> validate_response(Headers, Data);
+        false -> {error, bad_upgrade_response}
+    end.
+
+%% RFC 9297 sections 3.2 and 3.4 (no body fields; the Boolean ack).
 validate_response(Headers, #data{capsule_proto = CapsuleRequested}) ->
-    HasContentLength = header_present(<<"content-length">>, Headers),
-    HasContentType = header_present(<<"content-type">>, Headers),
-    CapsuleAck =
-        case header_value(<<"capsule-protocol">>, Headers) of
-            <<"?1">> -> true;
-            _ -> false
-        end,
-    if
-        HasContentLength ->
-            {error, malformed_response};
-        HasContentType ->
-            {error, malformed_response};
-        CapsuleRequested andalso not CapsuleAck ->
-            {error, capsule_protocol_not_acknowledged};
-        true ->
-            ok
+    case masque_http:capsule_response(101, Headers) of
+        ok ->
+            case CapsuleRequested andalso not masque_http:capsule_protocol(Headers) of
+                true -> {error, capsule_protocol_not_acknowledged};
+                false -> ok
+            end;
+        {error, _} = Err ->
+            Err
     end.
-
-header_present(Name, Headers) ->
-    lists:any(fun({N, _}) -> ci_eq(N, Name) end, Headers).
-
-header_value(Name, Headers) ->
-    case lists:search(fun({N, _}) -> ci_eq(N, Name) end, Headers) of
-        {value, {_, V}} -> V;
-        false -> undefined
-    end.
-
-ci_eq(A, B) ->
-    string:to_lower(binary_to_list(iolist_to_binary(A))) =:=
-        string:to_lower(binary_to_list(iolist_to_binary(B))).
 
 %%====================================================================
 %% Rx buffering (identical to the h2 / h3 sessions)

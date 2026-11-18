@@ -24,7 +24,7 @@ self_addresses_option_refused_test() ->
         masque_tcp_proxy_handler:init(req(), Opts)
     ),
     ?assertEqual(
-        {stop, {resolution_failed, self_address}},
+        {stop, {reject, forbidden}},
         masque_udp_proxy_handler:init(req(), Opts)
     ).
 
@@ -44,7 +44,7 @@ interface_address_refused_test() ->
         {ok, A} ->
             Opts = #{resolver => resolver(A), allow_private => true},
             ?assertEqual(
-                {stop, {resolution_failed, self_address}},
+                {stop, {reject, forbidden}},
                 masque_udp_proxy_handler:init(req(), Opts)
             )
     end.
