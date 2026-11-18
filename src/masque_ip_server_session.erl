@@ -51,6 +51,16 @@
     %% Request IDs received from the client (from ADDRESS_REQUEST) but
     %% not yet answered by this server session.
     peer_pending = #{} :: #{pos_integer() => true},
+    %% The addresses the last ADDRESS_ASSIGN left the client holding,
+    %% with request id 0: an ADDRESS_ASSIGN the session sends on its
+    %% own repeats them, since each one is the full set (RFC 9484
+    %% section 4.7.1).
+    held = [] :: [#ip_assignment{}],
+    %% RFC 9484 section 7.2: injected packets have their TTL decremented
+    %% unless the handler options say `ttl_decrement => decapsulation'.
+    ttl_mode = encapsulation :: encapsulation | decapsulation,
+    %% Rate limit on the ICMP errors the session generates.
+    icmp :: masque_icmp:limiter() | undefined,
     %% Monitor on the router (H3 path).
     router_ref :: reference() | undefined,
     start_time :: integer() | undefined,
@@ -170,6 +180,8 @@ init_session(
                 transport = Transport,
                 handler = Handler,
                 idle_ms = maps:get(idle_timeout_ms, HOpts, ?DEFAULT_IDLE_MS),
+                ttl_mode = masque_ip:ttl_mode(HOpts),
+                icmp = masque_icmp:limiter(masque_ip:icmp_rate_limit(HOpts)),
                 h_state = HState,
                 req = Req,
                 max_cap = MaxCap
@@ -327,10 +339,16 @@ handle_cast_inner(
 handle_cast_inner({inject_packet, Pkt}, S) when is_binary(Pkt) ->
     %% Out-of-band packet injection from a process other than the
     %% session itself (e.g. a TUN device owner). Re-uses the same
-    %% transport-send path the `{send_ip_packet, _}' action uses.
-    case do_actions([{send_ip_packet, Pkt}], S) of
-        {ok, S2} -> {noreply, S2};
-        {stop, Reason, S2} -> {stop, Reason, S2}
+    %% transport-send path the `{send_ip_packet, _}' action uses, after
+    %% the TTL decrement a router does on encapsulation.
+    case inject_ttl(Pkt, S) of
+        {ok, Pkt1, S1} ->
+            case do_actions([{send_ip_packet, Pkt1}], S1) of
+                {ok, S2} -> {noreply, S2};
+                {stop, Reason, S2} -> {stop, Reason, S2}
+            end;
+        {drop, S1} ->
+            {noreply, S1}
     end;
 handle_cast_inner(_Msg, S) ->
     {noreply, S}.
@@ -588,14 +606,8 @@ dispatch_capsule(
                 Entries
             ),
             case Entries of
-                [] ->
-                    {noreply, S};
-                _ ->
-                    dispatch(
-                        handle_address_request,
-                        [Entries],
-                        S#state{peer_pending = Pend1}
-                    )
+                [] -> {noreply, S};
+                _ -> address_request(Entries, S#state{peer_pending = Pend1})
             end;
         {error, _} ->
             reset_and_stop(malformed_capsule, S)
@@ -669,24 +681,48 @@ init_handler(Handler, Req, HOpts) ->
 
 dispatch(CB, Extra, #state{handler = Handler, h_state = HS} = S) ->
     case exported(Handler, CB, length(Extra) + 1) of
-        true ->
-            case safe_apply(Handler, CB, Extra ++ [HS]) of
-                {ok, HS2} ->
-                    {noreply, S#state{h_state = HS2}};
-                {ok, HS2, Actions} ->
-                    apply_actions_noreply(
-                        Actions, S#state{h_state = HS2}
-                    );
-                {stop, Reason, HS2} ->
-                    {stop, Reason, S#state{h_state = HS2}};
-                {stop, Reason} ->
-                    {stop, Reason, S};
-                _ ->
-                    {noreply, S}
-            end;
-        false ->
-            {noreply, S}
+        true -> dispatch_result(safe_apply(Handler, CB, Extra ++ [HS]), S);
+        false -> {noreply, S}
     end.
+
+dispatch_result({ok, HS2}, S) ->
+    {noreply, S#state{h_state = HS2}};
+dispatch_result({ok, HS2, Actions}, S) ->
+    apply_actions_noreply(Actions, S#state{h_state = HS2});
+dispatch_result({stop, Reason, HS2}, S) ->
+    {stop, Reason, S#state{h_state = HS2}};
+dispatch_result({stop, Reason}, S) ->
+    {stop, Reason, S};
+dispatch_result(_, S) ->
+    {noreply, S}.
+
+%% RFC 9484 section 4.7.2: every request id gets an answer. Without
+%% `handle_address_request/2' every entry gets the "no address" entry
+%% at once; so do the ids an ADDRESS_ASSIGN from the handler leaves out
+%% (or the ids of an assign the session refused). A handler that
+%% returns no `{assign, _}' answers later, as the chain handler does
+%% when the upstream answers.
+address_request(Entries, #state{handler = Handler, h_state = HS} = S) ->
+    case exported(Handler, handle_address_request, 2) of
+        false ->
+            {noreply, answer_left(Entries, S)};
+        true ->
+            Result = safe_apply(Handler, handle_address_request, [Entries, HS]),
+            case dispatch_result(Result, S) of
+                {noreply, S1} ->
+                    case masque_ip:answers(Result) of
+                        true -> {noreply, answer_left(Entries, S1)};
+                        false -> {noreply, S1}
+                    end;
+                Stop ->
+                    Stop
+            end
+    end.
+
+answer_left(Entries, #state{peer_pending = Pend} = S) ->
+    Left = [E || #ip_prefix_request{request_id = Id} = E <- Entries, maps:is_key(Id, Pend)],
+    _ = reject_now(Left, S),
+    S#state{peer_pending = maps:without([Id || #ip_prefix_request{request_id = Id} <- Left], Pend)}.
 
 exported(Mod, Fun, Arity) ->
     _ = code:ensure_loaded(Mod),
@@ -708,16 +744,21 @@ run_init_actions(Actions, S) ->
 do_actions([], S) ->
     {ok, S};
 do_actions([{send_ip_packet, Pkt} | Rest], S) ->
-    ok = count_out(Pkt, S),
-    _ = transport_send_datagram(S, ?MASQUE_CONTEXT_ID_IP, Pkt),
-    do_actions(Rest, S);
+    case tunnel_room(S) of
+        Room when Room =:= infinity; byte_size(Pkt) =< Room ->
+            ok = count_out(Pkt, S),
+            _ = transport_send_datagram(S, ?MASQUE_CONTEXT_ID_IP, Pkt),
+            do_actions(Rest, S);
+        Room ->
+            do_actions(Rest, too_big_for_tunnel(Pkt, Room, S))
+    end;
 do_actions([{assign, Entries} | Rest], S) ->
     case send_assign(Entries, S) of
         {ok, S2} -> do_actions(Rest, S2);
         {error, _} -> do_actions(Rest, S)
     end;
 do_actions([{advertise, Routes} | Rest], S) ->
-    _ = send_advertise(Routes, S),
+    ok = masque_ip:report_advertise(send_advertise(Routes, S)),
     do_actions(Rest, S);
 do_actions([{request_addresses, Prefixes} | Rest], S) ->
     _ = send_request(Prefixes, S),
@@ -753,8 +794,12 @@ send_assign(Entries, #state{peer_pending = Pend} = S) ->
                         )
                     ),
                     case transport_send_data(S, Cap, false) of
-                        ok -> {ok, S#state{peer_pending = Pend1}};
-                        {error, _} = Err -> Err
+                        ok ->
+                            {ok, S#state{
+                                peer_pending = Pend1, held = masque_ip:held_set(Entries)
+                            }};
+                        {error, _} = Err ->
+                            Err
                     end
             catch
                 error:Reason -> {error, Reason}
@@ -764,12 +809,13 @@ send_assign(Entries, #state{peer_pending = Pend} = S) ->
     end.
 
 %% Answer requests with the RFC 9484 sec 4.7.1 "no address" entry
-%% without involving the handler.
+%% without involving the handler. The capsule also lists the addresses
+%% the client holds, since an address left out would be withdrawn.
 reject_now([], _S) ->
     ok;
-reject_now(Requests, S) ->
+reject_now(Requests, #state{held = Held} = S) ->
     Body = masque_ip_capsule:encode_address_assign(
-        masque_ip:reject_requests(Requests)
+        Held ++ masque_ip:reject_requests(Requests)
     ),
     Cap = iolist_to_binary(
         masque_capsule:encode(?MASQUE_CAPSULE_ADDRESS_ASSIGN, Body)
@@ -796,24 +842,13 @@ send_advertise(Routes, S) ->
             ),
             transport_send_data(S, Cap, false)
     catch
-        error:Reason -> {error, Reason}
+        error:Reason -> {error, {bad_routes, Reason}}
     end.
 
 send_request(Prefixes, S) ->
     %% Server-initiated ADDRESS_REQUEST (§5.2 allows both directions).
-    Ids = allocate_request_ids(length(Prefixes)),
-    Entries = lists:zipwith(
-        fun(Id, {V, A, P}) ->
-            #ip_prefix_request{
-                request_id = Id,
-                version = V,
-                address = A,
-                prefix_len = P
-            }
-        end,
-        Ids,
-        Prefixes
-    ),
+    %% An `#ip_prefix_request{}' keeps the request id the handler chose.
+    Entries = masque_ip:request_entries(Prefixes),
     try masque_ip_capsule:encode_address_request(Entries) of
         Body ->
             Cap = iolist_to_binary(
@@ -826,11 +861,47 @@ send_request(Prefixes, S) ->
         error:Reason -> {error, Reason}
     end.
 
-%% Simple monotonic ID allocator scoped to one session. A wraparound
-%% past 2^31 is more than any sensible use will need.
-allocate_request_ids(N) ->
-    Base = erlang:unique_integer([positive, monotonic]),
-    [Base + I || I <- lists:seq(0, N - 1)].
+%% RFC 9484 section 10.1: on h3 a packet that does not fit a QUIC
+%% DATAGRAM frame is not sent; `infinity' on h2 (capsules).
+tunnel_room(#state{transport = h3, conn = C, stream_id = Sid}) ->
+    case masque_out:max_datagram_size(C, Sid) of
+        0 -> infinity;
+        %% One byte for context id 0.
+        Max -> Max - 1
+    end;
+tunnel_room(_S) ->
+    infinity.
+
+%% RFC 9484 section 10.1: drop the packet and send ICMP Packet Too Big
+%% (Fragmentation Needed for IPv4) to its source, which is outside the
+%% tunnel: the handler gets it as `{masque_ip_icmp, Icmp}' to route.
+too_big_for_tunnel(Pkt, Room, S) ->
+    masque_metrics:ip_drop_inc(mtu_exceeded),
+    outbound_icmp(Pkt, fun() -> masque_ip:too_big(Pkt, Room) end, S).
+
+inject_ttl(Pkt, #state{ttl_mode = decapsulation} = S) ->
+    {ok, Pkt, S};
+inject_ttl(Pkt, S) ->
+    case masque_ip_packet:decrement_ttl(Pkt) of
+        {ok, Pkt1} ->
+            {ok, Pkt1, S};
+        {error, ttl_zero} ->
+            masque_metrics:ip_drop_inc(ttl_zero),
+            {drop, outbound_icmp(Pkt, fun() -> masque_ip:time_exceeded(Pkt) end, S)};
+        {error, malformed} ->
+            {ok, Pkt, S}
+    end.
+
+outbound_icmp(Pkt, Build, #state{icmp = L} = S) ->
+    case masque_icmp:may_answer(Pkt) andalso masque_icmp:allow(L) of
+        {true, L1} ->
+            self() ! {masque_ip_icmp, Build()},
+            S#state{icmp = L1};
+        {false, L1} ->
+            S#state{icmp = L1};
+        false ->
+            S
+    end.
 
 %%====================================================================
 %% Transport send dispatch

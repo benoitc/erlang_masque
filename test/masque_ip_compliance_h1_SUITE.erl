@@ -243,8 +243,10 @@ inject_packet_via_registry(Config) ->
     {ok, ServerPid, _Ctx} = masque_ip_session_registry:lookup(Assigned),
     Pkt = ipv4_packet({203, 0, 113, 1}, Assigned, 17),
     ok = masque_ip:inject_packet(ServerPid, Pkt),
+    %% RFC 9484 section 7.2: the TTL drops by one going into the tunnel.
+    {ok, Want} = masque_ip_packet:decrement_ttl(Pkt),
     receive
-        {masque_ip_packet, Sess, Got} when Got =:= Pkt -> ok
+        {masque_ip_packet, Sess, Got} when Got =:= Want -> ok
     after 2000 -> ct:fail("injected packet did not arrive at client")
     end,
     ok = masque:close(Sess).

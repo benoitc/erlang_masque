@@ -60,6 +60,10 @@
     bind_peer_filter/1,
     ip_gateway_echo/1,
     ip_two_clients/1,
+    ip_ttl_kept_on_decapsulation/1,
+    ip_time_exceeded/1,
+    ip_packet_too_big/1,
+    ip_spoofed_source_gets_icmp/1,
     chain_tcp_full_duplex/1,
     chain_tcp_upload/1,
     chain_tcp_upload_large/1,
@@ -162,6 +166,10 @@ groups() ->
         bind_peer_filter,
         ip_gateway_echo,
         ip_two_clients,
+        ip_ttl_kept_on_decapsulation,
+        ip_time_exceeded,
+        ip_packet_too_big,
+        ip_spoofed_source_gets_icmp,
         chain_tcp_full_duplex,
         chain_tcp_upload,
         chain_tcp_upload_large,
@@ -361,6 +369,10 @@ case_opts(ps_internal_error) ->
     #{handler => masque_stop_init_handler};
 case_opts(ps_denied) ->
     #{authenticate => fun(_Req) -> false end};
+case_opts(ip_time_exceeded) ->
+    #{handler_opts => (default_handler_opts())#{ttl_decrement => decapsulation}};
+case_opts(ip_packet_too_big) ->
+    #{handler_opts => (default_handler_opts())#{mtu => 576}};
 case_opts(bind_peer_filter) ->
     #{accept_bind => true, handler_opts => #{bind_address => {127, 0, 0, 1}}};
 case_opts(_) ->
@@ -1781,6 +1793,68 @@ ip_full_assign_set(Config) ->
     after 5000 -> ct:fail(no_v6_assign)
     end,
     close(Sess).
+
+%% RFC 9484 section 7.2: the TTL is decremented going into the tunnel,
+%% not coming out. A TTL of 1 reaches the gateway, and its reply comes
+%% back one hop down.
+ip_ttl_kept_on_decapsulation(Config) ->
+    {Sess, Addr} = connect_ip(Config),
+    ok = masque:send_ip_packet(Sess, set_ttl(icmp_echo(Addr, ?IP_GATEWAY, 8), 1)),
+    receive
+        {masque_ip_packet, Sess, Reply} ->
+            ?assertEqual(?IP_GATEWAY, ipv4_src(Reply)),
+            ?assertEqual(63, ipv4_ttl(Reply)),
+            ?assertEqual(0, masque_ip_packet:checksum(ipv4_header(Reply)))
+    after 5000 -> ct:fail(no_icmp_reply)
+    end,
+    close(Sess).
+
+%% With `ttl_decrement => decapsulation' a TTL of 1 runs out at the
+%% proxy, which answers ICMP Time Exceeded.
+ip_time_exceeded(Config) ->
+    {Sess, Addr} = connect_ip(Config),
+    ok = masque:send_ip_packet(Sess, set_ttl(ipv4_udp(Addr, {192, 0, 2, 1}, <<"ttl">>), 1)),
+    receive
+        {masque_ip_packet, Sess, Icmp} ->
+            ?assertEqual(Addr, ipv4_dst(Icmp)),
+            ?assertMatch(<<_:20/binary, 11, 0, _/binary>>, Icmp)
+    after 5000 -> ct:fail(no_time_exceeded)
+    end,
+    close(Sess).
+
+%% A packet above the proxy's `mtu' is answered with Fragmentation
+%% Needed carrying the MTU.
+ip_packet_too_big(Config) ->
+    {Sess, Addr} = connect_ip(Config),
+    ok = masque:send_ip_packet(Sess, ipv4_udp(Addr, {192, 0, 2, 1}, binary:copy(<<0>>, 600))),
+    receive
+        {masque_ip_packet, Sess, Icmp} ->
+            ?assertMatch(<<_:20/binary, 3, 4, _:16, 0:16, 576:16, _/binary>>, Icmp)
+    after 5000 -> ct:fail(no_frag_needed)
+    end,
+    close(Sess).
+
+%% RFC 9484 section 11 and 7.2.1: a source outside the assignment is
+%% dropped (BCP 38) and the drop is signalled with ICMP.
+ip_spoofed_source_gets_icmp(Config) ->
+    {Sess, _Addr} = connect_ip(Config),
+    Spoofed = {198, 51, 100, 7},
+    ok = masque:send_ip_packet(Sess, ipv4_udp(Spoofed, {192, 0, 2, 1}, <<"spoof">>)),
+    receive
+        {masque_ip_packet, Sess, Icmp} ->
+            ?assertEqual(Spoofed, ipv4_dst(Icmp)),
+            ?assertMatch(<<_:20/binary, 3, 13, _/binary>>, Icmp)
+    after 5000 -> ct:fail(no_dest_unreachable)
+    end,
+    close(Sess).
+
+set_ttl(<<Head:8/binary, _TTL, Proto, _Sum:16, Rest/binary>>, TTL) ->
+    <<Addrs:8/binary, Body/binary>> = Rest,
+    H0 = <<Head/binary, TTL, Proto, 0:16, Addrs/binary>>,
+    Sum = masque_ip_packet:checksum(H0),
+    <<Head/binary, TTL, Proto, Sum:16, Addrs/binary, Body/binary>>.
+
+ipv4_ttl(<<_:64, TTL, _/binary>>) -> TTL.
 
 connect_ip(Config) ->
     Sess = connect(Config, {'*', '*'}, #{protocol => ip}),

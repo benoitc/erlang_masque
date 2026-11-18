@@ -95,7 +95,7 @@ Change a session module when you change the wire behaviour of that cell: framing
 | `masque_compression_table` | Per-session compression table (own and peer), parity, uniqueness and ACK rules. A data structure, not a process. | you change context lifecycle rules. |
 | `masque_udp_bind_payload` | Bound UDP payload after the context id, compressed and uncompressed forms. | you change bind datagram payload encoding. |
 | `masque_ip_packet` | Read-only IP header parsing for CONNECT-IP scope checks, including IPv6 extension headers. | you change packet scope checks. |
-| `masque_icmp` | ICMPv4 and ICMPv6 error packet builders for CONNECT-IP. | you change synthesized ICMP errors. |
+| `masque_icmp` | ICMPv4 and ICMPv6 error packet builders, the echo reply for the link-local MTU check, and the per-tunnel ICMP rate limit for CONNECT-IP. | you change synthesized ICMP errors or their rate limit. |
 | `masque_uri_template` | Generic RFC 6570 subset engine used by all protocols. | you need a new template feature. |
 | `masque_uri` | UDP and TCP template facade, host and port validation, authority-form parsing for h1 CONNECT. | you change UDP/TCP target parsing. |
 | `masque_uri_ip` | CONNECT-IP template and target / ipproto parsing. | you change CONNECT-IP target parsing. |

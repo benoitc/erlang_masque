@@ -226,3 +226,64 @@ ipv6_packet(
     Plen = byte_size(Ext) + byte_size(Payload),
     <<6:4, 0:8, 0:20, Plen:16, NextHdr:8, 64:8, SA:16, SB:16, SC:16, SD:16, SE:16, SF:16, SG:16,
         SH:16, DA:16, DB:16, DC:16, DD:16, DE:16, DF:16, DG:16, DH:16, Ext/binary, Payload/binary>>.
+
+%%====================================================================
+%% RFC 9484 section 4.8: every extension header is walked
+%%====================================================================
+
+%% Mobility (135), HIP (139), Shim6 (140) and the experimental 253 and
+%% 254 use the generic extension header format.
+upper_protocol_v6_other_extensions_test() ->
+    [
+        ?assertEqual(
+            {ok, 17},
+            masque_ip_packet:upper_protocol(
+                ipv6_packet(
+                    Ext,
+                    {16#2001, 16#DB8, 0, 0, 0, 0, 0, 2},
+                    {16#2001, 16#DB8, 0, 0, 0, 0, 0, 1},
+                    <<17:8, 1:8, 0:112>>,
+                    <<>>
+                )
+            )
+        )
+     || Ext <- [135, 139, 140, 253, 254]
+    ].
+
+%%====================================================================
+%% RFC 9484 section 4.6: ICMP is always allowed by ipproto
+%%====================================================================
+
+icmp_passes_any_ipproto_test() ->
+    V4 = ipv4_packet(1, {10, 0, 0, 1}, {192, 0, 2, 1}, <<8, 0, 0, 0>>),
+    ?assertEqual(ok, masque_ip_packet:scope_check(V4, '*', 6)),
+    V6 = ipv6_packet(
+        58,
+        {16#2001, 16#DB8, 0, 0, 0, 0, 0, 2},
+        {16#2001, 16#DB8, 0, 0, 0, 0, 0, 1},
+        <<>>,
+        <<128, 0, 0, 0>>
+    ),
+    ?assertEqual(ok, masque_ip_packet:scope_check(V6, '*', 17)),
+    %% ICMPv6 behind an extension header too.
+    V6Ext = ipv6_packet(
+        60,
+        {16#2001, 16#DB8, 0, 0, 0, 0, 0, 2},
+        {16#2001, 16#DB8, 0, 0, 0, 0, 0, 1},
+        <<58:8, 0:8, 0:48>>,
+        <<128, 0, 0, 0>>
+    ),
+    ?assertEqual(ok, masque_ip_packet:scope_check(V6Ext, '*', 17)).
+
+%% Only the ICMP of the packet's own IP version counts.
+icmp_of_other_version_scoped_test() ->
+    V4 = ipv4_packet(58, {10, 0, 0, 1}, {192, 0, 2, 1}, <<>>),
+    ?assertEqual({error, scope_ipproto}, masque_ip_packet:scope_check(V4, '*', 6)),
+    V6 = ipv6_packet(
+        1,
+        {16#2001, 16#DB8, 0, 0, 0, 0, 0, 2},
+        {16#2001, 16#DB8, 0, 0, 0, 0, 0, 1},
+        <<>>,
+        <<>>
+    ),
+    ?assertEqual({error, scope_ipproto}, masque_ip_packet:scope_check(V6, '*', 17)).

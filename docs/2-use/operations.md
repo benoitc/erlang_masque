@@ -32,11 +32,11 @@ Plain `counters` sit beside the meters. `masque_metrics:backlog_drop_count/0` co
 
 | CONNECT-IP reason | Cause |
 |---|---|
-| `bcp38` | Source address outside the prefixes assigned to the tunnel. |
+| `bcp38` | Source address outside the prefixes assigned to the tunnel (proxy), or outside what the client assigned to the proxy (client with `source_filter`). |
 | `scope_target`, `scope_ipproto` | Destination or protocol outside the tunnel's target. |
 | `malformed` | Not a valid IP packet. |
-| `ttl_zero` | TTL or hop limit ran out (ICMP Time Exceeded sent). |
-| `mtu_exceeded` | Larger than `mtu` (ICMP Packet Too Big / Fragmentation Needed sent). |
+| `ttl_zero` | TTL or hop limit ran out on the way into the tunnel, or on the way out with `ttl_decrement => decapsulation` (ICMP Time Exceeded sent). |
+| `mtu_exceeded` | Larger than `mtu`, or on h3 too big for a QUIC DATAGRAM frame on the way into the tunnel (ICMP Packet Too Big / Fragmentation Needed sent). |
 | `forward_drop` | Your `forward_fun` dropped it. |
 | `other` | Any other reason passed to `emit_drop` or `{drop, Reason}`. |
 
