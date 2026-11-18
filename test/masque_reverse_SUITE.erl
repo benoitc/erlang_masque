@@ -697,7 +697,16 @@ udp_burst(Config) ->
     {ok, Stream} = masque:request_connection(Control, udp_service()),
     %% QUIC refuses a datagram it has no congestion window for. UDP may
     %% drop, so that counts as loss, not a failure (as in the load suite).
-    Sent = [masque:send(Stream, <<N:32, 0:(996 * 8)>>) || N <- lists:seq(1, 200)],
+    %% Since quic 3 the pacer refuses datagrams past its burst too, so
+    %% the 200 go out in groups of 10, 2 ms apart: the check is on the
+    %% reverse path, not on the pacer.
+    Sent = lists:append([
+        begin
+            timer:sleep(2),
+            [masque:send(Stream, <<N:32, 0:(996 * 8)>>) || N <- lists:seq(G, G + 9)]
+        end
+     || G <- lists:seq(1, 200, 10)
+    ]),
     [] = [R || R <- Sent, R =/= ok, R =/= {error, congestion_limited}],
     Got = count_datagrams(Stream, 0),
     ct:log("~p of 200 datagrams came back", [Got]),
@@ -871,7 +880,12 @@ agent_request(Listen, Mode, Test, Streams, Id) ->
     end.
 
 agent_data(Listen, echo, Test, Streams, S, Bytes) ->
-    ok = send_chunks(S, Bytes),
+    %% A UDP echo the congestion window refuses is lost, as any datagram
+    %% may be.
+    case send_chunks(S, Bytes) of
+        ok -> ok;
+        {error, congestion_limited} -> ok
+    end,
     agent_loop(Listen, echo, Test, Streams);
 agent_data(Listen, Mode, Test, Streams, S, Bytes) ->
     Acc = maps:get(S, Streams, <<>>),
