@@ -76,7 +76,7 @@ Actions run in list order. Unknown actions are ignored. A closing action ends th
 | `{send_ip_packet, Packet}` | | | yes | | IP packet to the client on context 0. No MTU check here; the built-in handler checks before it returns this. |
 | `{assign, [#ip_assignment{}]}` | | | yes | | ADDRESS_ASSIGN. Every nonzero request id must answer an open client ADDRESS_REQUEST, otherwise the whole action is skipped. Request id 0 is an unprompted assignment. |
 | `{advertise, [#ip_route{}]}` | | | yes | | ROUTE_ADVERTISEMENT. |
-| `{request_addresses, [{Version, Address, PrefixLen}]}` | | | yes | | ADDRESS_REQUEST from the proxy to the client (request ids are allocated for you). |
+| `{request_addresses, [{Version, Address, PrefixLen} \| #ip_prefix_request{}]}` | | | yes | | ADDRESS_REQUEST from the proxy to the client. Tuples get a request id allocated for you; a record keeps its own. |
 | `{icmp_error, {Kind, Spec, Invoking}}` | | | yes | | Builds an ICMP error about `Invoking` with `masque_icmp` and sends it. `Kind`/`Spec`: `dest_unreachable`/`{v4 \| v6, Code}`, `packet_too_big`/`Mtu`, `frag_needed`/`Mtu`, `time_exceeded`/`{v4 \| v6, Code}` or `v4 \| v6`. |
 | `{send_bind_packet, {IP, Port}, Payload}` | | | | yes | Datagram from `Peer` to the client, on a proxy context for that peer if one is installed, else on the client's uncompressed context, else dropped. |
 | `{compression_assign, {IP, Port}}` | | | | h3, h2 | Opens a proxy compression context for the peer and sends COMPRESSION_ASSIGN. Dropped (and counted) past `max_pending_compression_responses` or after the client closed its uncompressed context. |

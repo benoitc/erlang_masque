@@ -16,6 +16,21 @@ refuse those targets unless `allow_self` is set.
 
 -export([is_public/1, reject_requests/1, inject_packet/2, resolve_target/3]).
 -export([is_self/2]).
+-export([is_rejection/1, held_set/1]).
+%% Shared by the CONNECT-IP sessions and handlers.
+-export([
+    ttl_mode/1,
+    icmp_rate_limit/1,
+    request_entries/1,
+    answers/1,
+    report_advertise/1,
+    too_big/2,
+    time_exceeded/1,
+    source_in/2
+]).
+
+%% ICMP errors one tunnel may generate per second (and its burst).
+-define(DEFAULT_ICMP_RATE, 10).
 
 %% Interface addresses are read at most this often.
 -define(SELF_TTL_MS, 5000).
@@ -46,6 +61,131 @@ reject_one(#ip_prefix_request{request_id = Id, version = 6}) ->
         address = {0, 0, 0, 0, 0, 0, 0, 0},
         prefix_len = 128
     }.
+
+-doc """
+True for the RFC 9484 section 4.7.2 "no address" entry: an all-zero
+address with the maximum prefix length (`0.0.0.0/32`, `::/128`).
+""".
+-spec is_rejection(#ip_assignment{}) -> boolean().
+is_rejection(#ip_assignment{version = 4, address = {0, 0, 0, 0}, prefix_len = 32}) ->
+    true;
+is_rejection(#ip_assignment{version = 6, address = {0, 0, 0, 0, 0, 0, 0, 0}, prefix_len = 128}) ->
+    true;
+is_rejection(#ip_assignment{}) ->
+    false.
+
+-doc """
+The addresses an ADDRESS_ASSIGN leaves its receiver holding, ready to
+be repeated in a later one (RFC 9484 section 4.7.1: each ADDRESS_ASSIGN
+is the full set): rejection entries dropped, duplicates removed, and
+every request id set to 0 since a repeated entry answers no request.
+""".
+-spec held_set([#ip_assignment{}]) -> [#ip_assignment{}].
+held_set(Entries) ->
+    held_set(Entries, []).
+
+held_set([], Acc) ->
+    lists:reverse(Acc);
+held_set([E | Rest], Acc) ->
+    E0 = E#ip_assignment{request_id = 0},
+    case is_rejection(E) orelse lists:member(E0, Acc) of
+        true -> held_set(Rest, Acc);
+        false -> held_set(Rest, [E0 | Acc])
+    end.
+
+-doc false.
+%% Where the TTL / Hop Limit is decremented (`ttl_decrement' handler
+%% option): `encapsulation' (RFC 9484 section 7.2, the default) or
+%% `decapsulation'.
+-spec ttl_mode(map()) -> encapsulation | decapsulation.
+ttl_mode(#{ttl_decrement := decapsulation}) -> decapsulation;
+ttl_mode(_Opts) -> encapsulation.
+
+-doc false.
+%% `icmp_rate_limit' handler option: ICMP errors per second and tunnel.
+-spec icmp_rate_limit(map()) -> non_neg_integer().
+icmp_rate_limit(#{icmp_rate_limit := N}) when is_integer(N), N >= 0 -> N;
+icmp_rate_limit(_Opts) -> ?DEFAULT_ICMP_RATE.
+
+-doc false.
+%% Entries of a proxy-initiated ADDRESS_REQUEST: `{V, Addr, Pfx}'
+%% tuples get a fresh request id, `#ip_prefix_request{}' records keep
+%% theirs.
+-spec request_entries([{4 | 6, inet:ip_address(), 0..128} | #ip_prefix_request{}]) ->
+    [#ip_prefix_request{}].
+request_entries(Prefixes) ->
+    [request_entry(P) || P <- Prefixes].
+
+request_entry(#ip_prefix_request{} = R) ->
+    R;
+request_entry({V, A, P}) ->
+    #ip_prefix_request{
+        request_id = erlang:unique_integer([positive, monotonic]),
+        version = V,
+        address = A,
+        prefix_len = P
+    }.
+
+-doc false.
+%% True when a handler's result carries an `{assign, _}' action.
+-spec answers(term()) -> boolean().
+answers({ok, _HS, Actions}) when is_list(Actions) ->
+    lists:any(fun(A) -> is_tuple(A) andalso element(1, A) =:= assign end, Actions);
+answers(_) ->
+    false.
+
+-doc false.
+%% A ROUTE_ADVERTISEMENT a handler asked for could not be encoded (the
+%% routes are not ordered or overlap, RFC 9484 section 4.7.3): say so
+%% instead of dropping it silently.
+-spec report_advertise(ok | {error, term()}) -> ok.
+report_advertise({error, {bad_routes, Reason}}) ->
+    logger:warning("masque: ROUTE_ADVERTISEMENT not sent, invalid routes: ~0p", [Reason]),
+    ok;
+report_advertise(_) ->
+    ok.
+
+-doc false.
+%% True when the source address of `Packet' lies in one of `Entries'.
+-spec source_in(binary(), [#ip_assignment{}]) -> boolean().
+source_in(<<4:4, _:92, Src:32, _/binary>>, Entries) ->
+    in_entries(4, Src, 32, Entries);
+source_in(<<6:4, _:60, Src:128, _/binary>>, Entries) ->
+    in_entries(6, Src, 128, Entries);
+source_in(_Packet, _Entries) ->
+    false.
+
+in_entries(V, Src, Bits, Entries) ->
+    lists:any(
+        fun
+            (#ip_assignment{version = EV, address = A, prefix_len = P}) when EV =:= V ->
+                Shift = Bits - P,
+                (Src bsr Shift) =:= (addr_int(A) bsr Shift);
+            (_) ->
+                false
+        end,
+        Entries
+    ).
+
+addr_int({A, B, C, D}) ->
+    (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D;
+addr_int({A, B, C, D, E, F, G, H}) ->
+    (A bsl 112) bor (B bsl 96) bor (C bsl 80) bor (D bsl 64) bor
+        (E bsl 48) bor (F bsl 32) bor (G bsl 16) bor H.
+
+-doc false.
+-spec too_big(binary(), non_neg_integer()) -> binary().
+too_big(<<4:4, _/bitstring>> = Packet, Mtu) ->
+    masque_icmp:frag_needed(min(Mtu, 16#FFFF), Packet);
+too_big(Packet, Mtu) ->
+    masque_icmp:packet_too_big(Mtu, Packet).
+
+-doc false.
+-spec time_exceeded(binary()) -> binary().
+time_exceeded(<<4:4, _/bitstring>> = Packet) ->
+    masque_icmp:time_exceeded(v4, Packet);
+time_exceeded(Packet) ->
+    masque_icmp:time_exceeded(v6, Packet).
 
 -doc """
 Push an IP packet into a server session for delivery to its

@@ -84,6 +84,11 @@
     %% yet: later ones reach it only when they change.
     assign_told = false :: boolean(),
     routes_told = false :: boolean(),
+    %% What the last ADDRESS_ASSIGN this client sent left the proxy
+    %% holding (request id 0), and whether inbound packets must come
+    %% from those prefixes (`source_filter', RFC 9484 section 11).
+    sent_held = [] :: [masque_ip_capsule:address_entry()],
+    source_filter = false :: boolean(),
     %% Extra request headers prepended to the CONNECT-IP request.
     extra_headers = [] :: [{binary(), binary()}],
     %% When set, the conn is owned by a `masque_upstream_owner';
@@ -184,6 +189,7 @@ init({{Target, IPProto}, Opts, Owner}) ->
         ipproto = IPProto,
         transport = Transport,
         mtu = Mtu,
+        source_filter = maps:get(source_filter, Opts, false) =:= true,
         mode = Mode,
         rx_buf = masque_client_rx:new(),
         rx_waiters = queue:new(),
@@ -349,7 +355,8 @@ open_inner({call, From}, info, Data) ->
 open_inner({call, From}, ip_info, Data) ->
     {keep_state, Data, [
         {reply, From, #{
-            assigned => Data#data.assigned,
+            %% Rejection entries answer a request; they are not held.
+            assigned => [E || E <- Data#data.assigned, not masque_ip:is_rejection(E)],
             routes => Data#data.routes,
             mtu => Data#data.mtu,
             transport => Data#data.transport
@@ -762,7 +769,13 @@ split_authority(Bin) ->
 handle_inbound_datagram(Payload, Data) ->
     case masque_datagram:decode(Payload) of
         {ok, {?MASQUE_CONTEXT_ID_IP, IPPkt}} ->
-            deliver_packet(IPPkt, Data);
+            case source_allowed(IPPkt, Data) of
+                true ->
+                    deliver_packet(IPPkt, Data);
+                false ->
+                    masque_metrics:ip_drop_inc(bcp38),
+                    Data
+            end;
         {ok, {_OtherCtx, _}} ->
             %% Unknown context IDs are silently dropped per RFC 9484 §6.
             Data;
@@ -834,7 +847,9 @@ deliver_capsule(
             %% repeating it cannot flood the owner's mailbox.
             _ =
                 (Entries =/= Data#data.assigned orelse not Data#data.assign_told) andalso
-                    masque_client_owner:send(Owner, {masque_address_assign, self(), Entries}),
+                    masque_client_owner:send_bounded(
+                        Owner, {masque_address_assign, self(), Entries}
+                    ),
             Data#data{assigned = Entries, assign_told = true};
         {error, _} ->
             {abort, malformed_capsule}
@@ -846,10 +861,12 @@ deliver_capsule(
 ) ->
     case masque_ip_capsule:decode_address_request(Inner) of
         {ok, Entries0} ->
-            %% Keep at most 64 unanswered proxy requests; a proxy that
-            %% floods them gets the rest ignored.
+            %% Keep at most 64 unanswered proxy requests; the rest are
+            %% answered at once with the "no address" entry (RFC 9484
+            %% section 4.7.2: every request id gets an answer).
             Room = max(0, ?MAX_PEER_PENDING - map_size(Pend)),
-            Entries = lists:sublist(Entries0, Room),
+            {Entries, Extra} = lists:split(min(Room, length(Entries0)), Entries0),
+            _ = reject_now(Extra, Data),
             _ =
                 Entries =/= [] andalso
                     masque_client_owner:send(Owner, {masque_address_request, self(), Entries}),
@@ -876,7 +893,9 @@ deliver_capsule(
             %% Also a full replacement (section 4.7.3): only changes.
             _ =
                 (Entries =/= Data#data.routes orelse not Data#data.routes_told) andalso
-                    masque_client_owner:send(Owner, {masque_route_advertisement, self(), Entries}),
+                    masque_client_owner:send_bounded(
+                        Owner, {masque_route_advertisement, self(), Entries}
+                    ),
             Data#data{routes = Entries, routes_told = true};
         {error, _} ->
             {abort, malformed_capsule}
@@ -886,6 +905,15 @@ deliver_capsule(Type, Inner, #data{owner = Owner} = Data) when
 ->
     masque_client_owner:send_bounded(Owner, {masque_capsule, self(), Type, Inner}),
     Data.
+
+%% The capsule also lists what this client assigned to the proxy: an
+%% address left out of an ADDRESS_ASSIGN is withdrawn.
+reject_now([], _Data) ->
+    ok;
+reject_now(Requests, #data{sent_held = Held} = Data) ->
+    Body = masque_ip_capsule:encode_address_assign(Held ++ masque_ip:reject_requests(Requests)),
+    Cap = iolist_to_binary(masque_capsule:encode(?MASQUE_CAPSULE_ADDRESS_ASSIGN, Body)),
+    transport_send_data(Data, Cap, false).
 
 %%====================================================================
 %% Outbound control-plane
@@ -948,7 +976,10 @@ handle_assign_addresses(
             ),
             case transport_send_data(Data, Cap, false) of
                 ok ->
-                    {keep_state, Data#data{peer_pending = Pend1}, [{reply, From, ok}]};
+                    Data1 = Data#data{
+                        peer_pending = Pend1, sent_held = masque_ip:held_set(Assignments)
+                    },
+                    {keep_state, Data1, [{reply, From, ok}]};
                 {error, _} = Err ->
                     {keep_state, Data, [{reply, From, Err}]}
             end;
@@ -1178,6 +1209,11 @@ handle_recv_call(From, Timeout, #data{rx_buf = Buf} = Data) ->
                     queue:in({From, TRef}, Data#data.rx_waiters)
             }}
     end.
+
+%% RFC 9484 section 11 (BCP 38): with `source_filter', a packet from the
+%% proxy must come from a prefix this client assigned to it.
+source_allowed(_Pkt, #data{source_filter = false}) -> true;
+source_allowed(Pkt, #data{sent_held = Held}) -> masque_ip:source_in(Pkt, Held).
 
 deliver_packet(Pkt, #data{mode = message, owner = Owner} = Data) ->
     masque_client_owner:send_datagram(Owner, {masque_ip_packet, self(), Pkt}),

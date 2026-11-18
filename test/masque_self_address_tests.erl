@@ -67,7 +67,7 @@ ip_packet_to_self_dropped_test() ->
     },
     {ok, S} = masque_ip_proxy_handler:init(#{ip_target => '*', ip_ipproto => '*'}, Opts),
     Pkt = <<4:4, 5:4, 0:8, 20:16, 0:16, 0:16, 64:8, 17:8, 0:16, 10, 0, 0, 1, 8, 8, 4, 4>>,
-    {ok, _} = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
+    _ = masque_ip_proxy_handler:handle_ip_packet(Pkt, S),
     receive
         {forwarded, _} -> ?assert(false)
     after 50 -> ok

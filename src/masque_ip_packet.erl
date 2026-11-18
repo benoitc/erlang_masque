@@ -53,7 +53,9 @@ destination(_) ->
 -doc """
 Return the upper-layer protocol number, walking IPv6 extension
 headers (Hop-by-Hop 0, Routing 43, Fragment 44, Destination 60,
-AH 51) to find the first non-extension Next Header.
+AH 51, Mobility 135, HIP 139, Shim6 140 and the experimental 253
+and 254) to find the first non-extension Next Header (RFC 9484
+section 4.8).
 """.
 -spec upper_protocol(binary()) -> {ok, proto()} | {error, term()}.
 upper_protocol(Pkt) ->
@@ -237,23 +239,35 @@ in_v6_prefix(Addr, Net, Pfx) when Pfx =< 128 ->
     Mask = bnot ((1 bsl HostBits) - 1) band ((1 bsl 128) - 1),
     (AInt band Mask) =:= (NInt band Mask).
 
+%% RFC 9484 section 4.6: ICMP traffic is always allowed, whatever the
+%% `ipproto' scope (ICMP for IPv4, ICMPv6 for IPv6).
 ipproto_matches(_Packet, '*') ->
     true;
 ipproto_matches(Packet, P) when is_integer(P) ->
     case upper_protocol(Packet) of
         {ok, P} -> true;
-        {ok, _} -> false;
+        {ok, Proto} -> is_icmp(Packet, Proto);
         {error, _} -> false
     end.
 
+is_icmp(<<4:4, _/bitstring>>, 1) -> true;
+is_icmp(<<6:4, _/bitstring>>, 58) -> true;
+is_icmp(_, _) -> false.
+
 %% IPv6 extension-header chain. Each header is 8 + Hdr_Ext_Len*8 bytes
-%% with Next Header in byte 0; Fragment is fixed 8 bytes; AH uses
-%% (Hdr_Ext_Len + 2) * 4 byte units.
-walk_v6_ext(0, <<NH:8, ExtLen:8, _:6/binary, Rest/binary>>) ->
-    consume_ext(NH, ExtLen, Rest, fun walk_v6_ext/2);
-walk_v6_ext(43, <<NH:8, ExtLen:8, _:6/binary, Rest/binary>>) ->
-    consume_ext(NH, ExtLen, Rest, fun walk_v6_ext/2);
-walk_v6_ext(60, <<NH:8, ExtLen:8, _:6/binary, Rest/binary>>) ->
+%% with Next Header in byte 0 (RFC 8200 section 4.8 format, also used
+%% by Mobility, HIP, Shim6 and the experimental 253 / 254); Fragment
+%% is fixed 8 bytes; AH uses (Hdr_Ext_Len + 2) * 4 byte units.
+walk_v6_ext(Ext, <<NH:8, ExtLen:8, _:6/binary, Rest/binary>>) when
+    Ext =:= 0;
+    Ext =:= 43;
+    Ext =:= 60;
+    Ext =:= 135;
+    Ext =:= 139;
+    Ext =:= 140;
+    Ext =:= 253;
+    Ext =:= 254
+->
     consume_ext(NH, ExtLen, Rest, fun walk_v6_ext/2);
 walk_v6_ext(44, <<NH:8, _:7/binary, Rest/binary>>) ->
     walk_v6_ext(NH, Rest);

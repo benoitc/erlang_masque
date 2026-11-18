@@ -14,6 +14,10 @@
 %%%       downstream client</li>
 %%%   <li>Upstream failure (egress dead) produces a clean reject
 %%%       with no leaked ingress sessions</li>
+%%%   <li>The client's ADDRESS_ASSIGN and ROUTE_ADVERTISEMENT reaching
+%%%       the egress, the egress's ADDRESS_REQUEST reaching the client
+%%%       and its answer going back, and an empty ADDRESS_ASSIGN from
+%%%       the egress reaching the client (RFC 9484 section 4.7)</li>
 %%% </ul>
 -module(masque_chain_ip_SUITE).
 
@@ -33,7 +37,10 @@
     initial_route_advertisement_forwarded/1,
     upstream_failure_returns_reject/1,
     unprompted_address_assign_forwarded/1,
-    chained_address_request_answered/1
+    chained_address_request_answered/1,
+    client_capsules_reach_upstream/1,
+    upstream_request_reaches_client/1,
+    empty_upstream_assign_relayed/1
 ]).
 
 all() ->
@@ -41,6 +48,9 @@ all() ->
         initial_route_advertisement_forwarded,
         unprompted_address_assign_forwarded,
         chained_address_request_answered,
+        client_capsules_reach_upstream,
+        upstream_request_reaches_client,
+        empty_upstream_assign_relayed,
         upstream_failure_returns_reject
     ].
 
@@ -82,6 +92,14 @@ init_per_testcase(Case, Config) ->
                 %% Fixture that sends an unprompted ADDRESS_ASSIGN on init
                 %% so the chain's forwarding path has something to see.
                 masque_ip_unprompted_handler;
+            _ when
+                Case =:= client_capsules_reach_upstream;
+                Case =:= upstream_request_reaches_client;
+                Case =:= empty_upstream_assign_relayed
+            ->
+                %% Reports what reaches the egress and puts capsules on
+                %% the wire on request.
+                masque_ip_script_handler;
             _ ->
                 masque_ip_proxy_handler
         end,
@@ -92,6 +110,7 @@ init_per_testcase(Case, Config) ->
         key => maps:get(key, Ctx),
         ip_handler => EgressHandler,
         handler_opts => #{
+            report => self(),
             allow_private => true,
             max_assignments => 2,
             address_pool => #ip_route{
@@ -210,6 +229,69 @@ recv_assign(Sess, Timeout) ->
             recv_assign(Sess, Timeout)
     after Timeout ->
         {error, timeout}
+    end.
+
+%% RFC 9484 section 4.7: both endpoints may send every capsule, so the
+%% client's ADDRESS_ASSIGN and ROUTE_ADVERTISEMENT go through the chain.
+client_capsules_reach_upstream(Config) ->
+    {ok, Sess} = connect_ip(?config(ingress_port, Config)),
+    _ = egress_session(),
+    Route = #ip_route{
+        version = 4, start_addr = {192, 0, 2, 0}, end_addr = {192, 0, 2, 255}, ip_protocol = 0
+    },
+    Assign = #ip_assignment{request_id = 0, version = 4, address = {192, 0, 2, 0}, prefix_len = 24},
+    ok = masque:advertise_routes(Sess, [Route]),
+    ok = masque:assign_addresses(Sess, [Assign]),
+    receive
+        {script, route_advertisement, [Route]} -> ok
+    after 5000 -> ct:fail(routes_not_relayed)
+    end,
+    receive
+        {script, address_assign, [Assign]} -> ok
+    after 5000 -> ct:fail(assign_not_relayed)
+    end,
+    ok = masque:close(Sess).
+
+%% Section 4.7.2: the egress asks for an address; the request reaches
+%% the client and its answer reaches the egress under the egress's id.
+upstream_request_reaches_client(Config) ->
+    {ok, Sess} = connect_ip(?config(ingress_port, Config)),
+    Egress = egress_session(),
+    Egress ! {script_actions, [{request_addresses, [{4, {0, 0, 0, 0}, 32}]}]},
+    Id =
+        receive
+            {masque_address_request, Sess, [#ip_prefix_request{request_id = I}]} -> I
+        after 5000 -> ct:fail(request_not_relayed)
+        end,
+    Answer = #ip_assignment{
+        request_id = Id, version = 4, address = {192, 0, 2, 9}, prefix_len = 32
+    },
+    ok = masque:assign_addresses(Sess, [Answer]),
+    receive
+        {script, address_assign, [Answer]} -> ok
+    after 5000 -> ct:fail(answer_not_relayed)
+    end,
+    ok = masque:close(Sess).
+
+%% Section 4.7.1: an empty ADDRESS_ASSIGN withdraws every address, so
+%% the chain relays it too.
+empty_upstream_assign_relayed(Config) ->
+    {ok, Sess} = connect_ip(?config(ingress_port, Config)),
+    Egress = egress_session(),
+    A = #ip_assignment{request_id = 0, version = 4, address = {10, 77, 0, 9}, prefix_len = 32},
+    Egress ! {script_actions, [{assign, [A]}]},
+    {ok, A} = recv_assign(Sess, 5000),
+    Egress ! {script_actions, [{assign, []}]},
+    receive
+        {masque_address_assign, Sess, []} -> ok
+    after 5000 -> ct:fail(empty_assign_not_relayed)
+    end,
+    ok = masque:close(Sess).
+
+egress_session() ->
+    receive
+        {script, init, Pid} -> Pid
+    after 5000 -> ct:fail(no_egress_session)
     end.
 
 upstream_failure_returns_reject(Config) ->

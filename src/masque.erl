@@ -198,6 +198,10 @@ versions.
         tcp_protocol => binary(),
         %% CONNECT-IP: local send-side MTU (1280..65535, default 1500).
         mtu => 1280..65535,
+        %% CONNECT-IP: drop packets from the proxy whose source is not in
+        %% a prefix this client assigned to it (RFC 9484 section 11,
+        %% BCP 38). Default `false'.
+        source_filter => boolean(),
         %% Opt-in connection pooling. When `true', h2 / h3 attempts
         %% share a pooled upstream transport connection keyed by
         %% host/port/transport + a hash of connect-affecting opts

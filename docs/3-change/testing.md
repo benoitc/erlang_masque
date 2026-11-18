@@ -49,7 +49,7 @@ End-to-end behaviour pinned to a spec. Add a case here when you implement or fix
 | Suite | Covers |
 | --- | --- |
 | `masque_compliance_SUITE` | RFC 9298 handshake and datagrams over h3, plus h2 echo, chain and CONNECT-TCP round trips. Some cases drive `quic_h3` directly to send malformed requests. |
-| `masque_ip_compliance_SUITE` | RFC 9484 over h3 with the default IP handler |
+| `masque_ip_compliance_SUITE` | RFC 9484 on the wire over h3, h2 and h1: aborts on invalid capsules on both roles, control capsules both ways, the pending caps, the link-local echo, h3 datagram size rules; checks no server session is left behind |
 | `masque_ip_compliance_h1_SUITE` | the server-side RFC 9484 cases against an h1 listener |
 | `masque_udp_bind_compliance_SUITE` | udp-listen draft over h3 (and the h3/h2 race) |
 | `masque_udp_bind_vectors_SUITE` | Connect-UDP-Bind draft -16 wire vectors on h3, h2 and h1: hand-built requests, capsules and datagrams (one `*`, header parameters and repeats, context 0, rejections, malformed and reused ids, closed contexts) |
@@ -106,6 +106,7 @@ End-to-end behaviour pinned to a spec. Add a case here when you implement or fix
 | `masque_report_tcp_handler` | `masque_tcp_proxy_handler` that also reports its pid; supports `early_data` |
 | `masque_ip_echo_handler` | echoes IP packets; `early_routes` / `early_packet` produce output before finalize |
 | `masque_ip_unprompted_handler` | sends an unprompted ADDRESS_ASSIGN (request id 0), for chain tests |
+| `masque_ip_script_handler` | reports the client's control capsules to the test and returns the actions the test sends it (`{script_actions, Actions}`), to put any proxy-to-client capsule on the wire |
 | `masque_crash_bind_handler` | default udp-bind handler that crashes on capsule `16#ff01`; `early_assign` opens a context before finalize |
 | `masque_stop_init_handler` | `init/2` always returns `{stop, _}`, to check the client gets a reject and not a 2xx followed by a close |
 | `masque_weird_reject_handler` | rejects with a reason `masque_errors` does not know (must map to 502) |

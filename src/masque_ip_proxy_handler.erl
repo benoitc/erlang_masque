@@ -18,10 +18,18 @@ Responsibilities:
   (default 1); a further request gets the address already held.
 - Every `ADDRESS_ASSIGN` is the full set the client holds: addresses
   assigned by earlier requests are repeated with request id 0.
-- Act as a router for accepted packets: decrement the TTL /
-  Hop Limit (ICMP Time Exceeded when it runs out) and enforce
-  the `mtu` option (default 1500; ICMPv6 Packet Too Big or
-  ICMPv4 Fragmentation Needed when exceeded).
+- Act as a router for accepted packets: enforce the `mtu` option
+  (default 1500; ICMPv6 Packet Too Big or ICMPv4 Fragmentation
+  Needed when exceeded) and decrement the TTL / Hop Limit of the
+  packets it sends into the tunnel (RFC 9484 section 7.2; with
+  `ttl_decrement => decapsulation` the client's packets are
+  decremented instead, as before).
+- Answer packets it drops by policy (source, scope, destination)
+  with ICMP Destination Unreachable, rate limited by
+  `icmp_rate_limit` (default 10 per second per tunnel).
+- Answer ICMPv6 Echo Requests sent to `ff02::1` or to its
+  `link_local_address` (default `fe80::1`), so a client can check
+  the tunnel carries 1280-byte packets (RFC 9484 section 7.2).
 - Hand each accepted IP packet to the user-supplied
   `forward_fun` (default: drop).
 - Record the addresses and routes the client assigns or
@@ -43,6 +51,7 @@ serving session there and push packets back with
     handle_address_request/2,
     handle_address_assign/2,
     handle_route_advertisement/2,
+    handle_info/2,
     terminate/2
 ]).
 
@@ -54,6 +63,8 @@ serving session there and push packets back with
 -include("masque_ip.hrl").
 
 -define(DEFAULT_MTU, 1500).
+-define(DEFAULT_LINK_LOCAL, {16#FE80, 0, 0, 0, 0, 0, 0, 1}).
+-define(ALL_NODES, {16#FF02, 0, 0, 0, 0, 0, 0, 1}).
 -define(DEFAULT_MAX_ASSIGNMENTS, 1).
 %% Bound on the candidates one allocation may probe, so a large or
 %% crowded pool cannot turn an ADDRESS_REQUEST into a long scan.
@@ -77,7 +88,10 @@ serving session there and push packets back with
     %% Negotiated URI scope: target / ipproto from the request line.
     %% `'*'' on either axis means "any" and skips the per-packet check.
     target = '*' :: masque_uri_ip:ip_target(),
-    ipproto = '*' :: masque_uri_ip:ip_ipproto()
+    ipproto = '*' :: masque_uri_ip:ip_ipproto(),
+    %% Rate limit on the ICMP errors this tunnel generates, created on
+    %% first use.
+    icmp :: masque_icmp:limiter() | undefined
 }).
 
 -type ip_assignment_tuple() ::
@@ -136,12 +150,16 @@ init(Req, Opts) ->
     ResolvedRoutes = [route_for(A) || A <- Resolved],
     Target = maps:get(ip_target, Req, '*'),
     %% A hostname target is scoped to its resolved addresses only;
-    %% static routes would otherwise widen that scope.
-    Routes =
+    %% static routes would otherwise widen that scope. The list is put
+    %% in ROUTE_ADVERTISEMENT order with overlaps merged (RFC 9484
+    %% section 4.7.3), so a resolved address inside a static route
+    %% does not make the advertisement invalid.
+    Routes = masque_ip_capsule:normalize_routes(
         case is_binary(Target) of
-            true -> lists:usort(ResolvedRoutes);
-            false -> lists:usort(StaticRoutes ++ ResolvedRoutes)
-        end,
+            true -> ResolvedRoutes;
+            false -> StaticRoutes ++ ResolvedRoutes
+        end
+    ),
     IPProto = maps:get(ip_ipproto, Req, '*'),
     S = #state{
         opts = Opts,
@@ -468,55 +486,116 @@ max_prefix(6) -> 128.
 %%====================================================================
 
 handle_ip_packet(Packet, #state{opts = Opts} = S) ->
-    case accept_inbound(Packet, S) of
-        ok ->
-            route(Packet, S);
-        {drop, Reason} ->
-            emit_drop(Reason, drop_detail(Packet), Opts),
-            {ok, S}
+    case link_local_echo(Packet, Opts) of
+        {ok, Reply} ->
+            {ok, S, [{send_ip_packet, Reply}]};
+        error ->
+            case accept_inbound(Packet, S) of
+                ok ->
+                    route(Packet, S);
+                {drop, malformed} ->
+                    emit_drop(malformed, drop_detail(Packet), Opts),
+                    {ok, S};
+                {drop, Reason} ->
+                    %% RFC 9484 section 7.2.1: signal the forwarding
+                    %% error with ICMP.
+                    emit_drop(Reason, drop_detail(Packet), Opts),
+                    icmp_reply(Packet, fun() -> prohibited(Reason, Packet) end, S)
+            end
     end.
 
-%% Router duties before handing the packet on: decrement the TTL /
-%% Hop Limit and check the egress MTU. Failures drop the packet and
-%% answer the client with the matching ICMP error, unless the packet
-%% is itself an ICMP error (RFC 1122 §3.2.2, RFC 4443 §2.4 (e)).
+%% RFC 9484 section 7.2: answer echo requests sent to link-local
+%% multicast, which a peer uses to check the tunnel MTU, and to the
+%% proxy's own link-local address. They never leave the tunnel.
+link_local_echo(<<6:4, _:60, _Src:128, D:16/binary, _/binary>> = Packet, Opts) ->
+    Own = maps:get(link_local_address, Opts, ?DEFAULT_LINK_LOCAL),
+    <<A:16, B:16, C:16, E:16, F:16, G:16, H:16, I:16>> = D,
+    case {A, B, C, E, F, G, H, I} of
+        Dst when Dst =:= ?ALL_NODES; Dst =:= Own -> masque_icmp:echo_reply(Own, Packet);
+        _ -> error
+    end;
+link_local_echo(_Packet, _Opts) ->
+    error.
+
+%% Router duties before handing the packet on. RFC 9484 section 7.2:
+%% the TTL / Hop Limit is decremented when a packet goes into the
+%% tunnel, not when it comes out, so by default the client's packet
+%% keeps its TTL and only the egress MTU is checked; packets sent back
+%% into the tunnel are decremented in `into_tunnel/2'. With
+%% `ttl_decrement => decapsulation' the client's packet is decremented
+%% here instead (the behaviour before masque followed section 7.2).
+%% Failures drop the packet and answer the client with the matching
+%% ICMP error, unless the packet is itself an ICMP error (RFC 1122
+%% §3.2.2, RFC 4443 §2.4 (e)).
 route(Packet, #state{opts = Opts} = S) ->
-    case masque_ip_packet:decrement_ttl(Packet) of
-        {ok, Fwd} ->
-            Mtu = maps:get(mtu, Opts, ?DEFAULT_MTU),
-            case byte_size(Fwd) > Mtu of
-                true ->
-                    emit_drop(mtu_exceeded, drop_detail(Packet), Opts),
-                    icmp_reply(Packet, fun() -> too_big(Packet, Mtu) end, S);
-                false ->
-                    forward(Fwd, S)
-            end;
-        {error, ttl_zero} ->
-            emit_drop(ttl_zero, drop_detail(Packet), Opts),
-            icmp_reply(Packet, fun() -> time_exceeded(Packet) end, S);
-        {error, malformed} ->
-            emit_drop(malformed, drop_detail(Packet), Opts),
-            {ok, S}
+    case ttl_mode(Opts) of
+        encapsulation ->
+            check_mtu(Packet, Packet, S);
+        decapsulation ->
+            case masque_ip_packet:decrement_ttl(Packet) of
+                {ok, Fwd} ->
+                    check_mtu(Packet, Fwd, S);
+                {error, ttl_zero} ->
+                    emit_drop(ttl_zero, drop_detail(Packet), Opts),
+                    icmp_reply(Packet, fun() -> time_exceeded(Packet) end, S);
+                {error, malformed} ->
+                    emit_drop(malformed, drop_detail(Packet), Opts),
+                    {ok, S}
+            end
     end.
 
-%% The drop itself is already counted (`ttl_zero' / `mtu_exceeded').
-icmp_reply(Packet, Build, S) ->
-    case masque_icmp:is_error(Packet) of
+check_mtu(Packet, Fwd, #state{opts = Opts} = S) ->
+    Mtu = maps:get(mtu, Opts, ?DEFAULT_MTU),
+    case byte_size(Fwd) > Mtu of
         true ->
-            {ok, S};
+            emit_drop(mtu_exceeded, drop_detail(Packet), Opts),
+            icmp_reply(Packet, fun() -> too_big(Packet, Mtu) end, S);
         false ->
-            {ok, S, [{send_ip_packet, Build()}]}
+            forward(Fwd, S)
     end.
 
-too_big(<<4:4, _/bitstring>> = Packet, Mtu) ->
-    masque_icmp:frag_needed(Mtu, Packet);
-too_big(Packet, Mtu) ->
-    masque_icmp:packet_too_big(Mtu, Packet).
+ttl_mode(Opts) ->
+    masque_ip:ttl_mode(Opts).
 
-time_exceeded(<<4:4, _/bitstring>> = Packet) ->
-    masque_icmp:time_exceeded(v4, Packet);
+%% The drop itself is already counted. No ICMP error answers an ICMP
+%% error or a packet that was not sent from one host to another
+%% (RFC 1122 §3.2.2, RFC 4443 §2.4 (e)), and errors are rate limited.
+icmp_reply(Packet, Build, S) ->
+    case icmp_allowed(Packet) of
+        false ->
+            {ok, S};
+        true ->
+            case take_icmp(S) of
+                {true, S1} -> {ok, S1, [{send_ip_packet, Build()}]};
+                {false, S1} -> {ok, S1}
+            end
+    end.
+
+icmp_allowed(Packet) ->
+    masque_icmp:may_answer(Packet).
+
+take_icmp(#state{icmp = undefined, opts = Opts} = S) ->
+    take_icmp(S#state{icmp = masque_icmp:limiter(masque_ip:icmp_rate_limit(Opts))});
+take_icmp(#state{icmp = L} = S) ->
+    {Ok, L1} = masque_icmp:allow(L),
+    {Ok, S#state{icmp = L1}}.
+
+%% RFC 9484 section 7.2.1 examples: a bad source gets "source address
+%% failed ingress/egress policy" (ICMPv6 code 5), a destination or
+%% protocol outside the policy "administratively prohibited" (ICMPv6
+%% code 1, ICMPv4 code 13).
+prohibited(_Reason, <<4:4, _/bitstring>> = Packet) ->
+    masque_icmp:dest_unreachable(v4, 13, Packet);
+prohibited(bcp38, Packet) ->
+    masque_icmp:dest_unreachable(v6, 5, Packet);
+prohibited(_Reason, Packet) ->
+    masque_icmp:dest_unreachable(v6, 1, Packet).
+
+too_big(Packet, Mtu) ->
+    masque_ip:too_big(Packet, Mtu).
+
 time_exceeded(Packet) ->
-    masque_icmp:time_exceeded(v6, Packet).
+    masque_ip:time_exceeded(Packet).
 
 %% RFC 9484 §5: the proxy MUST drop packets that fail BCP-38 source
 %% filtering or fall outside the negotiated `target' / `ipproto'
@@ -553,7 +632,7 @@ forward(Packet, #state{opts = Opts} = S) ->
             case Fun(Packet, S) of
                 %% Backward-compat shapes -----------------------------
                 {reply, RepPkt, S2} ->
-                    {ok, S2, [{send_ip_packet, RepPkt}]};
+                    into_tunnel([{send_ip_packet, RepPkt}], S2);
                 {drop, S2} ->
                     emit_drop(forward_drop, drop_detail(Packet), Opts),
                     {ok, S2};
@@ -572,10 +651,56 @@ forward(Packet, #state{opts = Opts} = S) ->
                 %%   {drop, atom()}                 % telemetry only
                 {actions, Actions, S2} when is_list(Actions) ->
                     {Wire, _} = process_forward_actions(Actions, Packet, Opts),
-                    {ok, S2, Wire}
+                    into_tunnel(Wire, S2)
             end;
         error ->
             {ok, S}
+    end.
+
+%% Packets `forward_fun' sends back are forwarded into the tunnel: by
+%% default their TTL / Hop Limit is decremented now (RFC 9484 section
+%% 7.2). One that runs out is dropped and ICMP Time Exceeded goes back
+%% toward its source through `forward_fun'. ICMP errors built from an
+%% `icmp_error' action are the proxy's own and keep their TTL.
+into_tunnel(Actions, #state{opts = Opts} = S) ->
+    case ttl_mode(Opts) of
+        decapsulation ->
+            {ok, S, Actions};
+        encapsulation ->
+            {Rev, S1} = lists:foldl(fun encapsulate/2, {[], S}, Actions),
+            {ok, S1, lists:reverse(Rev)}
+    end;
+into_tunnel(Actions, S) ->
+    %% `forward_fun' replaced the handler state.
+    {ok, S, Actions}.
+
+encapsulate({send_ip_packet, Pkt} = A, {Acc, #state{opts = Opts} = S}) when is_binary(Pkt) ->
+    case masque_ip_packet:decrement_ttl(Pkt) of
+        {ok, Pkt1} ->
+            {[{send_ip_packet, Pkt1} | Acc], S};
+        {error, ttl_zero} ->
+            emit_drop(ttl_zero, drop_detail(Pkt), Opts),
+            {Acc, outbound_icmp(Pkt, fun() -> time_exceeded(Pkt) end, S)};
+        {error, malformed} ->
+            {[A | Acc], S}
+    end;
+encapsulate(A, {Acc, S}) ->
+    {[A | Acc], S}.
+
+%% An ICMP error for a source outside the tunnel goes out through
+%% `handle_info/2' and `forward_fun'.
+outbound_icmp(Pkt, Build, S) ->
+    case icmp_allowed(Pkt) of
+        false ->
+            S;
+        true ->
+            case take_icmp(S) of
+                {true, S1} ->
+                    self() ! {masque_ip_icmp, Build()},
+                    S1;
+                {false, S1} ->
+                    S1
+            end
     end.
 
 process_forward_actions(Actions, Packet, Opts) ->
@@ -666,6 +791,15 @@ handle_address_assign(Entries, #state{opts = Opts} = S) ->
 handle_route_advertisement(Routes, #state{opts = Opts} = S) ->
     invoke_lifecycle(Opts, peer_routes_advertised, #{routes => Routes}, Opts),
     {ok, S#state{peer_routes = Routes}}.
+
+%% `{masque_ip_icmp, Icmp}': an ICMP error for a packet that could not
+%% go into the tunnel (too big for the tunnel, or its TTL ran out),
+%% already rate limited by its sender. It goes back toward the packet's
+%% source, outside the tunnel, through `forward_fun'.
+handle_info({masque_ip_icmp, Icmp}, #state{} = S) when is_binary(Icmp) ->
+    forward(Icmp, S);
+handle_info(_Msg, S) ->
+    {ok, S}.
 
 terminate(_Reason, #state{assigned = Assigned, opts = Opts}) ->
     [release_one(Entry, Opts) || Entry <- Assigned],
