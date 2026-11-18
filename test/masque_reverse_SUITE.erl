@@ -765,7 +765,12 @@ stop_agent(Agent) ->
 echo_stream(S) ->
     receive
         {masque_data, S, Bytes} ->
-            ok = masque:send(S, Bytes),
+            %% A UDP echo the congestion window refuses is lost, as any
+            %% datagram may be.
+            case masque:send(S, Bytes) of
+                ok -> ok;
+                {error, congestion_limited} -> ok
+            end,
             echo_stream(S);
         {masque_closed, S, _} ->
             ok
