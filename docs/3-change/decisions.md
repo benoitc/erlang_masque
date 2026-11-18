@@ -168,9 +168,9 @@ This page records design decisions that are visible in the code, with the reason
 ### A CONNECT-TCP client paces the proxy by its owner's mailbox
 
 - **Decision.** CONNECT-TCP client sessions open their stream with `flow_control => manual`. In message mode they give credit back unless the owner has `rx_backlog` messages waiting (default 64), and hold it until the owner catches up, rechecking every 5 to 100 ms. In queue mode on h3 and h2 credit goes back when `recv/2` hands the bytes out. On h1 the socket is not re-armed instead.
-- **Why.** A byte stream cannot drop, and a message-mode owner never says when it has read a message, so before this the owner's mailbox took everything the proxy sent (32 MB in the November 2026 review). An explicit ack API would have been byte-exact but changes the API and leaves the default unbounded; the mailbox length is the bound the datagram path already uses (`masque_client_owner:send_bounded/2`).
+- **Why.** A byte stream cannot drop, and a message-mode owner never says when it has read a message, so before this the owner's mailbox took everything the proxy sent (32 MB in the November 2026 review). An explicit ack API would have been byte-exact but changes the API and leaves the default unbounded; the mailbox length is the bound the datagram path already uses (`send_bounded/2` in `masque_client_owner`).
 - **Consequences.** The bound counts every message in the owner's mailbox, not only tunnel data, so a busy owner slows its tunnels. An owner on another node is never considered behind. What waits is bounded by about `rx_backlog` chunks plus one stream window.
-- **Where.** `owner_credit/2` and `recheck/2` in `masque_tcp_client_session`, `rearm/2` in `masque_tcp_h1_client_session`, `masque_client_rx:owner_behind/2`, `masque_rx_credit`.
+- **Where.** `owner_credit/2` and `recheck/2` in `masque_tcp_client_session`, `rearm/2` in `masque_tcp_h1_client_session`, `owner_behind/2` in `masque_client_rx`, `masque_rx_credit`.
 
 ### Handler-call writes do not block the server session
 

@@ -41,6 +41,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-rebar3-otp${{ matrix.otp }}-
 
+      # A cache restored from an older key carries an older Hex registry,
+      # which does not know the newest releases of transitive deps.
+      - name: Refresh the Hex registry
+        run: rebar3 update
+
       - name: Compile (warnings as errors)
         run: rebar3 compile
 
@@ -104,6 +109,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-rebar3-netsim-
 
+      # A cache restored from an older key carries an older Hex registry,
+      # which does not know the newest releases of transitive deps.
+      - name: Refresh the Hex registry
+        run: rebar3 update
+
       - name: Compile
         run: rebar3 as test compile
 
@@ -150,6 +160,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-rebar3-lint-
 
+      # A cache restored from an older key carries an older Hex registry,
+      # which does not know the newest releases of transitive deps.
+      - name: Refresh the Hex registry
+        run: rebar3 update
+
       - name: Check formatting (erlfmt)
         run: rebar3 fmt --check
 
@@ -177,6 +192,11 @@ jobs:
           key: ${{ runner.os }}-dialyzer-otp29-${{ hashFiles('rebar.config') }}
           restore-keys: |
             ${{ runner.os }}-dialyzer-otp29-
+
+      # A cache restored from an older key carries an older Hex registry,
+      # which does not know the newest releases of transitive deps.
+      - name: Refresh the Hex registry
+        run: rebar3 update
 
       - name: Dialyzer
         run: rebar3 dialyzer
