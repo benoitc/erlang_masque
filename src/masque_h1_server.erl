@@ -193,17 +193,41 @@ dispatch_request(Conn, StreamId, Method, Path, Headers, Dispatch) ->
         false ->
             case check_request(Headers) of
                 ok ->
-                    dispatch_request_1(
-                        Conn,
-                        StreamId,
-                        Method,
-                        Path,
-                        Headers,
-                        Dispatch
-                    );
+                    case http_1_0_upgrade(Conn, StreamId, Headers) of
+                        true ->
+                            %% RFC 9110 section 7.8: a server MUST ignore
+                            %% `Upgrade' on an HTTP/1.0 request. h1 does, so
+                            %% the tunnel will never open; refuse instead of
+                            %% serving a plain request on this path.
+                            reject(Conn, StreamId, bad_request);
+                        false ->
+                            dispatch_request_1(
+                                Conn,
+                                StreamId,
+                                Method,
+                                Path,
+                                Headers,
+                                Dispatch
+                            )
+                    end;
                 {error, Reason} ->
                     reject(Conn, StreamId, Reason)
             end
+    end.
+
+%% True when the request is HTTP/1.0 and asked for an upgrade. h1
+%% 0.11.1 drops `Upgrade' from an HTTP/1.0 request (RFC 9110 section
+%% 7.8) but keeps `Connection: Upgrade', so either one is the sign, and
+%% the version is what tells us the upgrade cannot happen.
+http_1_0_upgrade(Conn, StreamId, Headers) ->
+    case masque_http:asks_upgrade(Headers) of
+        true ->
+            case h1:request_version(Conn, StreamId) of
+                {ok, {1, 0}} -> true;
+                _ -> false
+            end;
+        false ->
+            false
     end.
 
 %% RFC 9112 section 3.2 (and RFC 9298 section 3.2): more than one Host

@@ -3057,18 +3057,17 @@ client_bad_udp_responses(Config) ->
     fake_cases(
         Config,
         udp,
-        content_length_case(Config, Ack) ++
-            [
-                {{200, [Ack, {<<"content-type">>, <<"text/plain">>}]}, {error, malformed_response}},
-                {{204, [Ack]}, {error, malformed_response}},
-                {{205, [Ack]}, {error, malformed_response}},
-                {{206, [Ack]}, {error, malformed_response}},
-                {{200, []}, {error, capsule_protocol_not_acknowledged}},
-                {
-                    {200, [{<<"capsule-protocol">>, <<"?0">>}]},
-                    {error, capsule_protocol_not_acknowledged}
-                }
-            ]
+        [
+            {{200, [Ack, {<<"content-type">>, <<"text/plain">>}]}, {error, malformed_response}},
+            {{204, [Ack]}, {error, malformed_response}},
+            {{205, [Ack]}, {error, malformed_response}},
+            {{206, [Ack]}, {error, malformed_response}},
+            {{200, []}, {error, capsule_protocol_not_acknowledged}},
+            {
+                {200, [{<<"capsule-protocol">>, <<"?0">>}]},
+                {error, capsule_protocol_not_acknowledged}
+            }
+        ]
     ).
 
 client_bad_ip_responses(Config) ->
@@ -3076,11 +3075,10 @@ client_bad_ip_responses(Config) ->
     fake_cases(
         Config,
         ip,
-        content_length_case(Config, Ack) ++
-            [
-                {{204, [Ack]}, {error, malformed_response}},
-                {{200, []}, {error, capsule_protocol_missing}}
-            ]
+        [
+            {{204, [Ack]}, {error, malformed_response}},
+            {{200, []}, {error, capsule_protocol_missing}}
+        ]
     ),
     fake_script(Config, {200, [{<<"capsule-protocol">>, <<"?1;v=2">>}]}),
     {ok, Sess} = fake_connect(Config, ip),
@@ -3098,13 +3096,9 @@ client_bad_tcp_responses(Config) ->
         {{200, [{<<"capsule-protocol">>, <<"?1;x=1">>}]}, {error, {bad_response, capsule_protocol}}}
     ]).
 
-%% h2 refuses to send `content-length' on a 2xx to CONNECT (RFC 9110
-%% section 8.6), so only the h3 proxy can script it.
-content_length_case(Config, Ack) ->
-    [
-        {{200, [Ack, {<<"content-length">>, <<"0">>}]}, {error, malformed_response}}
-     || ?config(transport, Config) =:= h3
-    ].
+%% A 2xx to CONNECT with `content-length' cannot be scripted: h2 and,
+%% since quic 3.2.0, quic_h3 leave it out (RFC 9110 section 8.6). The
+%% client check is covered in `masque_http_tests'.
 
 client_h1_transfer_encoding_refused(Config) ->
     fake_cases(Config, udp, [

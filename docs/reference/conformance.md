@@ -25,14 +25,13 @@ Deviations and additions:
 - §3.1: an ICMP port unreachable from the target does not close the tunnel; datagrams are unreliable and the target may come back. Other socket errors close it.
 - §6.1: a packet dropped because it is above the path MTU (Don't Fragment set) is not answered with an ICMP Packet Too Big towards the client.
 - §3.2: an h1 request with `Upgrade: connect-udp` but no `Connection: Upgrade` or no `Capsule-Protocol: ?1` is answered 501 (`bad_protocol`), where the RFC suggests 400.
-- An HTTP/1.0 request with `Upgrade` is treated as an upgrade (RFC 9110 §7.8 says to ignore it): the h1 dependency does not tell the listener the request version.
 - ECN: the proxy's UDP sockets leave the ECN field at Not-ECT and do not relay the client's marks.
 
 ## RFC 9297: HTTP Datagrams and the Capsule Protocol
 
 | Section | Requirement | Behaviour in masque | Module |
 | --- | --- | --- | --- |
-| §2, §2.1 | HTTP/3 datagrams carry a quarter stream id; a malformed or too large one is an `H3_DATAGRAM_ERROR` connection error | Handled by `quic_h3`, which drops such a datagram instead (see deviations). | `quic_h3` (dependency) |
+| §2, §2.1 | HTTP/3 datagrams carry a quarter stream id; a malformed or too large one is an `H3_DATAGRAM_ERROR` connection error | Handled by `quic_h3` (since quic 3.1.3): a datagram without a valid quarter stream id closes the connection with `H3_DATAGRAM_ERROR`; one for a valid but unknown stream is dropped. | `quic_h3` (dependency) |
 | §2.1.1 | `SETTINGS_H3_DATAGRAM = 1` | The h3 listener merges `h3_datagram => 1` into its settings; h3 clients refuse a peer without it (`no_h3_datagram`). | `masque_server`, `masque_client_session`, `masque_ip_client_session` |
 | §3.2 | Capsule framing: type, length, value | Encoding and decoding go through `quic_h3_capsule`, wrapped by `masque_capsule`. h2 and h1 sessions use `h2_capsule` and `h1_capsule`. | `masque_capsule` |
 | §3.2 | The Capsule Protocol is not used with `Content-Length`, `Content-Type` or `Transfer-Encoding`; a 204, 205 or 206 response to a capsule-protocol request is malformed | Listeners refuse a request with `capsule-protocol: ?1` and one of these fields with 400 (`bad_request`). Clients refuse such a 2xx or 101, and a 204, 205 or 206 (`malformed_response`), on UDP, IP and capsule-framed TCP. Listeners only put these fields on rejections. | `masque_http`, listeners, client sessions |
@@ -43,7 +42,6 @@ Deviations and additions:
 Deviations:
 - §2: an HTTP/3 datagram for a CONNECT-TCP stream, which does not use datagrams, is dropped instead of closing the connection with `H3_DATAGRAM_ERROR`.
 - §3.3: a capsule of an unknown type larger than `max_capsule_size` aborts the stream like any other oversized capsule, instead of being skipped.
-- §2.1: `quic_h3` (quic 3.1.2) drops an HTTP/3 datagram that is too short for a quarter stream id, or whose quarter stream id is above 2^60-1, instead of closing the connection with `H3_DATAGRAM_ERROR`. The fix belongs in erlang_quic.
 
 ## RFC 9484: Proxying IP in HTTP
 
@@ -107,10 +105,8 @@ Deviations:
 | §9.3.6 | CONNECT to `host:port`; a 2xx turns the connection into a tunnel | Classic CONNECT-TCP on h1: the listener parses the authority-form target (IPv6 in brackets); the client treats any 2xx as success. `proxy_authorization` is sent as `Proxy-Authorization` on this path only, and refused if it contains CR or LF. | `masque_h1_server`, `masque_tcp_h1_client_session`, `masque_tcp_h1_server_session`, `masque_uri` |
 | §7.2 with RFC 9112 §3.2.3 | `Host` matches the CONNECT target | The h1 listener refuses a missing or different `Host` with 400 (`bad_host`). | `masque_h1_server` |
 | §7.2 with RFC 9112 §3.2 | A request with more than one `Host` is a 400 | The h1 listener refuses it before routing (`bad_request`). | `masque_h1_server` |
-| §7.8 | Upgrade needs `Connection: Upgrade`; a 101 names the protocol | The h1 listener requires the token (`bad_protocol` otherwise); every h1 client checks `Connection: Upgrade` and a single `Upgrade` with its token on the 101 (`bad_upgrade_response`). | `masque_h1_server`, `masque_http`, h1 client sessions |
+| §7.8 | Upgrade needs `Connection: Upgrade`; a 101 names the protocol; a server ignores `Upgrade` on an HTTP/1.0 request | The h1 listener requires the token (`bad_protocol` otherwise); every h1 client checks `Connection: Upgrade` and a single `Upgrade` with its token on the 101 (`bad_upgrade_response`). An HTTP/1.0 request that carried `Upgrade` is answered 400 (`bad_request`): h1 0.11.1 ignores the field on HTTP/1.0, and the listener reads the request version with `h1:request_version/2`. | `masque_h1_server`, `masque_http`, h1 client sessions |
 | §7.6.3 | `Via` records the hops | Chain handlers add their pseudonym to `via` on the upstream request, with the received-protocol of the request they got (`3`, `2` or `1.1`), and refuse a request that already names them (508, `loop_detected`). | `masque_chain_handler` |
-
-Deviation: an `Upgrade` on an HTTP/1.0 request is not ignored (§7.8), because the h1 dependency does not expose the request version; see RFC 9298 above.
 
 A rejected h1 request is answered with `connection: close` and the connection is closed; the code cites RFC 9931 (updates RFC 9298) for this.
 
@@ -150,7 +146,7 @@ masque implements draft-ietf-httpbis-connect-tcp-18 (in the RFC Editor queue) in
 | §4.1: race address families (Happy Eyeballs) | In capsule framing the default handler resolves both families and races them (RFC 8305 order, 250 ms apart); losing connections are closed before any payload. Raw framing dials the first address, as before. | `masque_tcp_dial`, `masque_tcp_proxy_handler` |
 | §4.2: 4xx for refused requests, 5xx for failed connections | Malformed requests get 400, 404 or 405. In capsule framing a target the policy refuses gets 403, a connection timeout 504, and any other failed connection 502. Raw framing keeps 502 for all three. | `masque_tcp_proxy_handler`, `masque_errors` |
 | §4.3: 100 (Continue) when the proxy accepts a request | Every capsule-framed request gets 100 before the target is dialed, on all three transports. Raw requests get it only when they carry `Expect: 100-continue`. The client skips interim responses. | TCP server sessions, TCP client sessions |
-| §4.3: `Proxy-Status` on success and failure; no trailers | `proxy-status: masque` on the 2xx or 101 of a capsule tunnel; rejections carry it as described under RFC 9209. No trailers are sent. Received trailers are malformed: quic_h3 closes the connection (`H3_FRAME_UNEXPECTED`) on HEADERS after a CONNECT request; h2 resets a tunnel stream that gets them after the 2xx, and passes on ones sent before it, which abort the tunnel (`trailers_received`). | TCP sessions, transports |
+| §4.3: `Proxy-Status` on success and failure; no trailers | `proxy-status: masque` on the 2xx or 101 of a capsule tunnel; rejections carry it as described under RFC 9209. No trailers are sent. Received trailers are malformed: quic_h3 closes the connection (`H3_FRAME_UNEXPECTED`) on HEADERS after a CONNECT request; h2 resets a tunnel stream that gets them after the 2xx and, since h2 0.18.1, tells the session, which resets the target (`peer_reset`); it passes on ones sent before the 2xx, which abort the tunnel (`trailers_received`). | TCP sessions, transports |
 | §5.2: a client falls back from classic CONNECT | An h1 client in raw framing that gets 501, or 426 with `Upgrade: connect-tcp`, retries once in capsule framing on the default template and remembers the proxy (by host and port, until the node restarts) so later tunnels skip the refused CONNECT. | `masque_tcp_h1_client_session` |
 | §8.1.1: the interop token is `connect-tcp-12` | Listeners accept `connect-tcp-12` and always frame it in capsules with the permanent codes. The client sends it with `tcp_protocol => <<"connect-tcp-12">>`. | listeners, TCP client sessions |
 | Drafts -09 and -10: tokens `connect-tcp-08` and `connect-tcp-07`, codes `0x2028d7f0` and `0x2028d7f1` | Listeners accept both tokens and use the provisional codes for them; the client uses them with `tcp_protocol => <<"connect-tcp-08">>` or `<<"connect-tcp-07">>`. | `masque_tcp_capsule`, listeners, TCP client sessions |
@@ -166,7 +162,6 @@ Deviations and open points:
 - h1 in raw framing cannot half-close: OTP `ssl` drops the connection on the peer's `close_notify`, so a FIN in either direction ends the tunnel. Capsule framing can.
 - An h1 abort over TLS is sent as a TLS close with `close_notify`, because OTP `ssl` has no way to close a connection without it. A capsule peer still sees the abort, since the stream ends without `FINAL_DATA`; masque's client reports it as `peer_reset`. A peer that relies only on the missing `close_notify` sees a clean close, and so does any peer when the abort follows a `FINAL_DATA` already sent (`shutdown_write/1`) or when the tunnel is a classic CONNECT.
 - After a peer's QUIC RESET_STREAM on an h3 tunnel, quic_h3 resets the listener's half of the stream with `H3_REQUEST_INCOMPLETE`, not `H3_CONNECT_ERROR`; the target still gets an RST.
-- h2 resets a tunnel stream that receives trailers after the 2xx (`PROTOCOL_ERROR`) without telling the session, which then ends only at its idle timeout or its next failed write. Fixing that needs erlang_h2 to report the reset to the stream handler.
 - Only h1 clients fall back from classic CONNECT: on h3 and h2 masque's client always uses Extended CONNECT.
 - The TLS early data options of §4.1 are all optional, and masque does nothing specific for them: whether early data is used is left to the transport options. `RESET_STREAM_AT` (§3.5) is not used.
 - Happy Eyeballs applies to the default resolver and to a `resolver` that returns a list; with `family` set, only that family is dialed.

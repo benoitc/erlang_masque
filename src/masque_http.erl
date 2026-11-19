@@ -25,6 +25,7 @@
     capsule_response/2,
     capsule_request/1,
     upgrade_ack/2,
+    asks_upgrade/1,
     count/2
 ]).
 
@@ -79,16 +80,19 @@ capsule_request(Headers) ->
 %% Whether a 101 confirms the upgrade to `Token'.
 -spec upgrade_ack(headers(), binary()) -> boolean().
 upgrade_ack(Headers, Token) ->
-    ConnTokens = [
-        lower(string:trim(T, both, " \t"))
-     || V <- values(<<"connection">>, Headers),
-        T <- binary:split(V, <<",">>, [global])
-    ],
-    lists:member(<<"upgrade">>, ConnTokens) andalso
+    lists:member(<<"upgrade">>, connection_tokens(Headers)) andalso
         case values(<<"upgrade">>, Headers) of
             [Upgrade] -> lower(string:trim(Upgrade, both, " \t")) =:= lower(Token);
             _ -> false
         end.
+
+%% Whether a request asks for a protocol upgrade: an `Upgrade' field,
+%% or `upgrade' among the `Connection' options (h1 drops `Upgrade' from
+%% an HTTP/1.0 request, RFC 9110 section 7.8, and keeps `Connection').
+-spec asks_upgrade(headers()) -> boolean().
+asks_upgrade(Headers) ->
+    values(<<"upgrade">>, Headers) =/= [] orelse
+        lists:member(<<"upgrade">>, connection_tokens(Headers)).
 
 %% How many field lines named `Name' the message has.
 -spec count(binary(), headers()) -> non_neg_integer().
@@ -98,6 +102,13 @@ count(Name, Headers) ->
 %%====================================================================
 %% Internal
 %%====================================================================
+
+connection_tokens(Headers) ->
+    [
+        lower(string:trim(T, both, " \t"))
+     || V <- values(<<"connection">>, Headers),
+        T <- binary:split(V, <<",">>, [global])
+    ].
 
 has_body_fields(Headers) ->
     lists:any(fun(Name) -> values(Name, Headers) =/= [] end, ?BODY_FIELDS).

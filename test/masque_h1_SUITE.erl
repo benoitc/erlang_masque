@@ -31,6 +31,7 @@
     handshake_rejected_wrong_upgrade/1,
     handshake_rejected_no_host_header/1,
     handshake_rejected_without_connection_upgrade/1,
+    handshake_rejected_http_1_0_upgrade/1,
     init_handler_stop_produces_502_not_101/1,
     idle_timeout_closes_tunnel/1,
     drain_flag_rejects_new_tunnels/1,
@@ -50,6 +51,7 @@ all() ->
         handshake_rejected_wrong_upgrade,
         handshake_rejected_no_host_header,
         handshake_rejected_without_connection_upgrade,
+        handshake_rejected_http_1_0_upgrade,
         init_handler_stop_produces_502_not_101,
         idle_timeout_closes_tunnel,
         drain_flag_rejects_new_tunnels,
@@ -288,6 +290,29 @@ handshake_rejected_without_connection_upgrade(Config) ->
     ),
     ?assertNotEqual(101, Status).
 
+handshake_rejected_http_1_0_upgrade(Config) ->
+    %% RFC 9110 sec 7.8: a server ignores `Upgrade' on an HTTP/1.0
+    %% request. h1 0.11.1 drops the field and the listener reads the
+    %% request version, so the tunnel never opens: the request is
+    %% answered 400, not 101 or a plain 2xx. The same request in
+    %% HTTP/1.1 still upgrades.
+    Port = ?config(port, Config),
+    Headers = [
+        {<<"host">>, <<"localhost">>},
+        {<<"connection">>, <<"Upgrade">>},
+        {<<"upgrade">>, <<"connect-udp">>},
+        {<<"capsule-protocol">>, <<"?1">>}
+    ],
+    Path = <<"/.well-known/masque/udp/127.0.0.1/5353/">>,
+    ?assertEqual(
+        400,
+        direct_request(Port, <<"GET">>, Path, Headers, <<"1.0">>)
+    ),
+    ?assertEqual(
+        101,
+        direct_request(Port, <<"GET">>, Path, Headers, <<"1.1">>)
+    ).
+
 init_handler_stop_produces_502_not_101(Config) ->
     %% A handler that refuses in `init/2' must reach the client as a
     %% 502 response on the un-upgraded connection, not as a 101 +
@@ -484,6 +509,9 @@ collect(Sess, N, Acc) ->
 %% server writes the expected status without going through the h1
 %% state machine or the masque client.
 direct_request(Port, Method, Path, Headers) ->
+    direct_request(Port, Method, Path, Headers, <<"1.1">>).
+
+direct_request(Port, Method, Path, Headers, Version) ->
     {ok, Sock} = ssl:connect(
         "127.0.0.1",
         Port,
@@ -500,7 +528,7 @@ direct_request(Port, Method, Path, Headers) ->
         Method,
         <<" ">>,
         Path,
-        <<" HTTP/1.1\r\n">>,
+        <<" HTTP/", Version/binary, "\r\n">>,
         HdrLines,
         <<"\r\n">>
     ]),

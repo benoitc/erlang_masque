@@ -46,7 +46,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
   combined names must be updated. `instrument` now also starts
   `hackney`. h2 0.15.1 notices a vanished peer at once instead of after
   about five seconds.
-- masque now uses quic 3.1.2, h2 0.18.0 and h1 0.11.0. Connections use less CPU and memory, idle ones most of all, and drop old encryption keys as soon as they are no longer needed. Over HTTP/3, a peer
+- masque now uses quic 3.2.0, h2 0.18.3 and h1 0.11.1. Connections use less CPU and memory, idle ones most of all, and drop old encryption keys as soon as they are no longer needed. An HTTP/3 peer that sends a malformed datagram now has its connection closed, as RFC 9297 requires. Over HTTP/3, a peer
   certificate issued for another purpose than TLS is now refused. A UDP
   payload is checked against what the network path carries now rather than
   the peer's advertised limit, so a large payload on a new connection is
@@ -171,6 +171,11 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - Connect-UDP-Bind: an HTTP/2 or HTTP/3 client crashed when a context-zero
   datagram arrived in a capsule on an unscoped bind, instead of closing the
   tunnel.
+- An HTTP/1.0 request that asks for an upgrade is answered 400. It used to be
+  upgraded, although HTTP/1.0 has no upgrade mechanism (RFC 9110).
+- CONNECT-TCP over HTTP/2: a client that sent trailers after the 2xx left the
+  tunnel and its target open until the idle timeout. The tunnel now ends at
+  once and the target is reset.
 - Reverse connect: a bad accept template is refused when the channel opens,
   not at the first accept, and a decline that arrives after the proxy timed
   the request out no longer ends the control channel. An agent that ignored

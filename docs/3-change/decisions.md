@@ -197,7 +197,7 @@ This page records design decisions that are visible in the code, with the reason
 
 - **Decision.** A CONNECT-TCP session ends gracefully (FINAL_DATA, then FIN) only on `close/1` or a clean owner exit (`normal`, `shutdown`, `{shutdown, _}`). Every other end, `abort/1` included, is an abort: H3_CONNECT_ERROR on h3, CONNECT_ERROR on h2, a close without FINAL_DATA on h1 over TLS and a TCP reset on cleartext h1.
 - **Why.** draft-ietf-httpbis-connect-tcp-18 section 3.5: a graceful TCP close MUST be relayed as one, anything else SHOULD be an abrupt close. OTP `ssl` always sends close_notify, so over TLS an abort is a close without FINAL_DATA.
-- **Consequences.** A chain hop aborts its upstream when its downstream ended for any reason but `normal`. Open: erlang_h2 resets a tunnel stream that receives trailers after the 2xx without telling the session, which then waits for its idle timeout; this needs an h2 release.
+- **Consequences.** A chain hop aborts its upstream when its downstream ended for any reason but `normal`. A tunnel stream that receives trailers after the 2xx is reset by h2, which tells the session since h2 0.18.1.
 - **Where.** `abort/1` in `masque`, `clean_exit/1` in `masque_client_owner`, the TCP client sessions, `terminate/2` in `masque_chain_handler`.
 
 ### Unanswered reverse requests expire quietly on the agent
