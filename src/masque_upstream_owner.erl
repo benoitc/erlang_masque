@@ -24,7 +24,9 @@
 %%%   `{ok, StreamId, Conn}`.
 %%% - Sessions call `release_stream/2` on normal or abnormal exit.
 %%%   The owner also monitors every session so a crashed session
-%%%   releases its slot automatically.
+%%%   releases its slot automatically. A reset uses the transport's
+%%%   default code, or the `reset_code' the session passed in its
+%%%   acquire options (CONNECT-TCP: `H3_CONNECT_ERROR', `CONNECT_ERROR').
 %%% - When the last stream releases, the owner arms an idle timer
 %%%   (default 30 s, override via `idle_timeout_ms`). Expiry ->
 %%%   close the conn and stop normally; the pool registry
@@ -73,7 +75,10 @@
 
 -record(ref, {
     session_pid :: pid(),
-    monitor_ref :: reference()
+    monitor_ref :: reference(),
+    %% The error code a reset of this stream carries (`reset_code' in
+    %% the acquire options), or `undefined' for the transport default.
+    reset_code :: term()
 }).
 
 -define(DEFAULT_H3_MAX_STREAMS, 100).
@@ -430,19 +435,21 @@ code_change(_OldVsn, S, _Extra) ->
 %% Open a stream for a session, or report that a stream limit refused
 %% it: ours (`refused') or the peer's (`peer_refused'). h2 says
 %% `max_streams_exceeded' where QUIC says `stream_limit'.
-try_acquire({Headers, SessionPid, ReqOpts}, #state{refs = Refs, max_streams = MS} = S) ->
+try_acquire({Headers, SessionPid, ReqOpts0}, #state{refs = Refs, max_streams = MS} = S) ->
+    ResetCode = maps:get(reset_code, ReqOpts0, undefined),
+    ReqOpts = maps:remove(reset_code, ReqOpts0),
     case at_capacity(maps:size(Refs), MS) of
         true ->
             {refused, S};
         false ->
             case issue_request(S, Headers, ReqOpts) of
                 {ok, StreamId} ->
-                    case register_stream(StreamId, SessionPid, S) of
+                    case register_stream(StreamId, SessionPid, ResetCode, S) of
                         {ok, S1} ->
                             S2 = report_capacity(cancel_idle(S1)),
                             {reply, {ok, StreamId, S#state.conn}, S2};
                         {error, _} = Err ->
-                            _ = cancel_transport_stream(S, StreamId),
+                            _ = cancel_transport_stream(S, StreamId, ResetCode),
                             {reply, Err, S}
                     end;
                 {error, R} when
@@ -560,9 +567,12 @@ resolve_max_streams(_, _Mod, _Conn, dynamic) ->
 issue_request(#state{mod = Mod, conn = Conn}, Headers, Opts) ->
     Mod:request(Conn, Headers, Opts).
 
-cancel_transport_stream(#state{mod = Mod, conn = Conn}, StreamId) ->
+cancel_transport_stream(#state{mod = Mod, conn = Conn}, StreamId, Code) ->
     try
-        Mod:cancel(Conn, StreamId)
+        case Code of
+            undefined -> Mod:cancel(Conn, StreamId);
+            _ -> Mod:cancel(Conn, StreamId, Code)
+        end
     catch
         _:_ -> ok
     end.
@@ -570,6 +580,7 @@ cancel_transport_stream(#state{mod = Mod, conn = Conn}, StreamId) ->
 register_stream(
     StreamId,
     SessionPid,
+    ResetCode,
     #state{mod = Mod, conn = Conn, refs = Refs} = S
 ) ->
     %% `drain_buffer => false' tells the transport to re-emit any
@@ -596,7 +607,8 @@ register_stream(
                     StreamId,
                     #ref{
                         session_pid = SessionPid,
-                        monitor_ref = MonRef
+                        monitor_ref = MonRef,
+                        reset_code = ResetCode
                     },
                     Refs
                 )
@@ -610,12 +622,12 @@ drop_stream(StreamId, S) ->
 
 drop_stream(StreamId, #state{refs = Refs} = S, How) ->
     case maps:take(StreamId, Refs) of
-        {#ref{monitor_ref = MRef}, Refs1} ->
+        {#ref{monitor_ref = MRef, reset_code = Code}, Refs1} ->
             _ = erlang:demonitor(MRef, [flush]),
             _ = unset_stream_handler(S, StreamId),
             _ =
                 case How of
-                    reset -> cancel_transport_stream(S, StreamId);
+                    reset -> cancel_transport_stream(S, StreamId, Code);
                     graceful -> ok
                 end,
             retry_waiting(report_capacity(maybe_arm_idle(S#state{refs = Refs1})));

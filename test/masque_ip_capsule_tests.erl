@@ -387,3 +387,69 @@ address_assign_non_canonical_zero_prefix_test() ->
     ),
     Ok = <<1, 4:8, 0:8, 0:8, 0:8, 0:8, 0:8>>,
     ?assertMatch({ok, [_]}, masque_ip_capsule:decode_address_assign(Ok)).
+
+%%====================================================================
+%% normalize_routes/1 (RFC 9484 section 4.7.3)
+%%====================================================================
+
+r(V, S, E, P) ->
+    #ip_route{version = V, start_addr = S, end_addr = E, ip_protocol = P}.
+
+normalize_sorts_by_version_protocol_start_test() ->
+    In = [
+        r(6, {16#2001, 0, 0, 0, 0, 0, 0, 0}, {16#2001, 0, 0, 0, 0, 0, 0, 16#FF}, 0),
+        r(4, {10, 0, 2, 0}, {10, 0, 2, 255}, 17),
+        r(4, {10, 0, 0, 0}, {10, 0, 0, 255}, 17),
+        r(4, {192, 0, 2, 0}, {192, 0, 2, 255}, 0)
+    ],
+    Out = masque_ip_capsule:normalize_routes(In),
+    ?assertEqual(
+        [
+            r(4, {192, 0, 2, 0}, {192, 0, 2, 255}, 0),
+            r(4, {10, 0, 0, 0}, {10, 0, 0, 255}, 17),
+            r(4, {10, 0, 2, 0}, {10, 0, 2, 255}, 17),
+            r(6, {16#2001, 0, 0, 0, 0, 0, 0, 0}, {16#2001, 0, 0, 0, 0, 0, 0, 16#FF}, 0)
+        ],
+        Out
+    ),
+    _ = masque_ip_capsule:encode_route_advertisement(Out).
+
+%% An address route inside a static route, and two adjacent ranges,
+%% become one range each.
+normalize_merges_overlapping_and_adjacent_test() ->
+    In = [
+        r(4, {0, 0, 0, 0}, {255, 255, 255, 255}, 0),
+        r(4, {93, 184, 216, 34}, {93, 184, 216, 34}, 0),
+        r(6, {16#2001, 0, 0, 0, 0, 0, 0, 0}, {16#2001, 0, 0, 0, 0, 0, 0, 9}, 6),
+        r(6, {16#2001, 0, 0, 0, 0, 0, 0, 10}, {16#2001, 0, 0, 0, 0, 0, 0, 20}, 6)
+    ],
+    ?assertError(_, masque_ip_capsule:encode_route_advertisement(In)),
+    Out = masque_ip_capsule:normalize_routes(In),
+    ?assertEqual(
+        [
+            r(4, {0, 0, 0, 0}, {255, 255, 255, 255}, 0),
+            r(6, {16#2001, 0, 0, 0, 0, 0, 0, 0}, {16#2001, 0, 0, 0, 0, 0, 0, 20}, 6)
+        ],
+        Out
+    ),
+    _ = masque_ip_capsule:encode_route_advertisement(Out).
+
+%% A protocol-0 range covers every protocol: the part of a protocol
+%% range inside it is removed, the rest kept.
+normalize_trims_ranges_covered_by_protocol_zero_test() ->
+    In = [
+        r(4, {10, 0, 0, 100}, {10, 0, 0, 200}, 0),
+        r(4, {10, 0, 0, 0}, {10, 0, 0, 255}, 17),
+        r(4, {10, 0, 0, 150}, {10, 0, 0, 160}, 6),
+        r(4, {10, 0, 0, 9}, {10, 0, 0, 1}, 6)
+    ],
+    Out = masque_ip_capsule:normalize_routes(In),
+    ?assertEqual(
+        [
+            r(4, {10, 0, 0, 100}, {10, 0, 0, 200}, 0),
+            r(4, {10, 0, 0, 0}, {10, 0, 0, 99}, 17),
+            r(4, {10, 0, 0, 201}, {10, 0, 0, 255}, 17)
+        ],
+        Out
+    ),
+    _ = masque_ip_capsule:encode_route_advertisement(Out).

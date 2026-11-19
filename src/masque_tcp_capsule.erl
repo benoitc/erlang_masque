@@ -84,9 +84,10 @@ client_protocol(Opts) ->
 %% makes a SHOULD; `capsule' and `raw' fix it.
 -spec request_framing(auto | raw | capsule, [{binary(), binary()}]) -> raw | capsule.
 request_framing(auto, Headers) ->
-    case lists:keyfind(<<"capsule-protocol">>, 1, Headers) of
-        {_, <<"?1">>} -> capsule;
-        _ -> raw
+    %% A Structured Field Boolean (RFC 9297 section 3.4).
+    case masque_http:capsule_protocol(Headers) of
+        true -> capsule;
+        false -> raw
     end;
 request_framing(raw, _Headers) ->
     raw;

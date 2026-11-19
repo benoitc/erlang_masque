@@ -175,3 +175,63 @@ icmp4(Type) ->
 
 icmp6(Type) ->
     <<6:4, 0:8, 0:20, 8:16, 58, 64, 0:128, 0:128, Type, 0, 0:48>>.
+
+%%====================================================================
+%% Echo reply (RFC 9484 section 7.2 MTU check), rate limit, may_answer
+%%====================================================================
+
+-define(LL, {16#FE80, 0, 0, 0, 0, 0, 0, 1}).
+
+v6_echo_request(Src, Dst, Data) ->
+    Body = <<128, 0, 0:16, 7:16, 1:16, Data/binary>>,
+    Len = byte_size(Body),
+    S = ip6(Src),
+    D = ip6(Dst),
+    Csum = masque_ip_packet:checksum(<<S/binary, D/binary, Len:32, 0:24, 58, Body/binary>>),
+    <<Type:8, Code:8, 0:16, Rest/binary>> = Body,
+    <<6:4, 0:8, 0:20, Len:16, 58, 64, S/binary, D/binary, Type, Code, Csum:16, Rest/binary>>.
+
+ip6(T) -> <<<<X:16>> || X <- tuple_to_list(T)>>.
+
+echo_reply_to_all_nodes_test() ->
+    Src = {16#FE80, 0, 0, 0, 0, 0, 0, 2},
+    %% 1232 bytes of data: a 1280-byte packet.
+    Req = v6_echo_request(Src, {16#FF02, 0, 0, 0, 0, 0, 0, 1}, binary:copy(<<$x>>, 1232)),
+    ?assertEqual(1280, byte_size(Req)),
+    {ok, Reply} = masque_icmp:echo_reply(?LL, Req),
+    ?assertEqual(1280, byte_size(Reply)),
+    <<6:4, _:28, Len:16, 58, _:8, RS:16/binary, RD:16/binary, 129, 0, _:16, 7:16, 1:16, _/binary>> =
+        Reply,
+    ?assertEqual(ip6(?LL), RS),
+    ?assertEqual(ip6(Src), RD),
+    <<_:40/binary, Msg/binary>> = Reply,
+    ?assertEqual(
+        0, masque_ip_packet:checksum(<<RS/binary, RD/binary, Len:32, 0:24, 58, Msg/binary>>)
+    ).
+
+echo_reply_ignores_other_packets_test() ->
+    ?assertEqual(error, masque_icmp:echo_reply(?LL, <<4:4, 0:4>>)),
+    Reply = <<6:4, 0:8, 0:20, 8:16, 58, 64, 0:256, 129, 0, 0:48>>,
+    ?assertEqual(error, masque_icmp:echo_reply(?LL, Reply)).
+
+limiter_allows_burst_then_refuses_test() ->
+    L0 = masque_icmp:limiter(3),
+    {true, L1} = masque_icmp:allow(L0),
+    {true, L2} = masque_icmp:allow(L1),
+    {true, L3} = masque_icmp:allow(L2),
+    ?assertMatch({false, _}, masque_icmp:allow(L3)),
+    ?assertMatch({false, _}, masque_icmp:allow(masque_icmp:limiter(0))).
+
+may_answer_test() ->
+    V4 = fun(Src, Dst) ->
+        <<16#45, 0, 20:16, 0:32, 64, 17, 0:16, (list_to_binary(tuple_to_list(Src)))/binary,
+            (list_to_binary(tuple_to_list(Dst)))/binary>>
+    end,
+    ?assert(masque_icmp:may_answer(V4({10, 0, 0, 1}, {8, 8, 8, 8}))),
+    ?assertNot(masque_icmp:may_answer(V4({10, 0, 0, 1}, {224, 0, 0, 1}))),
+    ?assertNot(masque_icmp:may_answer(V4({10, 0, 0, 1}, {255, 255, 255, 255}))),
+    ?assertNot(masque_icmp:may_answer(V4({0, 0, 0, 0}, {8, 8, 8, 8}))),
+    V6 = fun(Src, Dst) -> <<6:4, 0:28, 0:16, 17, 64, (ip6(Src))/binary, (ip6(Dst))/binary>> end,
+    ?assert(masque_icmp:may_answer(V6(?LL, {16#2001, 16#DB8, 0, 0, 0, 0, 0, 1}))),
+    ?assertNot(masque_icmp:may_answer(V6(?LL, {16#FF02, 0, 0, 0, 0, 0, 0, 1}))),
+    ?assertNot(masque_icmp:may_answer(V6({0, 0, 0, 0, 0, 0, 0, 0}, ?LL))).

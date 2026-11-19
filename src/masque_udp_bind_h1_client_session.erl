@@ -484,7 +484,7 @@ handle_assign_compression(From, {IP, Port}, Data) ->
     Tuple = {family_of(IP), IP, Port},
     case
         masque_compression_table:open_compressed(
-            Data#data.own_table, Tuple
+            Data#data.own_table, Tuple, Data#data.peer_table
         )
     of
         {ok, Entry, T2} ->
@@ -975,14 +975,7 @@ parse_status(_) ->
 %% RFC 9110 section 7.8: a 101 names the protocol switched to in
 %% `Upgrade' and carries `Connection: upgrade'.
 is_upgrade_ack(Headers) ->
-    Upgrade = proplists:get_value(<<"upgrade">>, Headers, <<>>),
-    Connection = proplists:get_value(<<"connection">>, Headers, <<>>),
-    Tokens = [
-        string:trim(T)
-     || T <- binary:split(string:lowercase(Connection), <<",">>, [global])
-    ],
-    string:lowercase(Upgrade) =:= <<"connect-udp">> andalso
-        lists:member(<<"upgrade">>, Tokens).
+    masque_http:upgrade_ack(Headers, ?MASQUE_CONNECT_UDP_PROTOCOL).
 
 parse_header_line(Line) ->
     case binary:split(Line, <<":">>) of

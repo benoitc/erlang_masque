@@ -203,11 +203,12 @@ parse_path_query(Bin) ->
         throw:bad_segment -> {error, bad_segment}
     end.
 
-%% RFC 6570 §1.2: URI templates use only ASCII characters; non-ASCII
-%% input must be rejected (clients are expected to %-encode anything
-%% else before forming the template).
+%% RFC 6570 section 1.2 and RFC 9484 section 3: URI templates use only
+%% visible ASCII (0x21 to 0x7E); controls, space, DEL and non-ASCII
+%% input are rejected (clients are expected to %-encode anything else
+%% before forming the template).
 check_ascii(<<>>) -> ok;
-check_ascii(<<C, Rest/binary>>) when C =< 16#7F -> check_ascii(Rest);
+check_ascii(<<C, Rest/binary>>) when C >= 16#21, C =< 16#7E -> check_ascii(Rest);
 check_ascii(_) -> throw(bad_template).
 
 parse_segments(<<>>, Acc, Out) ->

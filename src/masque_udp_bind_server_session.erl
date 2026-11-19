@@ -7,8 +7,9 @@
 %%% Responsibilities:
 %%%
 %%% - Run the handler's `init/2` and splice the resulting
-%%%   `{response_headers, _}` action into the 2xx response so the
-%%%   proxy emits `Connect-UDP-Bind: ?1` and `Proxy-Public-Address`.
+%%%   `{response_headers, _}` action into the 2xx response. The
+%%%   session always adds `Connect-UDP-Bind: ?1` and refuses with 500
+%%%   when the handler gives no valid `Proxy-Public-Address`.
 %%% - Own the per-session compression tables (own + peer, via
 %%%   `masque_compression_table`).
 %%% - Drain capsules off the request stream and dispatch
@@ -34,8 +35,9 @@
 %%% - `{compression_assign, {IP, Port}}` opens a mapping on the
 %%%   own table. At most `max_pending_compression_responses`
 %%%   (default 16) of them wait for a response at once; beyond
-%%%   that, and after the client closed its uncompressed context
-%%%   (post-close prohibition), the assign is dropped.
+%%%   that, for a tuple the client already opened, and while the
+%%%   client's uncompressed context is closed (post-close
+%%%   prohibition), the assign is dropped.
 %%% - Dropped datagrams and assigns are counted with
 %%%   `masque_metrics:bind_drop_inc/1`.
 %%%
@@ -101,7 +103,10 @@
 }).
 
 -define(DEFAULT_MAX_PENDING_RESPONSES, 16).
+-define(DEFAULT_MAX_CONTEXTS, 1024).
 -define(H3_INTERNAL_ERROR, 16#102).
+%% The handler gave no usable `Proxy-Public-Address' list.
+-define(NO_PUBLIC_ADDRESS_STATUS, 500).
 
 -define(PROXY_ROLE, proxy).
 
@@ -153,7 +158,25 @@ handle_continue_inner(start, {starting, Args}) ->
             {stop, {shutdown, Reason}, S}
     end.
 
-start(
+start(#{handler := Handler, handler_opts := HOpts, req := Req} = Args) ->
+    process_flag(trap_exit, true),
+    case init_handler(Handler, Req, HOpts) of
+        {ok, HState, Actions} ->
+            {HandlerHeaders, OtherActions} = take_response_headers(Actions),
+            case masque_uri_udp_bind:bind_response_headers(HandlerHeaders) of
+                {ok, PublicAddrs, Headers} ->
+                    start_bound(Args, HState, OtherActions, PublicAddrs, Headers);
+                {error, Why} ->
+                    %% Draft -16 section 7: no bind without a public
+                    %% address to advertise.
+                    try_callback(Handler, terminate, [{no_public_address, Why}, HState]),
+                    {stop, {reject, {other, ?NO_PUBLIC_ADDRESS_STATUS}}}
+            end;
+        {stop, Reason} ->
+            {stop, Reason}
+    end.
+
+start_bound(
     #{
         conn := Conn,
         stream_id := StreamId,
@@ -161,81 +184,71 @@ start(
         handler := Handler,
         handler_opts := HOpts,
         req := Req
-    } = Args
+    } = Args,
+    HState,
+    OtherActions,
+    PublicAddrs,
+    Headers
 ) ->
-    process_flag(trap_exit, true),
     Router = maps:get(router, Args, undefined),
     RouterRef =
         case Router of
             undefined -> undefined;
             _ -> erlang:monitor(process, Router)
         end,
-    MaxCap = maps:get(
-        max_capsule_size,
-        HOpts,
-        ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE
-    ),
+    MaxCap = maps:get(max_capsule_size, HOpts, ?MASQUE_DEFAULT_MAX_CAPSULE_SIZE),
     BindScope = maps:get(bind, Req, unscoped),
-    case init_handler(Handler, Req, HOpts) of
-        {ok, HState, Actions} ->
-            {Headers, OtherActions} = take_response_headers(Actions),
-            PublicAddrs = read_public_addresses(Headers),
-            Families = lists:usort([
-                family_of(IP)
-             || {IP, _P} <- PublicAddrs
-            ]),
-            TableOpts = #{
-                advertised_families => Families,
-                max_entries =>
-                    maps:get(
-                        max_compression_contexts,
-                        HOpts,
-                        1024
-                    )
-            },
-            State = #state{
-                transport = Transport,
-                conn = Conn,
-                stream_id = StreamId,
-                router = Router,
-                handler = Handler,
-                idle_ms = maps:get(idle_timeout_ms, HOpts, ?DEFAULT_IDLE_MS),
-                h_state = HState,
-                req = Req,
-                bind_scope = BindScope,
-                public_addresses = PublicAddrs,
-                own_table = masque_compression_table:new_own(
-                    ?PROXY_ROLE,
-                    TableOpts
-                ),
-                peer_table = masque_compression_table:new_peer(
-                    ?PROXY_ROLE,
-                    TableOpts
-                ),
-                max_cap = MaxCap,
-                pending_actions = OtherActions,
-                resp_headers = Headers,
-                router_ref = RouterRef,
-                max_pending = maps:get(
-                    max_pending_compression_responses,
-                    HOpts,
-                    ?DEFAULT_MAX_PENDING_RESPONSES
-                )
-            },
-            case Router of
-                undefined ->
-                    %% h2: no router, finalize now.
-                    case finalize(State) of
-                        {ok, S2} -> {ok, S2};
-                        {stop, Reason, S2} -> {stop, Reason, S2};
-                        {error, S2} -> {stop, stream_dead, S2}
-                    end;
-                _ ->
-                    {ok, State}
+    Families = lists:usort([
+        family_of(IP)
+     || {IP, _P} <- PublicAddrs
+    ]),
+    State = #state{
+        transport = Transport,
+        conn = Conn,
+        stream_id = StreamId,
+        router = Router,
+        handler = Handler,
+        idle_ms = maps:get(idle_timeout_ms, HOpts, ?DEFAULT_IDLE_MS),
+        h_state = HState,
+        req = Req,
+        bind_scope = BindScope,
+        public_addresses = PublicAddrs,
+        own_table = masque_compression_table:new_own(
+            ?PROXY_ROLE,
+            table_opts(max_compression_contexts_out, Families, HOpts)
+        ),
+        peer_table = masque_compression_table:new_peer(
+            ?PROXY_ROLE,
+            table_opts(max_compression_contexts_in, Families, HOpts)
+        ),
+        max_cap = MaxCap,
+        pending_actions = OtherActions,
+        resp_headers = Headers,
+        router_ref = RouterRef,
+        max_pending = maps:get(
+            max_pending_compression_responses,
+            HOpts,
+            ?DEFAULT_MAX_PENDING_RESPONSES
+        )
+    },
+    case Router of
+        undefined ->
+            %% h2: no router, finalize now.
+            case finalize(State) of
+                {ok, S2} -> {ok, S2};
+                {stop, Reason, S2} -> {stop, Reason, S2};
+                {error, S2} -> {stop, stream_dead, S2}
             end;
-        {stop, Reason} ->
-            {stop, Reason}
+        _ ->
+            {ok, State}
     end.
+
+%% `max_compression_contexts_in' bounds the contexts the client opens
+%% (peer table), `max_compression_contexts_out' the ones we open (own
+%% table); each falls back to `max_compression_contexts'.
+table_opts(Key, Families, HOpts) ->
+    Default = maps:get(max_compression_contexts, HOpts, ?DEFAULT_MAX_CONTEXTS),
+    #{advertised_families => Families, max_entries => maps:get(Key, HOpts, Default)}.
 
 %% Send the 2xx (with the handler's extra headers), claim the stream,
 %% run the handler's init actions, then replay the handler messages
@@ -650,7 +663,7 @@ install_peer_assign(Assign, #state{own_table = OT} = S) ->
         {ok, T2} ->
             ack_peer_assign(
                 Assign#compression_assign.context_id,
-                S#state{peer_table = T2}
+                S#state{peer_table = T2, own_table = reopened(Assign, OT)}
             );
         {ok, {conflict, close_proxy_id, OwnId}, T2} ->
             %% The client assigned a tuple we already opened: keep
@@ -672,6 +685,13 @@ install_peer_assign(Assign, #state{own_table = OT} = S) ->
                 malformed -> reset_and_stop(malformed_capsule, S)
             end
     end.
+
+%% Draft -16 section 4: the client may close its uncompressed context
+%% and open another; once it is open again, so is compression.
+reopened(#compression_assign{ip_version = 0}, OT) ->
+    masque_compression_table:mark_uncompressed_open(OT);
+reopened(_Assign, OT) ->
+    OT.
 
 ack_peer_assign(Id, S) ->
     Bytes = iolist_to_binary(
@@ -910,7 +930,7 @@ open_compression(IP, Port, #state{own_table = OT} = S) ->
         false ->
             case
                 masque_compression_table:open_compressed(
-                    OT, {family_of(IP), IP, Port}
+                    OT, {family_of(IP), IP, Port}, S#state.peer_table
                 )
             of
                 {ok, Entry, OT2} ->
@@ -932,9 +952,20 @@ forget_context(Id, #state{own_table = OT, peer_table = PT} = S) ->
         {ok, OT2} ->
             S#state{own_table = OT2};
         {error, _} ->
+            Uncompressed = is_uncompressed(PT, Id),
             case masque_compression_table:install_close(PT, Close) of
-                {ok, PT2} -> S#state{peer_table = PT2};
-                {error, _} -> S
+                {ok, PT2} when Uncompressed ->
+                    %% We closed the client's uncompressed context: the
+                    %% post-close prohibition applies as after its own
+                    %% CLOSE (draft -16 section 3.1).
+                    S#state{
+                        peer_table = PT2,
+                        own_table = masque_compression_table:mark_uncompressed_closed(OT)
+                    };
+                {ok, PT2} ->
+                    S#state{peer_table = PT2};
+                {error, _} ->
+                    S
             end
     end.
 
@@ -1179,12 +1210,6 @@ take_response_headers([{response_headers, Pairs} | Rest], Hdrs, Other) ->
     take_response_headers(Rest, lists:reverse(Pairs) ++ Hdrs, Other);
 take_response_headers([X | Rest], Hdrs, Other) ->
     take_response_headers(Rest, Hdrs, [X | Other]).
-
-read_public_addresses(Headers) ->
-    case masque_uri_udp_bind:parse_proxy_public_address(Headers) of
-        {ok, Addrs} -> Addrs;
-        {error, _} -> []
-    end.
 
 advertised_families(#state{public_addresses = Addrs}) ->
     lists:usort([family_of(IP) || {IP, _} <- Addrs]).

@@ -66,7 +66,7 @@ sequenceDiagram
 
 ## Dependency contracts
 
-These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 3.1.2, `h2` 0.18.0, `h1` (`erlang_h1`) 0.11.0 and `instrument` 2.0.0.
+These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 3.2.0, `h2` 0.18.3, `h1` (`erlang_h1`) 0.11.1 and `instrument` 2.0.0.
 
 ### quic_h3 (package `quic`)
 
@@ -135,7 +135,8 @@ Client calls: `h1_client:connect/3`, `h1:wait_connected/2`, `h1:upgrade/4` retur
 Assumptions:
 
 - The dispatch `handler` fun runs in a spawned process per request and receives plain header names (`host`, `connection`, `upgrade`), which `masque_h1_server` compares case-insensitively.
-- `accept_upgrade/3` writes the 101 and `accept_connect/3` the 200, and both move the socket's controlling process to the caller, which is the session. `Buffer` holds bytes already read past the header block.
+- `h1:request_version/2` (0.11.1) returns the HTTP version a request arrived with; the listener uses it to refuse HTTP/1.0 requests on upgrade paths with 400.
+- `accept_upgrade/3` writes the 101 and `accept_connect/3` the 200, and both move the socket's controlling process to the caller, which is the session. `Buffer` holds bytes already read past the header block. It returns `{error, no_upgrade_header}` when the `Upgrade` header is absent, which is how h1 answers an HTTP/1.0 request that carried one (h1 0.11.1 ignores the field, RFC 9110 §7.8).
 - `h1_capsule:decode/1` returns `{ok, _, _}` or `{more, _}` in practice. Its spec also allows `{error, _}`, which the h1 sessions do not handle.
 
 ## When you bump a dependency

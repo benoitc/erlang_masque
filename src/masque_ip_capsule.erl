@@ -30,6 +30,7 @@ this into an H3_MESSAGE_ERROR stream reset per RFC 9297 §3.3.
 ]).
 
 -export([encode/2, decode_body/2]).
+-export([normalize_routes/1]).
 
 -include("masque_ip.hrl").
 
@@ -351,6 +352,83 @@ decode_route_entries(<<Ver:8, _/binary>>, _Acc) when Ver =/= 4, Ver =/= 6 ->
     throw(bad_ip_version);
 decode_route_entries(_, _Acc) ->
     throw(truncated).
+
+-doc """
+Put `Routes` in the form a ROUTE_ADVERTISEMENT requires (RFC 9484
+section 4.7.3): sorted by IP version, IP protocol and start address,
+overlapping or adjacent ranges of the same version and protocol
+merged, and the parts of a non-zero protocol range that a protocol-0
+range of the same version already covers removed. Ranges whose start
+is after their end are dropped. The result always passes
+`encode_route_advertisement/1`.
+""".
+-spec normalize_routes([route_entry()]) -> [route_entry()].
+normalize_routes(Routes) ->
+    Ranges = lists:sort([
+        {V, P, route_int(S), route_int(E)}
+     || #ip_route{version = V, ip_protocol = P, start_addr = S, end_addr = E} <- Routes,
+        S =< E
+    ]),
+    Merged = merge_ranges(Ranges, []),
+    Trimmed = lists:sort(trim_covered(Merged)),
+    [
+        #ip_route{
+            version = V,
+            ip_protocol = P,
+            start_addr = int_route(V, S),
+            end_addr = int_route(V, E)
+        }
+     || {V, P, S, E} <- Trimmed
+    ].
+
+%% Sorted input: a range that starts at most one past the previous
+%% end of the same (version, protocol) extends it.
+merge_ranges([], Acc) ->
+    lists:reverse(Acc);
+merge_ranges([{V, P, S, E} | Rest], [{V, P, PS, PE} | Acc]) when S =< PE + 1 ->
+    merge_ranges(Rest, [{V, P, PS, max(PE, E)} | Acc]);
+merge_ranges([R | Rest], Acc) ->
+    merge_ranges(Rest, [R | Acc]).
+
+trim_covered(Ranges) ->
+    Zeros = [R || {_, 0, _, _} = R <- Ranges],
+    lists:flatmap(
+        fun
+            ({_, 0, _, _} = R) ->
+                [R];
+            ({V, P, S, E}) ->
+                Cover = [{ZS, ZE} || {ZV, 0, ZS, ZE} <- Zeros, ZV =:= V],
+                [{V, P, PS, PE} || {PS, PE} <- subtract_ranges(S, E, Cover)]
+        end,
+        Ranges
+    ).
+
+%% `Cover' is sorted and disjoint.
+subtract_ranges(S, E, []) ->
+    [{S, E}];
+subtract_ranges(S, E, [{_ZS, ZE} | Zs]) when ZE < S ->
+    subtract_ranges(S, E, Zs);
+subtract_ranges(S, E, [{ZS, _ZE} | _]) when ZS > E ->
+    [{S, E}];
+subtract_ranges(S, E, [{ZS, ZE} | Zs]) ->
+    Before = [{S, ZS - 1} || ZS > S],
+    After =
+        case ZE < E of
+            true -> subtract_ranges(ZE + 1, E, Zs);
+            false -> []
+        end,
+    Before ++ After.
+
+route_int({A, B, C, D}) ->
+    (A bsl 24) bor (B bsl 16) bor (C bsl 8) bor D;
+route_int({A, B, C, D, E, F, G, H}) ->
+    (A bsl 112) bor (B bsl 96) bor (C bsl 80) bor (D bsl 64) bor
+        (E bsl 48) bor (F bsl 32) bor (G bsl 16) bor H.
+
+int_route(4, N) ->
+    {(N bsr 24) band 16#FF, (N bsr 16) band 16#FF, (N bsr 8) band 16#FF, N band 16#FF};
+int_route(6, N) ->
+    list_to_tuple([(N bsr Shift) band 16#FFFF || Shift <- [112, 96, 80, 64, 48, 32, 16, 0]]).
 
 %%====================================================================
 %% Internal — ROUTE_ADVERTISEMENT validation

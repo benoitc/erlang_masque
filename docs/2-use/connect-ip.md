@@ -12,7 +12,7 @@ sequenceDiagram
     C->>P: ADDRESS_REQUEST
     P-->>C: ADDRESS_ASSIGN (from address_pool)
     C->>P: IP packet (datagram, context 0)
-    Note over P: source in assigned prefix?<br/>destination in scope?<br/>TTL, MTU
+    Note over P: source in assigned prefix?<br/>destination in scope?<br/>MTU
     P->>N: forward_fun(Packet)
     N-->>P: reply
     P-->>C: IP packet
@@ -52,7 +52,7 @@ Calls:
 | `masque:request_addresses(Sess, [{Version, Address, PrefixLen}])` | `{ok, RequestIds}`. The answer arrives as `masque_address_assign`. |
 | `masque:assign_addresses(Sess, [#ip_assignment{}])` | `ok`. Nonzero request ids must answer an ADDRESS_REQUEST the proxy sent you, otherwise `{error, {no_such_pending_request, Id}}`. |
 | `masque:advertise_routes(Sess, [#ip_route{}])` | `ok`. |
-| `masque:ip_info(Sess)` | `#{assigned, routes, mtu, transport}`: the last assignment and routes received. |
+| `masque:ip_info(Sess)` | `#{assigned, routes, mtu, transport}`: the addresses the last ADDRESS_ASSIGN left you holding (rejection entries are not listed) and the last routes received. |
 
 Messages to the application owner:
 
@@ -65,13 +65,16 @@ Messages to the application owner:
 {masque_closed,              Sess, Reason}
 ```
 
-Both sides may send all three control capsules (RFC 9484 section 5), so a site-to-site peer can assign addresses and advertise routes to the proxy as well.
+Both sides may send all three control capsules (RFC 9484 section 5), so a site-to-site peer can assign addresses and advertise routes to the proxy as well. Each `masque_address_assign` is the full list: an address missing from it is withdrawn. Answer every `masque_address_request` with `assign_addresses/2`; the session keeps 64 of the proxy's requests waiting for you and answers the rest at once with the "no address" entry.
+
+When you assign prefixes to the proxy, you know which sources its packets may use. Pass `source_filter => true` to `connect/3` to drop inbound packets from other sources (RFC 9484 section 11, BCP 38); they count as `bcp38` drops. Without it, packets reach you unchecked and the check is yours.
 
 Things the client enforces:
 
 - `capsule_protocol => false` is refused with `{error, {invalid_opts, capsule_protocol_required_for_ip}}`.
 - A custom `uri_template` must be an absolute URI, otherwise `{error, {bad_template, absolute_uri_required}}`. The default is `https://<proxy>/.well-known/masque/ip/{target}/{ipproto}/`.
-- On h3 the tunnel is refused with `{error, {mtu_too_low, Got, 1280}}` when the connection cannot carry 1280-byte datagrams (RFC 9484 section 8). h2 and h1 carry packets in capsules and are exempt.
+- On h3 the tunnel is refused with `{error, {mtu_too_low, Got, 1280}}` when the connection cannot carry 1280-byte datagrams (RFC 9484 section 7.2). h2 and h1 carry packets in capsules and are exempt. The client does not send the ICMPv6 echo probe of section 7.2; send it yourself to `ff02::1` if you need it, the default proxy handler answers.
+- A malformed control capsule, an empty ADDRESS_REQUEST or an unordered ROUTE_ADVERTISEMENT from the proxy aborts the tunnel.
 
 ## Server
 
@@ -101,6 +104,9 @@ Things the client enforces:
 | `allowed_source_prefixes` | `[]` | Extra `{Version, Address, PrefixLen}` prefixes packets may come from, besides the assigned ones. Use it when the client's addresses are not assigned by the proxy. |
 | `allow_ip` | accept all | `fun({IpTarget, IpProto}) -> boolean()`, called in `accept/1`; `false` answers 403. |
 | `mtu` | `1500` | Largest packet forwarded; larger ones get an ICMP error. |
+| `ttl_decrement` | `encapsulation` | Where the TTL / hop limit is decremented. `encapsulation` (RFC 9484 section 7.2): on packets going into the tunnel. `decapsulation`: on the client's packets, as masque did before. See [forwarding](#forwarding). |
+| `icmp_rate_limit` | `10` | ICMP errors one tunnel may generate per second (the burst is the same). `0` sends none. |
+| `link_local_address` | `fe80::1` | The proxy's own address in the tunnel: echo requests to it or to `ff02::1` are answered from it. |
 | `allow_private` | `false` | Lets the tunnel reach non-public destinations. It does not relax the source check. See [target scoping](#target-scoping). |
 | `allow_self`, `self_addresses` | `false`, `[]` | Packets to the proxy's own addresses are dropped unless `allow_self`. |
 | `forward_fun` | none (drop) | What to do with accepted packets. See [forwarding](#forwarding). |
@@ -119,7 +125,7 @@ handler_opts => #{address_pool => [{4, {10,200,0,0}, 16}, {6, {16#2001,16#db8,0,
 
 Each ADDRESS_ASSIGN the handler sends is the full set the client holds (RFC 9484 section 4.7.1): the entries answering this request, under their request ids, then every address assigned earlier, with request id 0. Asking for IPv6 after IPv4 gives back both, so treat each `masque_address_assign` as the new complete list.
 
-Assignments are registered in `masque_ip_session_registry`, which also keeps sessions that share a pool from getting the same block. An exhausted pool answers with the RFC 9484 "no address" entry, and so does a pool where no free block turns up within a bounded number of probes. A tunnel holds at most `max_assignments` blocks per version (1 by default), so one client cannot drain a shared pool. The server session keeps at most 64 unanswered request ids per tunnel on every transport; extra requests are answered with "no address" at once.
+Assignments are registered in `masque_ip_session_registry`, which also keeps sessions that share a pool from getting the same block. An exhausted pool answers with the RFC 9484 "no address" entry, and so does a pool where no free block turns up within a bounded number of probes. A tunnel holds at most `max_assignments` blocks per version (1 by default), so one client cannot drain a shared pool. The server session keeps at most 64 unanswered request ids per tunnel on every transport; extra requests are answered with "no address" at once, along with the addresses the client holds. Every request id gets an answer (RFC 9484 section 4.7.2): a handler without `handle_address_request/2`, or an `{assign, _}` that leaves ids out, has those ids answered with "no address" by the session.
 
 ### Target scoping
 
@@ -132,16 +138,22 @@ The handler lets a tunnel reach only what its target names:
 | host name | every resolved address is public, or `allow_private` | its resolved addresses (static `routes` do not widen this) |
 | address | public, or `allow_private` | that address |
 
-Whatever the target, a non-public destination is dropped unless `allow_private` is set. A refused target answers 403. Packets must also match the requested `ipproto`, and their source must lie inside a prefix assigned to this tunnel or in `allowed_source_prefixes` (BCP 38); before any assignment every other packet is dropped. On h3, a tunnel whose datagrams cannot carry a 1280-byte packet is refused with 502 (RFC 9484 section 9.1). Each drop is counted by reason (`bcp38`, `scope_target`, `scope_ipproto`, `malformed`), see [operations](operations.md#drop-counters).
+Whatever the target, a non-public destination is dropped unless `allow_private` is set. A refused target answers 403. Packets must also match the requested `ipproto` (ICMP and ICMPv6 always pass, RFC 9484 section 4.6), and their source must lie inside a prefix assigned to this tunnel or in `allowed_source_prefixes` (BCP 38); before any assignment every other packet is dropped. On h3, a tunnel whose datagrams cannot carry a 1280-byte packet is refused with 502 (RFC 9484 section 7.2). Each drop is counted by reason (`bcp38`, `scope_target`, `scope_ipproto`, `malformed`), see [operations](operations.md#drop-counters), and answered with ICMP Destination Unreachable (ICMPv4 code 13; ICMPv6 code 5 for a bad source, code 1 otherwise) within `icmp_rate_limit`.
+
+ICMPv6 echo requests sent to `ff02::1` or to `link_local_address` are answered before these checks, so a client can check the tunnel carries 1280-byte packets (RFC 9484 section 7.2).
 
 ### Forwarding
 
 For each accepted packet the handler acts as a router, then calls `forward_fun`:
 
-1. Decrements the IPv4 TTL (fixing the header checksum) or the IPv6 hop limit. At zero the packet is dropped (`ttl_zero`) and the client gets ICMP Time Exceeded.
-2. Compares the size with `mtu`. A larger packet is dropped (`mtu_exceeded`) and the client gets ICMPv4 Fragmentation Needed or ICMPv6 Packet Too Big carrying the MTU.
-3. Never answers an ICMP error with another ICMP error.
-4. Calls `forward_fun(Packet, State)` with the decremented packet. `State` is the handler's own state: give it back unchanged unless you replace the handler.
+1. Compares the size with `mtu`. A larger packet is dropped (`mtu_exceeded`) and the client gets ICMPv4 Fragmentation Needed or ICMPv6 Packet Too Big carrying the MTU.
+2. Never answers an ICMP error with another ICMP error, and rate limits the errors it sends (`icmp_rate_limit`).
+3. Calls `forward_fun(Packet, State)` with the packet as the client sent it. `State` is the handler's own state: give it back unchanged unless you replace the handler.
+4. Decrements the TTL (fixing the IPv4 header checksum) or hop limit of the packets `forward_fun` sends back into the tunnel (`{reply, _, _}` and `{send_ip_packet, _}`). One that runs out is dropped (`ttl_zero`) and ICMP Time Exceeded for its source goes to `forward_fun`. Packets built by an `{icmp_error, _}` action are the proxy's own and keep their TTL.
+
+RFC 9484 section 7.2 has endpoints decrement on encapsulation, not on decapsulation. With `ttl_decrement => decapsulation` the handler decrements the client's packet before step 1 instead (at zero it is dropped and the client gets Time Exceeded) and sends replies as they are, as masque did before.
+
+`forward_fun` also receives the ICMP errors for packets that could not go into the tunnel: their source is on your side. They arrive through the handler's `handle_info({masque_ip_icmp, Icmp}, State)` and are passed to `forward_fun` without checks.
 
 `forward_fun` returns one of:
 
@@ -165,7 +177,7 @@ forward(Pkt, S) ->
 
 ### Chained CONNECT-IP
 
-`masque_chain_handler` relays CONNECT-IP to an upstream proxy. Packets go both ways; the upstream's ROUTE_ADVERTISEMENT and unprompted ADDRESS_ASSIGN (request id 0) are passed to the client. A client ADDRESS_REQUEST is sent upstream and the answer is relayed back under the client's request ids; if the upstream cannot take the request, the client gets "no address" at once. The chain hop does not register addresses in its own registry. See [relay](relay.md).
+`masque_chain_handler` relays CONNECT-IP to an upstream proxy. Packets go both ways, and so do the control capsules: the upstream's ROUTE_ADVERTISEMENT and every ADDRESS_ASSIGN (an empty one too, it withdraws everything) are passed to the client, the client's ADDRESS_ASSIGN and ROUTE_ADVERTISEMENT go upstream. A client ADDRESS_REQUEST is sent upstream and the answer is relayed back under the client's request ids; if the upstream cannot take the request, the client gets "no address" at once, with the addresses it already holds. An upstream ADDRESS_REQUEST goes to the client under the upstream's ids and the client's answer goes back. The chain hop does not register addresses in its own registry. See [relay](relay.md).
 
 ## Plumbing for external consumers
 
@@ -182,7 +194,9 @@ end.
 
 Other calls: `register/5` (returns `{error, conflict}` on overlap), `release/3,4`, `release_pid/1`, `all/0`. Entries of a session that dies are removed automatically.
 
-**Push a packet to the client.** `masque_ip:inject_packet(SessionPid, Packet)` is an asynchronous cast accepted by the h3, h2 and h1 IP sessions, sent like a `{send_ip_packet, _}` action. On h3 a packet injected before the 2xx is held and sent after it. There is no MTU check on this path.
+**Push a packet to the client.** `masque_ip:inject_packet(SessionPid, Packet)` is an asynchronous cast accepted by the h3, h2 and h1 IP sessions, sent like a `{send_ip_packet, _}` action. On h3 a packet injected before the 2xx is held and sent after it. The session decrements its TTL first, as a router does on encapsulation (not with `ttl_decrement => decapsulation`); one that runs out is dropped (`ttl_zero`).
+
+**Get the ICMP errors for your packets.** On h3 a packet, injected or sent by the handler, that does not fit a QUIC DATAGRAM frame is dropped (`mtu_exceeded`, RFC 9484 section 10.1). For it, and for an injected packet whose TTL ran out, the session sends its handler `{masque_ip_icmp, Icmp}`: an ICMP Packet Too Big / Fragmentation Needed or Time Exceeded addressed to the packet's source, within `icmp_rate_limit`. The default handler passes it to `forward_fun`; a handler of your own gets it in `handle_info/2`.
 
 **Watch events.** `lifecycle_fun => fun(Event, Detail) -> _ end` in `handler_opts`:
 

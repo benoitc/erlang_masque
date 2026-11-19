@@ -81,6 +81,8 @@
     h2_tcp_continue_then_refused_target/1,
     h3_tcp_target_reset_resets_tunnel/1,
     h2_tcp_target_reset_resets_tunnel/1,
+    h3_tcp_pooled_abort_resets_target/1,
+    h2_tcp_pooled_abort_resets_target/1,
     h3_tcp_client_fin_half_closes/1,
     h2_tcp_client_fin_half_closes/1,
     h3_tcp_target_fin_half_closes/1,
@@ -94,7 +96,10 @@
     h3_tcp_data_before_finalize_is_kept/1,
     h3_udp_output_before_finalize_is_kept/1,
     h3_ip_output_before_finalize_is_kept/1,
-    h3_udp_bind_output_before_finalize_is_kept/1
+    h3_udp_bind_output_before_finalize_is_kept/1,
+    h3_bind_without_public_address_is_500/1,
+    h2_bind_without_public_address_is_500/1,
+    h1_bind_without_public_address_is_500/1
 ]).
 
 -define(TPL, <<"/.well-known/masque/udp/{target_host}/{target_port}/">>).
@@ -167,6 +172,8 @@ all() ->
         h2_tcp_continue_then_refused_target,
         h3_tcp_target_reset_resets_tunnel,
         h2_tcp_target_reset_resets_tunnel,
+        h3_tcp_pooled_abort_resets_target,
+        h2_tcp_pooled_abort_resets_target,
         h3_tcp_client_fin_half_closes,
         h2_tcp_client_fin_half_closes,
         h3_tcp_target_fin_half_closes,
@@ -180,7 +187,10 @@ all() ->
         h3_tcp_data_before_finalize_is_kept,
         h3_udp_output_before_finalize_is_kept,
         h3_ip_output_before_finalize_is_kept,
-        h3_udp_bind_output_before_finalize_is_kept
+        h3_udp_bind_output_before_finalize_is_kept,
+        h3_bind_without_public_address_is_500,
+        h2_bind_without_public_address_is_500,
+        h1_bind_without_public_address_is_500
     ].
 
 init_per_suite(Config) ->
@@ -274,6 +284,17 @@ extra_opts(h3_udp_bind_output_before_finalize_is_kept) ->
     B#{
         bind_handler => masque_crash_bind_handler,
         handler_opts => HOpts#{early_assign => {{127, 0, 0, 1}, 9}}
+    };
+extra_opts(Case) when
+    Case =:= h3_bind_without_public_address_is_500;
+    Case =:= h2_bind_without_public_address_is_500;
+    Case =:= h1_bind_without_public_address_is_500
+->
+    B = bind_opts(),
+    HOpts = maps:get(handler_opts, B),
+    B#{
+        bind_handler => masque_crash_bind_handler,
+        handler_opts => HOpts#{response_headers => none}
     };
 extra_opts(h1_bind_handler_crash_closes_tunnel) ->
     (bind_opts())#{bind_handler => masque_crash_bind_handler};
@@ -662,6 +683,37 @@ log(#{level := Level}, #{config := #{counter := Counter}}) when
     counters:add(Counter, 1, 1);
 log(_Event, _Config) ->
     ok.
+
+%% Draft -16 section 7: a handler that gives no Proxy-Public-Address
+%% gets no bind. The session answers 500 before anything else, the
+%% handler's `terminate/2' runs (its socket is closed).
+h3_bind_without_public_address_is_500(Config) ->
+    bind_without_public_address_is_500(Config, h3).
+
+h2_bind_without_public_address_is_500(Config) ->
+    bind_without_public_address_is_500(Config, h2).
+
+h1_bind_without_public_address_is_500(Config) ->
+    bind_without_public_address_is_500(Config, h1).
+
+bind_without_public_address_is_500(Config, Transport) ->
+    Port = maps:get(port, ?config(Transport, Config)),
+    Result = masque:bind_connect(
+        iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+        unscoped,
+        #{transports => [Transport], verify => verify_none, timeout => 5000}
+    ),
+    ?assertMatch({error, {bad_status, 500}}, normalize_bind_error(Result)),
+    receive
+        {bind_handler_terminated, {no_public_address, absent}} -> ok
+    after 5000 -> ct:fail(handler_not_terminated)
+    end.
+
+%% h3 and h2 report the status as `{bad_status, S}', h1 as a rejected
+%% upgrade.
+normalize_bind_error({error, {handshake_rejected, Status, _}}) -> {error, {bad_status, Status}};
+normalize_bind_error({error, {handshake_rejected, Status}}) -> {error, {bad_status, Status}};
+normalize_bind_error(Other) -> Other.
 
 %% The h1 udp-bind session applies the same handler and compression
 %% rules as the h3/h2 one.
@@ -1444,6 +1496,70 @@ tcp_target_reset_resets_tunnel(Config, Transport) ->
     after 5000 -> ct:fail(no_reset)
     end,
     gen_tcp:close(LSock).
+
+%% `masque:abort/1' on a pooled tunnel resets only its stream (with the
+%% CONNECT-TCP code): the target gets an RST, the session is gone, and
+%% the shared connection carries the next tunnel.
+h3_tcp_pooled_abort_resets_target(Config) ->
+    tcp_pooled_abort_resets_target(Config, h3).
+
+h2_tcp_pooled_abort_resets_target(Config) ->
+    tcp_pooled_abort_resets_target(Config, h2).
+
+tcp_pooled_abort_resets_target(Config, Transport) ->
+    {LSock, TPort} = tcp_target_listen(),
+    Self = self(),
+    Target = spawn(fun() -> abort_target(LSock, Self) end),
+    ok = gen_tcp:controlling_process(LSock, Target),
+    Port = maps:get(port, ?config(Transport, Config)),
+    Connect = fun() ->
+        {ok, S} = masque:connect(
+            iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+            {<<"127.0.0.1">>, TPort},
+            #{
+                verify => verify_none,
+                transports => [Transport],
+                protocol => tcp,
+                upstream_pool => true
+            }
+        ),
+        S
+    end,
+    Sess = Connect(),
+    ok = masque:send(Sess, <<"x">>),
+    timer:sleep(200),
+    ok = masque:abort(Sess),
+    receive
+        {target_end, R} -> ?assertEqual({error, econnreset}, R)
+    after 5000 -> ct:fail(target_not_reset)
+    end,
+    ?assertNot(is_process_alive(Sess)),
+    Next = Connect(),
+    ok = masque:send(Next, <<"y">>),
+    receive
+        {target_got, <<"y">>} -> ok
+    after 5000 -> ct:fail(pool_connection_lost)
+    end,
+    ok = masque:close(Next),
+    exit(Target, kill),
+    gen_tcp:close(LSock).
+
+%% The first connection reports how it ended; the next one what it got.
+abort_target(LSock, Parent) ->
+    {ok, A} = gen_tcp:accept(LSock, 10000),
+    ok = inet:setopts(A, [{show_econnreset, true}]),
+    Parent ! {target_end, drain_error(A)},
+    {ok, B} = gen_tcp:accept(LSock, 10000),
+    {ok, Got} = gen_tcp:recv(B, 0, 5000),
+    Parent ! {target_got, Got},
+    _ = gen_tcp:recv(B, 0, 5000),
+    gen_tcp:close(B).
+
+drain_error(Sock) ->
+    case gen_tcp:recv(Sock, 0, 5000) of
+        {ok, _} -> drain_error(Sock);
+        Err -> Err
+    end.
 
 %% The client's FIN reaches the target as a TCP FIN; the target's
 %% reply still reaches the client.

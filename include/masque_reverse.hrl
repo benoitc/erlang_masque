@@ -17,6 +17,11 @@
 %% ones (`max_pending_requests').
 -define(MASQUE_DEFAULT_MAX_PENDING_REQUESTS, 64).
 
+%% How long an agent holds a connection request its owner did not answer
+%% (`pending_request_timeout_ms'), in milliseconds. Longer than the
+%% proxy's default request timeout (10 s).
+-define(MASQUE_DEFAULT_PENDING_REQUEST_TIMEOUT, 30000).
+
 %% Capsule types (section 7.3). The draft leaves them TBD; these are
 %% provisional private values, kept here only, until it assigns real
 %% ones. None is a reserved GREASE value (RFC 9297 section 5.4).

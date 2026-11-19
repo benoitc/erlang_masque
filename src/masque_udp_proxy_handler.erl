@@ -73,8 +73,10 @@ init(#{target_host := Host, target_port := Port} = Req, Opts) ->
     case resolve(ResolverFun, Host, Family) of
         {ok, IP, BindFamily} ->
             case target_allowed(IP, AllowPrivate, Opts) of
-                {error, Why} ->
-                    {stop, {resolution_failed, Why}};
+                {error, _Why} ->
+                    %% A policy refusal, as CONNECT-TCP capsule framing
+                    %% answers it: 403, `destination_ip_prohibited'.
+                    {stop, {reject, forbidden}};
                 ok ->
                     open_udp(IP, Port, BindPort, BindFamily, SocketOpts, Opts)
             end;

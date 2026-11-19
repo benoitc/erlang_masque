@@ -800,7 +800,7 @@ reject_response_carries_proxy_status(Config) ->
     {ok, 404, Headers} =
         masque_test_helpers:h3_await_response(StreamId, 5000),
     {_, PS} = lists:keyfind(<<"proxy-status">>, 1, Headers),
-    ?assertEqual(<<"masque; error=http_protocol_error">>, PS),
+    ?assertEqual(<<"masque; error=http_request_error">>, PS),
     quic_h3:close(Conn).
 
 udp_source_spoofing_rejected(Config) ->
@@ -1020,8 +1020,9 @@ chain_upstream_failure_returns_502(Config) ->
     ),
     %% The upstream is unreachable (port 1). Depending on how fast
     %% QUIC rejects the connection, the ingress either maps the
-    %% failure to 502 or the outer handshake times out first.
-    %% Both are valid rejections.
+    %% failure to 502 (refused) or 504 (the upstream handshake timed
+    %% out, RFC 9209 `connection_timeout'), or the outer handshake
+    %% times out first. All are valid rejections.
     case
         masque:connect(
             ProxyURI,
@@ -1035,6 +1036,7 @@ chain_upstream_failure_returns_502(Config) ->
         )
     of
         {error, {handshake_rejected, 502}} -> ok;
+        {error, {handshake_rejected, 504}} -> ok;
         {error, handshake_timeout} -> ok;
         Other -> ct:fail({unexpected, Other})
     end.

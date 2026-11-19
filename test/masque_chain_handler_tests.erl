@@ -75,9 +75,10 @@ info_unprompted_address_assign_is_forwarded_test() ->
     ?assertEqual([{assign, [Assign]}], Actions),
     cleanup(Pid).
 
-info_prompted_address_assign_is_dropped_test() ->
+info_prompted_address_assign_is_relayed_unprompted_test() ->
     %% A prompted entry for a request the chain never forwarded has
-    %% no client request id to map to, so it is dropped.
+    %% no client request id to map to: the client still holds the
+    %% address, so it goes on with request id 0.
     {S, Pid} = state(ip),
     Assign = #ip_assignment{
         request_id = 42,
@@ -86,10 +87,13 @@ info_prompted_address_assign_is_dropped_test() ->
         prefix_len = 32
     },
     Msg = {masque_address_assign, Pid, [Assign]},
-    ?assertMatch({ok, _}, ?M:handle_info(Msg, S)),
+    ?assertMatch(
+        {ok, _, [{assign, [#ip_assignment{request_id = 0, address = {10, 0, 0, 6}}]}]},
+        ?M:handle_info(Msg, S)
+    ),
     cleanup(Pid).
 
-info_mixed_address_assign_forwards_unprompted_only_test() ->
+info_mixed_address_assign_forwards_unknown_as_unprompted_test() ->
     {S, Pid} = state(ip),
     Unprompted = #ip_assignment{
         request_id = 0,
@@ -105,7 +109,7 @@ info_mixed_address_assign_forwards_unprompted_only_test() ->
     },
     Msg = {masque_address_assign, Pid, [Unprompted, Prompted]},
     {ok, _, Actions} = ?M:handle_info(Msg, S),
-    ?assertEqual([{assign, [Unprompted]}], Actions),
+    ?assertEqual([{assign, [Unprompted, Prompted#ip_assignment{request_id = 0}]}], Actions),
     cleanup(Pid).
 
 %%====================================================================
@@ -133,8 +137,12 @@ address_request_forwarded_and_answer_mapped_test() ->
     {ok, S3, [{assign, [C]}]} =
         ?M:handle_info({masque_address_assign, Pid, [A7]}, S2),
     ?assertEqual(A7#ip_assignment{request_id = 1}, C),
-    %% A repeat answer for an id already relayed is dropped.
-    ?assertMatch({ok, _}, ?M:handle_info({masque_address_assign, Pid, [A7]}, S3)),
+    %% A repeat answer for an id already relayed is an address the
+    %% client holds: it goes on unprompted.
+    ?assertMatch(
+        {ok, _, [{assign, [#ip_assignment{request_id = 0, address = {10, 0, 0, 1}}]}]},
+        ?M:handle_info({masque_address_assign, Pid, [A7]}, S3)
+    ),
     cleanup(Pid).
 
 address_request_upstream_error_rejects_test() ->
@@ -406,3 +414,93 @@ count_retries(S, End, N) ->
             count_retries(S1, End, N + 1)
     after Left -> N
     end.
+
+%%====================================================================
+%% RFC 9484 control capsules both ways
+%%====================================================================
+
+%% Earlier tests may leave captured calls in the mailbox.
+fresh_state() ->
+    flush_captured(),
+    state(ip).
+
+flush_captured() ->
+    receive
+        {captured, _} -> flush_captured()
+    after 0 -> ok
+    end.
+
+assign(Id, Last) ->
+    #ip_assignment{request_id = Id, version = 4, address = {10, 0, 0, Last}, prefix_len = 32}.
+
+%% Each ADDRESS_ASSIGN is the full set, so an empty one withdraws
+%% everything and must reach the client too.
+empty_upstream_assign_is_relayed_test() ->
+    {S, Pid} = fresh_state(),
+    ?assertMatch({ok, _, [{assign, []}]}, ?M:handle_info({masque_address_assign, Pid, []}, S)),
+    cleanup(Pid).
+
+%% A rejection for an id this hop never forwarded answers nothing the
+%% client asked: it is dropped, not turned into an address.
+unknown_rejection_is_dropped_test() ->
+    {S, Pid} = fresh_state(),
+    Reject = #ip_assignment{request_id = 5, version = 4, address = {0, 0, 0, 0}, prefix_len = 32},
+    ?assertMatch(
+        {ok, _, [{assign, [#ip_assignment{request_id = 0, address = {10, 0, 0, 9}}]}]},
+        ?M:handle_info({masque_address_assign, Pid, [Reject, assign(0, 9)]}, S)
+    ),
+    cleanup(Pid).
+
+%% When the upstream cannot take a request, the "no address" answer
+%% keeps the addresses the client already holds.
+upstream_failure_keeps_held_addresses_test() ->
+    {S0, Pid} = fresh_state(),
+    {ok, S1, _} = ?M:handle_info({masque_address_assign, Pid, [assign(0, 4)]}, S0),
+    Reqs = [
+        #ip_prefix_request{request_id = 3, version = 4, address = {0, 0, 0, 0}, prefix_len = 32}
+    ],
+    {ok, _, [{assign, Entries}]} = ?M:handle_address_request(Reqs, S1),
+    assert_captured({request_addresses, [{4, {0, 0, 0, 0}, 32}]}),
+    ?assertMatch(
+        [
+            #ip_assignment{request_id = 0, address = {10, 0, 0, 4}},
+            #ip_assignment{request_id = 3, address = {0, 0, 0, 0}, prefix_len = 32}
+        ],
+        Entries
+    ),
+    cleanup(Pid).
+
+%% The client's ADDRESS_ASSIGN and ROUTE_ADVERTISEMENT go upstream.
+client_assign_and_routes_go_upstream_test() ->
+    {S, Pid} = fresh_state(),
+    {ok, _} = ?M:handle_address_assign([assign(0, 1)], S),
+    assert_captured({assign_addresses, [assign(0, 1)]}),
+    Route = #ip_route{
+        version = 4, start_addr = {192, 0, 2, 0}, end_addr = {192, 0, 2, 255}, ip_protocol = 0
+    },
+    {ok, _} = ?M:handle_route_advertisement([Route], S),
+    assert_captured({advertise_routes, [Route]}),
+    cleanup(Pid).
+
+%% An upstream ADDRESS_REQUEST goes to the client under the upstream's
+%% ids; the client's answer goes back with them, and an id the
+%% upstream never asked for becomes unprompted.
+upstream_request_relayed_both_ways_test() ->
+    {S0, Pid} = fresh_state(),
+    Req = #ip_prefix_request{request_id = 77, version = 4, address = {0, 0, 0, 0}, prefix_len = 32},
+    {ok, S1, [{request_addresses, [Req]}]} =
+        ?M:handle_info({masque_address_request, Pid, [Req]}, S0),
+    {ok, S2} = ?M:handle_address_assign([assign(77, 2), assign(12, 3)], S1),
+    assert_captured({assign_addresses, [assign(77, 2), assign(0, 3)]}),
+    %% Answered: a repeat of id 77 is no longer an answer.
+    {ok, _} = ?M:handle_address_assign([assign(77, 2)], S2),
+    assert_captured({assign_addresses, [assign(0, 2)]}),
+    cleanup(Pid).
+
+%% An ICMP error for a packet that could not reach the client goes
+%% back upstream, where its source is.
+icmp_for_upstream_source_goes_upstream_test() ->
+    {S, Pid} = fresh_state(),
+    {ok, _} = ?M:handle_info({masque_ip_icmp, <<"icmp">>}, S),
+    assert_captured({send_ip_packet, <<"icmp">>}),
+    cleanup(Pid).

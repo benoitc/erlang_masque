@@ -15,7 +15,7 @@ versions.
 """.
 
 -export([version/0]).
--export([connect/3, connect/2, close/1, info/1]).
+-export([connect/3, connect/2, close/1, abort/1, info/1]).
 -export([send/2, send/3, recv/2, set_mode/2]).
 -export([send_capsule/3, shutdown_write/1]).
 -export([migrate/1]).
@@ -198,6 +198,10 @@ versions.
         tcp_protocol => binary(),
         %% CONNECT-IP: local send-side MTU (1280..65535, default 1500).
         mtu => 1280..65535,
+        %% CONNECT-IP: drop packets from the proxy whose source is not in
+        %% a prefix this client assigned to it (RFC 9484 section 11,
+        %% BCP 38). Default `false'.
+        source_filter => boolean(),
         %% Opt-in connection pooling. When `true', h2 / h3 attempts
         %% share a pooled upstream transport connection keyed by
         %% host/port/transport + a hash of connect-affecting opts
@@ -565,6 +569,31 @@ close(Sess) when is_pid(Sess) ->
     ok.
 
 -doc """
+Abort a CONNECT-TCP tunnel instead of closing it.
+
+`close/1` ends the tunnel gracefully: the proxy sees a FIN, or
+FINAL_DATA in capsule framing, and closes the target with a FIN. `abort/1`
+ends it abruptly, as draft-ietf-httpbis-connect-tcp-18 section 3.5 asks
+when the TCP side failed: the stream is reset with `H3_CONNECT_ERROR`
+(h3) or `CONNECT_ERROR` (h2), or on h1 the connection closes without
+FINAL_DATA, so the proxy resets the target. Use it when the connection
+you relay was reset or timed out. A tunnel whose owner exits with a
+reason other than `normal`, `shutdown` or `{shutdown, _}` is aborted
+the same way.
+
+Returns `ok`, also for a session that already ended. Other kinds of
+session are left open and answer `{error, not_supported}` (or
+`{error, not_ready}` while connecting); end them with `close/1`.
+""".
+-spec abort(session()) -> ok | {error, term()}.
+abort(Sess) when is_pid(Sess) ->
+    try
+        gen_statem:call(Sess, abort, 5000)
+    catch
+        exit:_ -> ok
+    end.
+
+-doc """
 Return a map describing the session's current state and peers.
 """.
 -spec info(session()) -> map().
@@ -686,8 +715,12 @@ side. Close it with `masque:close/1`.
 
 Options are those of `connect/3` with one transport in `transports`
 (default `[h3]`), plus `listen_uri_template` and `accept_uri_template`
-(the draft's defaults otherwise). Pass your credentials in
-`request_headers`. On HTTP/3 and HTTP/2 the channel gets a connection
+(the draft's defaults otherwise). The accept template must contain
+`request_id` (`{error, bad_template}` otherwise); its other variables
+come from `uri_vars`. A request left unanswered is dropped after
+`pending_request_timeout_ms` (default 30000); at most
+`max_pending_requests` (default 64) wait at once. Pass your credentials
+in `request_headers`. On HTTP/3 and HTTP/2 the channel gets a connection
 of its own, which its accept streams share.
 """.
 -spec reverse_listen(
@@ -701,6 +734,12 @@ reverse_listen(ProxyURI, {Target, IpProto}, Opts) when is_map(Opts) ->
         {ok, Template} ?=
             masque_uri_reverse:parse_listen_template(
                 maps:get(listen_uri_template, Opts, ?MASQUE_DEFAULT_LISTEN_URI_TEMPLATE)
+            ),
+        %% Section 5.2: refuse a bad accept template before anything
+        %% is sent, not when the first accept is dialed.
+        {ok, _} ?=
+            masque_uri_reverse:parse_accept_template(
+                maps:get(accept_uri_template, Opts, ?MASQUE_DEFAULT_ACCEPT_URI_TEMPLATE)
             ),
         Path = masque_uri_reverse:expand_listen(Template, #{target => Target, ipproto => IpProto}),
         Owner = maps:get(owner, Opts, self()),
@@ -739,7 +778,11 @@ reverse_accept(Listen, Id, Opts) when is_map(Opts) ->
                 AcceptOpts0#{
                     transport => T,
                     uri_template => maps:get(accept_uri_template, Spec),
-                    uri_vars => #{request_id => integer_to_binary(Id)}
+                    %% Section 5.2: the template may have variables other
+                    %% than `request_id'; they come from `uri_vars'.
+                    uri_vars => (maps:get(uri_vars, AcceptOpts0, #{}))#{
+                        request_id => integer_to_binary(Id)
+                    }
                 },
                 accept_protocol(Service)
             ),

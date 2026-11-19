@@ -167,6 +167,22 @@ roundtrip_test_() ->
 %% Strict template, host and port parsing
 %%====================================================================
 
+%% RFC 6570 section 2.1 and RFC 9484 section 3: only 0x21 to 0x7E
+%% outside expressions.
+template_rejects_control_space_and_del_test() ->
+    [
+        ?assertEqual(
+            {error, bad_template},
+            masque_uri_template:parse_pattern(<<"/x", C, "/{target_host}/{target_port}/">>),
+            C
+        )
+     || C <- [16#00, 16#09, 16#20, 16#7F, 16#80]
+    ],
+    ?assertMatch(
+        {ok, _},
+        masque_uri_template:parse_pattern(<<"/x~!/{target_host}/{target_port}/">>)
+    ).
+
 template_rejects_adjacent_vars_test() ->
     ?assertEqual(
         {error, bad_template},

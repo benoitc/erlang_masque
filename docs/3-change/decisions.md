@@ -179,6 +179,33 @@ This page records design decisions that are visible in the code, with the reason
 - **Consequences.** Writes from `handle_info/2` and init actions still run in the session, synchronously; a handler that mixes both kinds of writes gets no ordering between them.
 - **Where.** `masque_session_writer`, `write_async/5` in `masque_tcp_server_session` and `masque_tcp_h1_server_session`.
 
+### Proxy-Status names the most specific error
+
+- **Decision.** Refusals carry the most specific RFC 9209 error type: `http_request_error` for malformed requests, `http_request_denied` for an authentication refusal, `connection_refused`, `destination_ip_unroutable`, `destination_unavailable` or `connection_timeout` for a target that cannot be reached, `proxy_internal_error` for a handler crash, and `dns_error` only for a name that did not resolve. A chain hop passes an upstream refusal on with its status.
+- **Why.** RFC 9209 section 2.1.1: "the most specific proxy error type SHOULD be sent". Before, every failed start was `dns_error` (the November 2026 compliance audit).
+- **Consequences.** CONNECT-UDP to a private or own address answers 403, a CONNECT-TCP connect timeout 504. Raw-framing CONNECT-TCP keeps 502 for a private target (tagged `destination_ip_prohibited`), as raw tunnels behaved before. The upstream's own Proxy-Status members are not forwarded: the client sessions do not keep the headers of a refused response. Carrying them in the client error is a follow-up.
+- **Where.** `proxy_status/1` and `start_error/1` in `masque_errors`, `upstream_error/1` in `masque_chain_handler`.
+
+### CONNECT-IP lowers the TTL on encapsulation
+
+- **Decision.** The proxy decrements the TTL or hop limit of packets it sends into the tunnel, not of the client's packets.
+- **Why.** RFC 9484 section 7.2: "decrement ... upon encapsulation but not upon decapsulation".
+- **Consequences.** Replies from `forward_fun` and injected packets reach the client one hop lower; a client packet with one hop left is forwarded. A packet that runs out is dropped and Time Exceeded goes back through `{masque_ip_icmp, _}`. `ttl_decrement => decapsulation` keeps the earlier behaviour.
+- **Where.** `route/2` and `into_tunnel/2` in `masque_ip_proxy_handler`, `inject_ttl/2` in the IP server sessions, `ttl_mode/1` in `masque_ip`.
+
+### CONNECT-TCP ends gracefully only on purpose
+
+- **Decision.** A CONNECT-TCP session ends gracefully (FINAL_DATA, then FIN) only on `close/1` or a clean owner exit (`normal`, `shutdown`, `{shutdown, _}`). Every other end, `abort/1` included, is an abort: H3_CONNECT_ERROR on h3, CONNECT_ERROR on h2, a close without FINAL_DATA on h1 over TLS and a TCP reset on cleartext h1.
+- **Why.** draft-ietf-httpbis-connect-tcp-18 section 3.5: a graceful TCP close MUST be relayed as one, anything else SHOULD be an abrupt close. OTP `ssl` always sends close_notify, so over TLS an abort is a close without FINAL_DATA.
+- **Consequences.** A chain hop aborts its upstream when its downstream ended for any reason but `normal`. A tunnel stream that receives trailers after the 2xx is reset by h2, which tells the session since h2 0.18.1.
+- **Where.** `abort/1` in `masque`, `clean_exit/1` in `masque_client_owner`, the TCP client sessions, `terminate/2` in `masque_chain_handler`.
+
+### Unanswered reverse requests expire quietly on the agent
+
+- **Decision.** An agent drops a connection request its owner did not answer within `pending_request_timeout_ms` (30 s) without sending DECLINED. The proxy ignores a DECLINED for its last 4,096 timed-out request ids.
+- **Why.** By then the proxy has given up on the request, and a strict proxy treats a DECLINED for an id it no longer knows as an error that ends the channel (draft-rosomakho-masque-reverse-connect-01 section 5.1). Before, 64 ignored requests made the agent decline every new one.
+- **Where.** `masque_listen_client_session`, `masque_listen_server_session`, `masque_listen_h1_server_session`.
+
 ### Clients verify proxy certificates by default
 
 - **Decision.** Every client transport uses `verify_peer` with the system CA store, hostname check and SNI unless told otherwise.

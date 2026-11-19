@@ -480,3 +480,33 @@ table_full_is_refused_test() ->
     {ok, T1} = masque_compression_table:install(T0, assign(2, 4, {192, 0, 2, 1}, 53)),
     {error, Why} = masque_compression_table:install(T1, assign(4, 4, {192, 0, 2, 2}, 53)),
     ?assertEqual(reject, masque_compression_table:refusal(Why)).
+
+%% Section 3.1: no context for a tuple that already has one, whichever
+%% side opened it.
+open_refuses_tuple_open_by_peer_test() ->
+    Own = masque_compression_table:new_own(client, #{}),
+    Peer0 = masque_compression_table:new_peer(client, #{}),
+    A = #compression_assign{context_id = 1, ip_version = 4, address = {10, 0, 0, 1}, port = 1234},
+    {ok, Peer1} = masque_compression_table:install(Peer0, A),
+    ?assertEqual(
+        {error, tuple_open_by_peer},
+        masque_compression_table:open_compressed(Own, {4, {10, 0, 0, 1}, 1234}, Peer1)
+    ),
+    ?assertMatch(
+        {ok, #compression_entry{context_id = 2}, _},
+        masque_compression_table:open_compressed(Own, {4, {10, 0, 0, 2}, 1234}, Peer1)
+    ).
+
+%% Section 4: once the client opens an uncompressed context again, the
+%% proxy may open compressed ones again.
+reopened_uncompressed_lifts_prohibition_test() ->
+    T0 = masque_compression_table:new_own(proxy, #{}),
+    T1 = masque_compression_table:mark_uncompressed_closed(T0),
+    ?assertEqual(
+        {error, uncompressed_closed},
+        masque_compression_table:open_compressed(T1, {4, {10, 0, 0, 1}, 1234})
+    ),
+    T2 = masque_compression_table:mark_uncompressed_open(T1),
+    ?assertMatch(
+        {ok, _, _}, masque_compression_table:open_compressed(T2, {4, {10, 0, 0, 1}, 1234})
+    ).

@@ -4,7 +4,8 @@
 %% end on h3, h2 and h1: a listener with `accept_listen', an agent that
 %% opens a control channel and accepts, and the test process as the
 %% edge that requests connections. This module is also the listen
-%% handler.
+%% handler. The `agent_' cases use a fake proxy instead, to send the
+%% agent what a real one would not.
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
@@ -38,7 +39,16 @@
     accepts_wait_for_stream_limit/1,
     pending_requests_capped/1,
     dead_control_rows_dropped/1,
-    udp_too_big_dropped/1
+    udp_too_big_dropped/1,
+    malformed_declined_aborts/1,
+    late_decline_is_ignored/1,
+    pending_requests_expire/1,
+    bad_accept_request_is_400/1,
+    bad_accept_template_refused/1,
+    accept_template_extra_vars/1,
+    agent_aborts_on_malformed_request/1,
+    agent_aborts_on_reused_id/1,
+    agent_fails_nonconforming_accept/1
 ]).
 
 %% listen_handler callbacks
@@ -48,6 +58,7 @@
 -define(TOKEN, <<"Bearer good">>).
 -define(BIG, 16 * 1024 * 1024).
 -define(LEAK_MS, 10000).
+-define(USER_ACCEPT_TEMPLATE, <<"/.well-known/masque/accept/{user}/{request_id}/">>).
 
 suite() -> [{timetrap, {minutes, 5}}].
 
@@ -74,7 +85,17 @@ groups() ->
         udp_burst,
         orphan_accept_is_stopped,
         pending_requests_capped,
-        dead_control_rows_dropped
+        dead_control_rows_dropped,
+        declined_for_unknown_id_aborts,
+        malformed_declined_aborts,
+        late_decline_is_ignored,
+        pending_requests_expire,
+        bad_accept_request_is_400,
+        bad_accept_template_refused,
+        accept_template_extra_vars,
+        agent_aborts_on_malformed_request,
+        agent_aborts_on_reused_id,
+        agent_fails_nonconforming_accept
     ],
     [
         {h3, [],
@@ -83,7 +104,6 @@ groups() ->
                     connection_end_ends_streams,
                     listen_close_ends_accepted_streams,
                     accepts_wait_for_stream_limit,
-                    declined_for_unknown_id_aborts,
                     udp_too_big_dropped
                 ]},
         {h2, [],
@@ -91,8 +111,7 @@ groups() ->
                 [
                     connection_end_ends_streams,
                     listen_close_ends_accepted_streams,
-                    accepts_wait_for_stream_limit,
-                    declined_for_unknown_id_aborts
+                    accepts_wait_for_stream_limit
                 ]},
         {h1, [], Common}
     ].
@@ -113,8 +132,16 @@ init_per_testcase(Case, Config) ->
     true = register(?PROBE, self()),
     Opts0 =
         case Case of
-            off_by_default -> #{};
-            _ -> #{accept_listen => true, listen_handler => ?MODULE}
+            off_by_default ->
+                #{};
+            accept_template_extra_vars ->
+                #{
+                    accept_listen => true,
+                    listen_handler => ?MODULE,
+                    accept_uri_template => ?USER_ACCEPT_TEMPLATE
+                };
+            _ ->
+                #{accept_listen => true, listen_handler => ?MODULE}
         end,
     Opts =
         case {Case, ?config(transport, Config)} of
@@ -464,11 +491,117 @@ declined_for_unknown_id_aborts(Config) ->
     {Tag, Conn, Sid} = raw_listen(Config),
     Bad = masque_reverse_capsule:encode({connection_request_declined, 42}),
     ok = raw_send(Tag, Conn, Sid, Bad),
-    receive
-        {Tag, Conn, {stream_reset, Sid, _}} -> ok
-    after 10000 -> ct:fail(not_aborted)
-    end,
+    expect_aborted(Tag, Conn, Sid),
     raw_close(Tag, Conn).
+
+%% Section 5.1 and RFC 9297 section 3.3: a malformed DECLINED aborts the
+%% channel.
+malformed_declined_aborts(Config) ->
+    {Tag, Conn, Sid} = raw_listen(Config),
+    Bad = iolist_to_binary(
+        masque_capsule:encode(?MASQUE_CAPSULE_CONNECTION_REQUEST_DECLINED, <<>>)
+    ),
+    ok = raw_send(Tag, Conn, Sid, Bad),
+    expect_aborted(Tag, Conn, Sid),
+    raw_close(Tag, Conn).
+
+%% Section 5.1: a DECLINED that crosses the proxy's own timeout is for an
+%% id the proxy just gave up on, not an unknown one: the channel stays.
+late_decline_is_ignored(Config) ->
+    {Agent, Control} = start_agent(Config, hold),
+    ?assertEqual(
+        {error, timeout}, masque:request_connection(Control, service(), #{timeout => 300})
+    ),
+    Agent ! decline_now,
+    receive
+        {agent_decline_result, Result} -> ?assertEqual(ok, Result)
+    after 5000 -> ct:fail(no_decline)
+    end,
+    timer:sleep(300),
+    ?assert(is_process_alive(Control)),
+    ?assertEqual(
+        {error, timeout}, masque:request_connection(Control, service(), #{timeout => 300})
+    ),
+    stop_agent(Agent).
+
+%% Requests the owner never answers expire on the agent
+%% (`pending_request_timeout_ms'), so they do not hold
+%% `max_pending_requests' for good.
+pending_requests_expire(Config) ->
+    {Agent, Control} = start_agent(Config, hold, #{
+        max_pending_requests => 1, pending_request_timeout_ms => 300
+    }),
+    ?assertEqual(
+        {error, timeout}, masque:request_connection(Control, service(), #{timeout => 200})
+    ),
+    timer:sleep(400),
+    ?assertEqual(
+        {error, timeout}, masque:request_connection(Control, service(), #{timeout => 200})
+    ),
+    ?assertEqual(2, count_agent_requests(0)),
+    stop_agent(Agent).
+
+%% Section 5.2.1 and 5.2.2: a malformed accept request (here a request
+%% id that is not a number) gets 400.
+bad_accept_request_is_400(Config) ->
+    ?assertEqual(400, raw_accept_status(Config, <<"abc">>, ?TOKEN)).
+
+%% Section 5.2: an accept template without `request_id' is refused
+%% before anything is sent.
+bad_accept_template_refused(Config) ->
+    Opts = (client_opts(Config, ?TOKEN))#{accept_uri_template => <<"/accept/">>},
+    ?assertEqual({error, bad_template}, masque:reverse_listen(proxy(Config), {local, tcp}, Opts)),
+    receive
+        {control, _, _} -> ct:fail(channel_opened)
+    after 300 -> ok
+    end.
+
+%% Section 5.2: the accept template may hold other variables; the agent
+%% fills them from `uri_vars'.
+accept_template_extra_vars(Config) ->
+    {Agent, Control} = start_agent(Config, echo, #{
+        accept_uri_template => ?USER_ACCEPT_TEMPLATE, uri_vars => #{user => <<"bob">>}
+    }),
+    {ok, Stream} = masque:request_connection(Control, service()),
+    ok = masque:send(Stream, <<"hello">>),
+    ?assertEqual(<<"hello">>, edge_recv(Stream, 5)),
+    ok = masque:close(Stream),
+    stop_agent(Agent).
+
+%% Section 5.1: a malformed CONNECTION_REQUEST aborts the agent's
+%% channel.
+agent_aborts_on_malformed_request(Config) ->
+    Bad = iolist_to_binary(masque_capsule:encode(?MASQUE_CAPSULE_CONNECTION_REQUEST, <<>>)),
+    {Listen, Stop} = fake_listen(Config, [Bad]),
+    expect_closed(Listen, malformed_capsule),
+    Stop().
+
+%% Section 5.1: a request id used twice on the channel aborts it.
+agent_aborts_on_reused_id(Config) ->
+    Req = masque_reverse_capsule:encode({connection_request, 7, service()}),
+    {Listen, Stop} = fake_listen(Config, [Req, Req]),
+    receive
+        {masque_connection_request, Listen, 7, _} -> ok
+    after 5000 -> ct:fail(no_request)
+    end,
+    expect_closed(Listen, malformed_capsule),
+    Stop().
+
+%% Sections 5.2.1 and 5.2.2: an accept response that does not start the
+%% capsule protocol is a failed accept.
+agent_fails_nonconforming_accept(Config) ->
+    Req = masque_reverse_capsule:encode({connection_request, 7, udp_service()}),
+    {Listen, Stop} = fake_listen(Config, [Req]),
+    receive
+        {masque_connection_request, Listen, 7, _} -> ok
+    after 5000 -> ct:fail(no_request)
+    end,
+    ?assertEqual(
+        {error, capsule_protocol_not_acknowledged},
+        masque:reverse_accept(Listen, 7, #{verify => verify_none})
+    ),
+    ok = masque:close(Listen),
+    Stop().
 
 udp_service() -> #{destination => local, protocol => udp, port => 53}.
 
@@ -564,7 +697,16 @@ udp_burst(Config) ->
     {ok, Stream} = masque:request_connection(Control, udp_service()),
     %% QUIC refuses a datagram it has no congestion window for. UDP may
     %% drop, so that counts as loss, not a failure (as in the load suite).
-    Sent = [masque:send(Stream, <<N:32, 0:(996 * 8)>>) || N <- lists:seq(1, 200)],
+    %% Since quic 3 the pacer refuses datagrams past its burst too, so
+    %% the 200 go out in groups of 10, 2 ms apart: the check is on the
+    %% reverse path, not on the pacer.
+    Sent = lists:append([
+        begin
+            timer:sleep(2),
+            [masque:send(Stream, <<N:32, 0:(996 * 8)>>) || N <- lists:seq(G, G + 9)]
+        end
+     || G <- lists:seq(1, 200, 10)
+    ]),
     [] = [R || R <- Sent, R =/= ok, R =/= {error, congestion_limited}],
     Got = count_datagrams(Stream, 0),
     ct:log("~p of 200 datagrams came back", [Got]),
@@ -632,7 +774,12 @@ stop_agent(Agent) ->
 echo_stream(S) ->
     receive
         {masque_data, S, Bytes} ->
-            ok = masque:send(S, Bytes),
+            %% A UDP echo the congestion window refuses is lost, as any
+            %% datagram may be.
+            case masque:send(S, Bytes) of
+                ok -> ok;
+                {error, congestion_limited} -> ok
+            end,
             echo_stream(S);
         {masque_closed, S, _} ->
             ok
@@ -664,6 +811,10 @@ agent_loop(Listen, Mode, Test, Streams) ->
             ok = masque:close(Listen),
             Test ! {agent_listen_closed, self()},
             agent_streams_closed(Test, maps:keys(maps:remove(held, Streams)));
+        decline_now ->
+            [Id | _] = maps:get(held, Streams, []),
+            Test ! {agent_decline_result, masque:reverse_decline(Listen, Id)},
+            agent_loop(Listen, Mode, Test, Streams);
         accept_now ->
             [Id | _] = maps:get(held, Streams, []),
             Result = masque:reverse_accept(Listen, Id, #{verify => verify_none}),
@@ -729,7 +880,12 @@ agent_request(Listen, Mode, Test, Streams, Id) ->
     end.
 
 agent_data(Listen, echo, Test, Streams, S, Bytes) ->
-    ok = send_chunks(S, Bytes),
+    %% A UDP echo the congestion window refuses is lost, as any datagram
+    %% may be.
+    case send_chunks(S, Bytes) of
+        ok -> ok;
+        {error, congestion_limited} -> ok
+    end,
     agent_loop(Listen, echo, Test, Streams);
 agent_data(Listen, Mode, Test, Streams, S, Bytes) ->
     Acc = maps:get(S, Streams, <<>>),
@@ -832,9 +988,9 @@ probe(Msg) ->
         error:badarg -> ok
     end.
 
-%% A hand-built accept request, for the 404 cases.
+%% A hand-built accept request, for the 404 and 400 cases.
 raw_accept_status(Config, Id, Token) ->
-    Path = iolist_to_binary(["/.well-known/masque/accept/", integer_to_list(Id), "/"]),
+    Path = iolist_to_binary(["/.well-known/masque/accept/", id_text(Id), "/"]),
     case ?config(transport, Config) of
         h1 ->
             #{port := Port} = ?config(server, Config),
@@ -871,11 +1027,38 @@ raw_accept_status(Config, Id, Token) ->
             Status
     end.
 
+id_text(Id) when is_integer(Id) -> integer_to_list(Id);
+id_text(Id) -> Id.
+
 raw_listen(Config) ->
-    Path = <<"/.well-known/masque/listen/./6/">>,
-    {Tag, Conn, Sid} = raw_request(
-        Config, ?config(transport, Config), ?MASQUE_CONNECT_LISTEN_PROTOCOL, Path, ?TOKEN
+    raw_listen(Config, ?config(transport, Config)).
+
+%% h1: the upgraded socket stands for the connection and the stream.
+raw_listen(Config, h1) ->
+    #{port := Port} = ?config(server, Config),
+    {ok, Sock} = ssl:connect(
+        "127.0.0.1",
+        Port,
+        [
+            binary,
+            {active, false},
+            {verify, verify_none},
+            {alpn_advertised_protocols, [<<"http/1.1">>]}
+        ],
+        5000
     ),
+    ok = ssl:send(Sock, [
+        <<"GET /.well-known/masque/listen/./6/ HTTP/1.1\r\nHost: 127.0.0.1\r\n">>,
+        <<"Connection: Upgrade\r\nUpgrade: connect-listen\r\nCapsule-Protocol: ?1\r\n">>,
+        <<"Authorization: ">>,
+        ?TOKEN,
+        <<"\r\n\r\n">>
+    ]),
+    {ok, <<"HTTP/1.1 101", _/binary>>} = ssl:recv(Sock, 0, 5000),
+    {h1, Sock, undefined};
+raw_listen(Config, T) ->
+    Path = <<"/.well-known/masque/listen/./6/">>,
+    {Tag, Conn, Sid} = raw_request(Config, T, ?MASQUE_CONNECT_LISTEN_PROTOCOL, Path, ?TOKEN),
     receive
         {Tag, Conn, {response, Sid, 200, _}} -> ok
     after 5000 -> ct:fail(no_listen_response)
@@ -916,10 +1099,139 @@ raw_request(Config, h2, Token, Path, Auth) ->
     {h2, Conn, Sid}.
 
 raw_send(quic_h3, Conn, Sid, Bin) -> quic_h3:send_data(Conn, Sid, Bin, false);
-raw_send(h2, Conn, Sid, Bin) -> h2:send_data(Conn, Sid, Bin, false).
+raw_send(h2, Conn, Sid, Bin) -> h2:send_data(Conn, Sid, Bin, false);
+raw_send(h1, Sock, _Sid, Bin) -> ssl:send(Sock, Bin).
 
 raw_close(quic_h3, Conn) -> quic_h3:close(Conn);
-raw_close(h2, Conn) -> h2:close(Conn).
+raw_close(h2, Conn) -> h2:close(Conn);
+raw_close(h1, Sock) -> ssl:close(Sock).
+
+%% h3 and h2: the stream is reset; h1: the connection is closed.
+expect_aborted(h1, Sock, _Sid) ->
+    ?assertMatch({error, _}, ssl:recv(Sock, 0, 10000));
+expect_aborted(Tag, Conn, Sid) ->
+    receive
+        {Tag, Conn, {stream_reset, Sid, _}} -> ok
+    after 10000 -> ct:fail(not_aborted)
+    end.
+
+%%====================================================================
+%% Fake proxy for the agent cases
+%%====================================================================
+
+%% A proxy that accepts the control channel, sends `Capsules' on it, and
+%% answers every accept with a success that does not start the capsule
+%% protocol. Returns the agent's channel and a fun that stops the proxy.
+fake_listen(Config, Capsules) ->
+    T = ?config(transport, Config),
+    {Port, Stop} = fake_proxy(T, ?config(certs, Config), Capsules),
+    URI = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    {ok, Listen} = masque:reverse_listen(URI, {local, tcp}, #{
+        transports => [T], verify => verify_none, timeout => 3000
+    }),
+    {Listen, Stop}.
+
+fake_proxy(h3, #{cert := Cert, key := Key}, Capsules) ->
+    Name = unique(fake_h3),
+    {ok, _} = quic_h3:start_server(Name, 0, #{
+        cert => Cert,
+        key => Key,
+        settings => #{enable_connect_protocol => 1, h3_datagram => 1},
+        quic_opts => #{alpn => [<<"h3">>], max_datagram_frame_size => 65535},
+        handler => fun(Conn, Sid, _Method, Path, _Headers) ->
+            fake_answer(quic_h3, Conn, Sid, Path, Capsules)
+        end
+    }),
+    {ok, Port} = quic:get_server_port(Name),
+    {Port, fun() -> quic_h3:stop_server(Name) end};
+fake_proxy(h2, #{cert_file := Cert, key_file := Key}, Capsules) ->
+    Self = self(),
+    Keeper = spawn(fun() ->
+        {ok, {_, _, P}} = h2:start_server(unique(fake_h2), 0, #{
+            cert => Cert,
+            key => Key,
+            enable_connect_protocol => true,
+            settings => #{enable_connect_protocol => 1},
+            handler => fun(Conn, Sid, _Method, Path, _Headers) ->
+                fake_answer(h2, Conn, Sid, Path, Capsules),
+                receive
+                    stop -> ok
+                after 10000 -> ok
+                end
+            end
+        }),
+        Self ! {fake_port, P},
+        receive
+            stop -> ok
+        end
+    end),
+    receive
+        {fake_port, Port} -> {Port, fun() -> Keeper ! stop end}
+    after 5000 -> ct:fail(fake_h2_start)
+    end;
+fake_proxy(h1, #{cert_file := Cert, key_file := Key}, Capsules) ->
+    Self = self(),
+    Pid = spawn(fun() ->
+        {ok, L} = ssl:listen(0, [
+            binary, {active, false}, {reuseaddr, true}, {certfile, Cert}, {keyfile, Key}
+        ]),
+        {ok, {_, P}} = ssl:sockname(L),
+        Self ! {fake_port, P},
+        fake_h1_accept(L, Capsules)
+    end),
+    receive
+        {fake_port, Port} -> {Port, fun() -> exit(Pid, kill) end}
+    after 5000 -> ct:fail(fake_h1_start)
+    end.
+
+fake_answer(Tag, Conn, Sid, Path, Capsules) ->
+    case binary:match(Path, <<"/listen/">>) of
+        nomatch ->
+            ok = fake_response(Tag, Conn, Sid, []);
+        _ ->
+            ok = fake_response(Tag, Conn, Sid, [{<<"capsule-protocol">>, <<"?1">>}]),
+            _ = spawn(fun() ->
+                timer:sleep(200),
+                [ok = raw_send(Tag, Conn, Sid, C) || C <- Capsules]
+            end),
+            ok
+    end.
+
+fake_response(quic_h3, Conn, Sid, Headers) -> quic_h3:send_response(Conn, Sid, 200, Headers);
+fake_response(h2, Conn, Sid, Headers) -> h2:send_response(Conn, Sid, 200, Headers).
+
+fake_h1_accept(L, Capsules) ->
+    {ok, T} = ssl:transport_accept(L, 30000),
+    Pid = spawn(fun() ->
+        receive
+            go -> ok
+        end,
+        {ok, S} = ssl:handshake(T, 5000),
+        {ok, Req} = ssl:recv(S, 0, 5000),
+        fake_h1_answer(S, Req, Capsules),
+        timer:sleep(10000),
+        ssl:close(S)
+    end),
+    ok = ssl:controlling_process(T, Pid),
+    Pid ! go,
+    fake_h1_accept(L, Capsules).
+
+fake_h1_answer(S, Req, Capsules) ->
+    case binary:match(Req, <<"connect-listen">>) of
+        nomatch ->
+            ok = ssl:send(S, <<
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: connect-accept\r\n"
+                "Connection: Upgrade\r\n\r\n"
+            >>);
+        _ ->
+            ok = ssl:send(S, <<
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: connect-listen\r\n"
+                "Connection: Upgrade\r\nCapsule-Protocol: ?1\r\n\r\n"
+            >>),
+            timer:sleep(200),
+            [ok = ssl:send(S, C) || C <- Capsules],
+            ok
+    end.
 
 %%====================================================================
 %% Servers

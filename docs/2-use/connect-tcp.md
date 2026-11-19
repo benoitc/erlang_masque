@@ -10,7 +10,7 @@ ok = masque:send(Sess, Bytes),
 receive {masque_data, Sess, Chunk} -> Chunk end.
 ```
 
-- On h3 and h2 the request is Extended CONNECT with `:protocol = connect-tcp` (or the token in use, see below) on the `/.well-known/masque/tcp/{target_host}/{target_port}/` template. On h1 it is `CONNECT host:port HTTP/1.1` in raw framing, or a `GET` upgrade on the same template in capsule framing; set `proxy_authorization` to send a `Proxy-Authorization` header.
+- On h3 and h2 the request is Extended CONNECT with `:protocol = connect-tcp` (or the token in use, see below) on the `/.well-known/masque/tcp/{target_host}/{target_port}/` template. On h1 it is `CONNECT host:port HTTP/1.1` in raw framing, or a `GET` upgrade on the same template in capsule framing. Set `proxy_authorization` to send a credential: as `Proxy-Authorization` on a classic CONNECT, and as `Authorization` on the upgrade, which is an ordinary request to the proxy (draft section 3.4.2).
 - No datagrams and no context ids. In raw framing the request carries no `capsule-protocol` header, and a 2xx that carries one is refused with `{error, {bad_response, capsule_protocol}}`. `send_capsule/3` returns `{error, not_supported}` in both framings; the `capsule_protocol` option is ignored.
 - Bytes are never dropped, and a slow owner slows the proxy down instead of piling bytes up:
   - In message mode the session stops giving the proxy flow-control credit while your mailbox holds `rx_backlog` messages (default 64), and gives it back once you catch up. On h1 it stops reading the socket instead. What sits in your mailbox is then bounded by about `rx_backlog` chunks plus one stream window. An owner on another node is not checked.
@@ -78,7 +78,7 @@ In raw framing on h1, a proxy may refuse classic `CONNECT` with 501, or with 426
 - It races the target's IPv6 and IPv4 addresses (Happy Eyeballs) and keeps the first connection.
 - A target the policy refuses gets 403, a connection timeout 504, any other failed connection 502. Each carries `Proxy-Status`.
 - Payload is forwarded as it arrives, so a capsule of any size is accepted without being held whole in memory.
-- Invalid data (a second `FINAL_DATA`, `DATA` after `FINAL_DATA`, a capsule cut short by the end of the stream) and local timeouts abort the tunnel: the stream is reset and the target gets an RST.
+- Invalid data (a second `FINAL_DATA`, `DATA` after `FINAL_DATA`, a capsule cut short by the end of the stream), trailer fields, and local timeouts abort the tunnel: the stream is reset and the target gets an RST. On a cleartext h1 server (the handlers mounted with `transport => tcp`) the client connection is closed with an RST too; over TLS it closes without `FINAL_DATA`.
 
 ## Half-close
 
@@ -90,13 +90,35 @@ On h3 and h2, END_STREAM is TCP FIN, one per direction:
 
 On h1 in raw framing there is no half-close: OTP `ssl` drops the connection when the peer sends TLS `close_notify`, so a FIN from either side ends the tunnel. In capsule framing the FIN is a `FINAL_DATA` capsule, so h1 half-closes like h3 and h2.
 
+## Close or abort
+
+You end a tunnel in one of two ways, and the proxy passes the difference on to the target:
+
+```erlang
+ok = masque:close(Sess),   %% graceful: the target gets a FIN
+ok = masque:abort(Sess).   %% abrupt: the target gets an RST
+```
+
+| | `close/1` | `abort/1` |
+|---|---|---|
+| h3 | the stream FIN (after `FINAL_DATA` in capsule framing) | stream reset with `H3_CONNECT_ERROR` (`0x10f`) |
+| h2 | END_STREAM (after `FINAL_DATA` in capsule framing) | RST_STREAM with `CONNECT_ERROR` |
+| h1, capsule framing | `FINAL_DATA`, then the connection closes | the connection closes without `FINAL_DATA` |
+| h1, raw framing | the connection closes | the same: the proxy cannot tell them apart |
+
+- Abort when the connection you relay was reset or timed out; close when it ended with a FIN.
+- An owner that exits with `normal`, `shutdown` or `{shutdown, _}` closes its tunnels; any other exit aborts them.
+- The session aborts on its own when the proxy sends invalid data (`{bad_capsule, Why}`), trailer fields (`trailers_received`), or when the owner falls too far behind (`rx_overflow`).
+- On h1 in capsule framing, `close/1` waits up to 2 seconds for the `FINAL_DATA` to be written behind any send in progress, then closes the connection.
+- An abort after `shutdown_write/1` on h1 reaches the proxy as a clean end: `FINAL_DATA` is already out, and TLS has no other way to signal it.
+
 ## Server side
 
 Handlers get `handle_data/2` for client bytes and `handle_eof/1` for the client FIN, and answer with `{send_data, Bytes}` or `{send_data, Bytes, true}` (see [handlers](handlers.md#actions)). A tunnel write blocks until the transport takes it; if it fails, or waits more than 30 seconds on h3 and h2, the tunnel ends with `{tunnel_send_failed, _}`.
 
 The built-in `masque_tcp_proxy_handler` opens a `gen_tcp` connection to the target and relays both ways. A FIN from the client shuts down the write side of the target socket; a FIN from the target is passed on to the client. A half-closed tunnel with no traffic for 30 seconds ends with `eof_timeout`. A target reset resets the tunnel; a tunnel the client aborts (stream reset, connection gone) aborts the target connection with an RST, while a clean end closes it with FIN. A target that stops reading ends the tunnel after 30 seconds.
 
-On the client, `close/1` sends the FIN and returns at once; the session then waits up to 2 seconds for the proxy to finish the stream before closing its connection, so the last bytes are not cut off. A pooled stream is handed back to the pool without a reset.
+On the client, `close/1` sends the FIN and returns at once; the session then waits up to 2 seconds for the proxy to finish the stream before closing its connection, so the last bytes are not cut off. A pooled stream is handed back to the pool without a reset; an aborted one is reset with the CONNECT-TCP code. See [close or abort](#close-or-abort).
 
 | `handler_opts` key | Default | Meaning |
 |---|---|---|
@@ -110,6 +132,6 @@ On the client, `close/1` sends the FIN and returns at once; the session then wai
 | `socket_opts` | `[]` | Extra `gen_tcp` options. |
 | `active_n` | `16` | Segments read before the socket pauses until the session wrote them to the tunnel. |
 
-A failed connection to the target refuses the tunnel with 502.
+A failed connection to the target refuses the tunnel with 502 and Proxy-Status `connection_refused` (the target refused it), `destination_ip_unroutable` (no route) or `destination_unavailable`; a connection that times out answers 504 `connection_timeout`. A refused private or own address answers 502 with `destination_ip_prohibited` in raw framing.
 
 Next: [connect-ip](connect-ip.md).

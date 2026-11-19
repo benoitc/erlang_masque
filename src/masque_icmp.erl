@@ -26,7 +26,14 @@ Invoking-packet truncation (RFC 4443 §3.1 and RFC 1812 §4.3.2.3):
 ]).
 
 -export([apply_action/3]).
--export([is_error/1]).
+-export([is_error/1, may_answer/1]).
+-export([echo_reply/2]).
+-export([limiter/1, allow/1]).
+
+%% Token bucket for proxy-generated ICMP errors: rate per second (the
+%% burst is the same), tokens left, time of the last refill.
+-type limiter() :: {non_neg_integer(), float(), integer()}.
+-export_type([limiter/0]).
 
 %% Limits.
 -define(V4_INVOKING_CAP, 548).
@@ -58,6 +65,28 @@ is_error(Packet) ->
         _ ->
             false
     end.
+
+-doc """
+True when an ICMP error may be sent about `Packet`: it is not itself
+an ICMP error, and it went from one unicast host to another (no
+unspecified or multicast source, no multicast or broadcast
+destination), as RFC 1122 section 3.2.2 and RFC 4443 section 2.4 (e)
+require.
+""".
+-spec may_answer(binary()) -> boolean().
+may_answer(Packet) ->
+    unicast_pair(Packet) andalso not is_error(Packet).
+
+unicast_pair(<<4:4, _:92, SA, SB, SC, SD, DA, DB, DC, DD, _/binary>>) ->
+    unicast_v4({SA, SB, SC, SD}) andalso unicast_v4({DA, DB, DC, DD});
+unicast_pair(<<6:4, _:60, Src:128, D0:8, _:120, _/binary>>) ->
+    Src =/= 0 andalso (Src bsr 120) =/= 16#FF andalso D0 =/= 16#FF;
+unicast_pair(_) ->
+    false.
+
+unicast_v4({0, 0, 0, 0}) -> false;
+unicast_v4({255, 255, 255, 255}) -> false;
+unicast_v4({A, _, _, _}) -> A < 224.
 
 first_fragment(<<4:4, _:4, _:8, _:16, _:16, _:3, Offset:13, _/binary>>) -> Offset =:= 0;
 first_fragment(_) -> true.
@@ -127,6 +156,57 @@ apply_action(time_exceeded, {V, Code}, Invoking) ->
     time_exceeded(V, Code, Invoking);
 apply_action(time_exceeded, V, Invoking) when V =:= v4; V =:= v6 ->
     time_exceeded(V, Invoking).
+
+-doc """
+Answer an ICMPv6 Echo Request (type 128) with an Echo Reply (type
+129) sent from `Src` to the request's source, carrying the same
+identifier, sequence number and data. RFC 9484 section 7.2 asks IP
+proxying endpoints to answer echo requests sent to link-local
+multicast (`ff02::1`), which is how a peer checks the tunnel carries
+1280-byte packets. Returns `error` for anything else.
+""".
+-spec echo_reply(inet:ip6_address(), binary()) -> {ok, binary()} | error.
+echo_reply(Src, <<6:4, _:28, _:16, _:8, _:8, ReqSrc:16/binary, _/binary>> = Request) ->
+    case masque_ip_packet:upper_layer(Request) of
+        {ok, 58, <<128:8, 0:8, _Csum:16, Rest/binary>>} ->
+            Msg0 = <<129:8, 0:8, 0:16, Rest/binary>>,
+            Len = byte_size(Msg0),
+            SrcBin = ip6_bin(Src),
+            Pseudo = <<SrcBin/binary, ReqSrc/binary, Len:32, 0:24, 58:8>>,
+            Csum = inet_checksum(<<Pseudo/binary, Msg0/binary>>),
+            {ok,
+                <<6:4, 0:8, 0:20, Len:16, 58:8, 64:8, SrcBin/binary, ReqSrc/binary, 129:8, 0:8,
+                    Csum:16, Rest/binary>>};
+        _ ->
+            error
+    end;
+echo_reply(_Src, _Request) ->
+    error.
+
+-doc """
+A token bucket allowing `Rate` ICMP errors per second, with a burst
+of `Rate`. `0` allows none. RFC 4443 section 2.4 (f) asks for ICMPv6
+errors to be rate limited; the proxy applies the same limit to
+ICMPv4.
+""".
+-spec limiter(non_neg_integer()) -> limiter().
+limiter(Rate) when is_integer(Rate), Rate >= 0 ->
+    {Rate, float(Rate), erlang:monotonic_time(millisecond)}.
+
+-doc """
+Take one token from `Limiter`: `{true, L}` when an ICMP error may be
+sent now, `{false, L}` when the bucket is empty.
+""".
+-spec allow(limiter()) -> {boolean(), limiter()}.
+allow({0, _, _} = L) ->
+    {false, L};
+allow({Rate, Tokens, Last}) ->
+    Now = erlang:monotonic_time(millisecond),
+    Filled = min(float(Rate), Tokens + (Now - Last) * Rate / 1000),
+    case Filled >= 1.0 of
+        true -> {true, {Rate, Filled - 1.0, Now}};
+        false -> {false, {Rate, Filled, Now}}
+    end.
 
 %%====================================================================
 %% Internal — IPv4 builder (type | code | csum | rest-of-header | body)

@@ -368,3 +368,36 @@ one_wildcard_is_malformed_test() ->
     ?assertMatch(
         {error, _}, masque_uri_udp_bind:match(T, <<"/.well-known/masque/udp/192.0.2.1/%2A/">>)
     ).
+
+%% RFC 9651 section 3.1: the lines of a List field combine.
+ppa_parse_multiple_lines_test() ->
+    Headers = [
+        {<<"proxy-public-address">>, <<"\"192.0.2.45:54321\"">>},
+        {<<"other">>, <<"x">>},
+        {<<"Proxy-Public-Address">>, <<"\"[2001:db8::1234]:54321\"">>}
+    ],
+    ?assertEqual(
+        {ok, [
+            {{192, 0, 2, 45}, 54321},
+            {{16#2001, 16#0DB8, 0, 0, 0, 0, 0, 16#1234}, 54321}
+        ]},
+        masque_uri_udp_bind:parse_proxy_public_address(Headers)
+    ).
+
+%% Sections 6 and 7: the bind 2xx always carries `Connect-UDP-Bind: ?1'
+%% (one copy) and needs a valid address list.
+bind_response_headers_test() ->
+    Ppa = {<<"proxy-public-address">>, <<"\"192.0.2.45:54321\"">>},
+    ?assertEqual(
+        {ok, [{{192, 0, 2, 45}, 54321}], [{<<"connect-udp-bind">>, <<"?1">>}, Ppa]},
+        masque_uri_udp_bind:bind_response_headers([Ppa])
+    ),
+    ?assertEqual(
+        {ok, [{{192, 0, 2, 45}, 54321}], [{<<"connect-udp-bind">>, <<"?1">>}, Ppa]},
+        masque_uri_udp_bind:bind_response_headers([{<<"Connect-UDP-Bind">>, <<"?0">>}, Ppa])
+    ),
+    ?assertEqual({error, absent}, masque_uri_udp_bind:bind_response_headers([])),
+    ?assertEqual(
+        {error, empty},
+        masque_uri_udp_bind:bind_response_headers([{<<"proxy-public-address">>, <<>>}])
+    ).

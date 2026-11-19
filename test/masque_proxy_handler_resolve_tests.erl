@@ -24,7 +24,7 @@ udp_single_resolver_opens_socket_test() ->
 
 udp_list_resolver_private_refused_test() ->
     ?assertEqual(
-        {stop, {resolution_failed, private_address}},
+        {stop, {reject, forbidden}},
         masque_udp_proxy_handler:init(req(), #{resolver => list_resolver()})
     ).
 

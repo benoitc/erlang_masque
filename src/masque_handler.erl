@@ -46,6 +46,8 @@ guide (`docs/2-use/handlers.md`). Connect-UDP-Bind sessions also call
     listen_ipproto => masque:reverse_ipproto(),
     reverse_identity => term(),
     reverse_id => non_neg_integer(),
+    %% The transport the request came in on.
+    transport => h3 | h2 | h1,
     %% Connection-level info (H3 only; absent on H2)
     peer => {inet:ip_address(), inet:port_number()},
     peer_cert => binary()
