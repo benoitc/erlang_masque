@@ -3017,7 +3017,19 @@ ps_policy_refusal(Config) ->
     expect_refusal(Config, udp_target(Config), 403, <<"destination_ip_prohibited">>).
 
 ps_dns_error(Config) ->
-    expect_refusal(Config, {<<"nx.test">>, <<"53">>}, 502, <<"dns_error">>).
+    expect_refusal(Config, {<<"nx.test">>, <<"53">>}, 502, <<"dns_error">>),
+    %% The client reports the status on every transport; on h1 since h1
+    %% 0.13.1 returns it from a refused upgrade.
+    #{port := Port} = ?config(server, Config),
+    Uri = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    {error, Reason} = masque:connect(Uri, {<<"nx.test">>, 53}, #{
+        transports => [?config(transport, Config)], verify => verify_none, timeout => 5000
+    }),
+    ?assertMatch({handshake_rejected, 502}, element_status(Reason)).
+
+element_status({handshake_rejected, Status}) -> {handshake_rejected, Status};
+element_status({handshake_rejected, Status, _}) -> {handshake_rejected, Status};
+element_status(Other) -> Other.
 
 ps_internal_error(Config) ->
     expect_refusal(Config, udp_target(Config), 502, <<"proxy_internal_error">>).

@@ -46,7 +46,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
   combined names must be updated. `instrument` now also starts
   `hackney`. h2 0.15.1 notices a vanished peer at once instead of after
   about five seconds.
-- masque now uses quic 3.3.0, h2 0.18.3 and h1 0.13.0. Connections use less CPU and memory, idle ones most of all, and drop old encryption keys as soon as they are no longer needed. An HTTP/3 peer that sends a malformed datagram now has its connection closed, as RFC 9297 requires. Over HTTP/3, a peer
+- masque now uses quic 3.3.0, h2 0.18.3 and h1 0.13.1. Connections use less CPU and memory, idle ones most of all, and drop old encryption keys as soon as they are no longer needed. An HTTP/3 peer that sends a malformed datagram now has its connection closed, as RFC 9297 requires. Over HTTP/3, a peer
   certificate issued for another purpose than TLS is now refused. A UDP
   payload is checked against what the network path carries now rather than
   the peer's advertised limit, so a large payload on a new connection is
@@ -180,6 +180,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
   data, such as early tunnel bytes, the proxy closed the connection at once
   and the client could see a reset instead of the error. The proxy now
   closes after the response, once the client has read it.
+- An HTTP/1.1 CONNECT-UDP or CONNECT-IP tunnel the proxy refused was reported
+  as a closed connection, without the status. The client now reports the
+  refusal with the proxy's status, for example 403 or 502, as over HTTP/2
+  and HTTP/3.
 - Classic HTTP/1.1 CONNECT: tunnel bytes sent in the same write as the
   request now reach the target. They used to be read as HTTP and refused.
 - An HTTP/3 client refused by a proxy that requires client certificates now

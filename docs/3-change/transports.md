@@ -66,7 +66,7 @@ sequenceDiagram
 
 ## Dependency contracts
 
-These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 3.3.0, `h2` 0.18.3, `h1` (`erlang_h1`) 0.13.0 and `instrument` 2.0.0.
+These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 3.3.0, `h2` 0.18.3, `h1` (`erlang_h1`) 0.13.1 and `instrument` 2.0.0.
 
 ### quic_h3 (package `quic`)
 
@@ -140,7 +140,7 @@ Assumptions:
 - A reject is a response with `connection: close`, which makes it the connection's last response: h1 closes the connection once it is written, first draining what the client sent past the request so a reset cannot destroy the response (0.12/0.13, h1's `docs/closing.md`). The listener does not call `close/1`, which stops the connection at once.
 - `accept_upgrade/3` writes the 101 and `accept_connect/3` the 200, and both move the socket's controlling process to the caller, which is the session. `Buffer` holds bytes already read past the header block; for a classic CONNECT it includes tunnel bytes the client sent right after the request (0.13.0; before, h1 read them as HTTP and answered 400).
 - While an upgrade or CONNECT waits for `accept_upgrade/3` or `accept_connect/3`, h1 does not read the socket, so a client that leaves during the session's start is noticed only when the session accepts.
-- On the client, `h1:upgrade/4` does not return when the server answers with a status other than 101: h1 sends the response to the owner only, and the call exits when the server closes. The h1 UDP and IP clients then report the close (`{shutdown, peer_closed}`) instead of `{handshake_rejected, Status, _}`. It returns `{error, no_upgrade_header}` when the `Upgrade` header is absent, which is how h1 answers an HTTP/1.0 request that carried one (h1 0.11.1 ignores the field, RFC 9110 §7.8).
+- On the client, `h1:upgrade/4` returns `{error, {http_status, Status, Headers}}` when the server refuses the upgrade (0.13.1); the h1 UDP and IP clients report it as `{handshake_rejected, Status, _}`. It returns `{error, no_upgrade_header}` when the `Upgrade` header is absent, which is how h1 answers an HTTP/1.0 request that carried one (h1 0.11.1 ignores the field, RFC 9110 §7.8).
 - `h1_capsule:decode/1` returns `{ok, _, _}` or `{more, _}` in practice. Its spec also allows `{error, _}`, which the h1 sessions do not handle.
 
 ## When you bump a dependency
