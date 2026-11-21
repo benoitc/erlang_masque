@@ -577,12 +577,8 @@ client_source_filter(Config) ->
 %% Section 4.7.1: a host name that does not resolve is refused (502).
 hostname_dns_failure(Config) ->
     {error, Reason} = connect_result(Config, {<<"no-such-host.example">>, '*'}, #{}),
-    case ?config(transport, Config) of
-        %% The h1 listener answers 502 and closes the connection; the
-        %% h1 client reports the close it sees first (UDP does the same).
-        h1 -> ok;
-        _ -> ?assertMatch({handshake_rejected, 502}, rejected_status(Reason))
-    end.
+    %% On h1 too: since h1 0.13.1 a refused upgrade returns its status.
+    ?assertMatch({handshake_rejected, 502}, rejected_status(Reason)).
 
 %% Section 7.2: an ICMPv6 Echo Request with 1232 bytes of data sent to
 %% ff02::1, the MTU check, is answered with a 1280-byte Echo Reply.

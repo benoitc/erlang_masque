@@ -659,7 +659,11 @@ reject(Conn, StreamId, Reason, ExtraHeaders) ->
     %% RFC 9931 (updates RFC 9298): a proxy that rejects an HTTP/1.1
     %% CONNECT/Upgrade MUST close the underlying connection, otherwise
     %% the client may treat subsequent bytes on the wire as belonging
-    %% to the rejected resource.
+    %% to the rejected resource. `connection: close' makes this the last
+    %% response: h1 closes the connection once it is written, and drains
+    %% what the client sent past the request first (a capsule, early
+    %% CONNECT data), so a reset cannot destroy the response before the
+    %% client reads it. Closing here at once would.
     Base = [
         {<<"content-type">>, <<"text/plain; charset=utf-8">>},
         {<<"content-length">>, integer_to_binary(byte_size(Body))},
@@ -679,12 +683,6 @@ reject(Conn, StreamId, Reason, ExtraHeaders) ->
     _ =
         (try
             h1:send_data(Conn, StreamId, Body, true)
-        catch
-            _:_ -> ok
-        end),
-    _ =
-        (try
-            h1:close(Conn)
         catch
             _:_ -> ok
         end),

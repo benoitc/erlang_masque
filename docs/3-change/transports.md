@@ -66,7 +66,7 @@ sequenceDiagram
 
 ## Dependency contracts
 
-These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 3.2.0, `h2` 0.18.3, `h1` (`erlang_h1`) 0.11.1 and `instrument` 2.0.0.
+These are the calls and messages masque depends on. The versions pinned in `rebar.config` today are `quic` 3.3.0, `h2` 0.18.3, `h1` (`erlang_h1`) 0.13.1 and `instrument` 2.0.0.
 
 ### quic_h3 (package `quic`)
 
@@ -76,6 +76,7 @@ Client calls: `quic_h3:connect/3` with `sync => true`, `connect_timeout`, `setti
 
 Assumptions:
 
+- `quic_h3:connect/3` returns `{error, Reason}` with the reason the server closed with when it closes right after the handshake, for example `{peer_closed, transport, 16#174, _, _}` (TLS alert certificate_required) from a listener that requires client certificates (quic 3.3.0; it used to crash the caller or wait for `connect_timeout`).
 - `connection_handler` is `fun(ConnPid) -> map()`; it runs inside the quic listener process and its `owner`, `handler` and `h3_datagram_enabled` keys override the listener defaults for that connection.
 - The dispatch `handler` fun is called in a freshly spawned process per request.
 - `settings` must carry `enable_connect_protocol => 1` and `h3_datagram => 1` (`merged_settings/1` in `masque_server`).
@@ -128,7 +129,7 @@ Messages to a stream handler or owner: `{h2, C, {data, Sid, Data, Fin}}`, `{h2, 
 
 ### h1 (package `erlang_h1`)
 
-Server calls: `h1:start_server/3` (`transport => ssl`, `cert`, `key`, `handler`, `acceptors`, `ssl_opts`, and the pre-upgrade limits `handshake_timeout`, `request_timeout`, `idle_timeout`, header sizes; the listener owns its socket since 0.9.3), `peername/1`, `peercert/1` (0.10.0: the client's DER certificate when the listener asked for one), `stop_server/1`, `send_response/4`, `send_data/4`, `close/1` for rejects, `h1:send_informational/4` for `100 Continue` (`h1:continue/2` does not apply, since h1 does not record `Expect` on upgrade and CONNECT requests), `h1:accept_upgrade/3` returning `{ok, Socket, Buffer}` and echoing the request's `Upgrade` token in the 101, and `h1:accept_connect/3` returning `{ok, Transport, Socket, Buffer}`, then `h1_upgrade:send_capsule/4` and `h1_capsule:decode/1` on the raw socket.
+Server calls: `h1:start_server/3` (`transport => ssl`, `cert`, `key`, `handler`, `acceptors`, `ssl_opts`, and the pre-upgrade limits `handshake_timeout`, `request_timeout`, `idle_timeout`, header sizes; the listener owns its socket since 0.9.3), `peername/1`, `peercert/1` (0.10.0: the client's DER certificate when the listener asked for one), `stop_server/1`, `send_response/4`, `send_data/4` for rejects, `h1:send_informational/4` for `100 Continue` (`h1:continue/2` does not apply, since h1 does not record `Expect` on upgrade and CONNECT requests), `h1:accept_upgrade/3` returning `{ok, Socket, Buffer}` and echoing the request's `Upgrade` token in the 101, and `h1:accept_connect/3` returning `{ok, Transport, Socket, Buffer}`, then `h1_upgrade:send_capsule/4` and `h1_capsule:decode/1` on the raw socket.
 
 Client calls: `h1_client:connect/3`, `h1:wait_connected/2`, `h1:upgrade/4` returning `{ok, Sid, Socket, Buffer, RespHeaders}`.
 
@@ -136,7 +137,10 @@ Assumptions:
 
 - The dispatch `handler` fun runs in a spawned process per request and receives plain header names (`host`, `connection`, `upgrade`), which `masque_h1_server` compares case-insensitively.
 - `h1:request_version/2` (0.11.1) returns the HTTP version a request arrived with; the listener uses it to refuse HTTP/1.0 requests on upgrade paths with 400.
-- `accept_upgrade/3` writes the 101 and `accept_connect/3` the 200, and both move the socket's controlling process to the caller, which is the session. `Buffer` holds bytes already read past the header block. It returns `{error, no_upgrade_header}` when the `Upgrade` header is absent, which is how h1 answers an HTTP/1.0 request that carried one (h1 0.11.1 ignores the field, RFC 9110 §7.8).
+- A reject is a response with `connection: close`, which makes it the connection's last response: h1 closes the connection once it is written, first draining what the client sent past the request so a reset cannot destroy the response (0.12/0.13, h1's `docs/closing.md`). The listener does not call `close/1`, which stops the connection at once.
+- `accept_upgrade/3` writes the 101 and `accept_connect/3` the 200, and both move the socket's controlling process to the caller, which is the session. `Buffer` holds bytes already read past the header block; for a classic CONNECT it includes tunnel bytes the client sent right after the request (0.13.0; before, h1 read them as HTTP and answered 400).
+- While an upgrade or CONNECT waits for `accept_upgrade/3` or `accept_connect/3`, h1 does not read the socket, so a client that leaves during the session's start is noticed only when the session accepts.
+- On the client, `h1:upgrade/4` returns `{error, {http_status, Status, Headers}}` when the server refuses the upgrade (0.13.1); the h1 UDP and IP clients report it as `{handshake_rejected, Status, _}`. It returns `{error, no_upgrade_header}` when the `Upgrade` header is absent, which is how h1 answers an HTTP/1.0 request that carried one (h1 0.11.1 ignores the field, RFC 9110 §7.8).
 - `h1_capsule:decode/1` returns `{ok, _, _}` or `{more, _}` in practice. Its spec also allows `{error, _}`, which the h1 sessions do not handle.
 
 ## When you bump a dependency

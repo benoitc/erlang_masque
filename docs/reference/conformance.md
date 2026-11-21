@@ -108,7 +108,7 @@ Deviations:
 | §7.8 | Upgrade needs `Connection: Upgrade`; a 101 names the protocol; a server ignores `Upgrade` on an HTTP/1.0 request | The h1 listener requires the token (`bad_protocol` otherwise); every h1 client checks `Connection: Upgrade` and a single `Upgrade` with its token on the 101 (`bad_upgrade_response`). An HTTP/1.0 request that carried `Upgrade` is answered 400 (`bad_request`): h1 0.11.1 ignores the field on HTTP/1.0, and the listener reads the request version with `h1:request_version/2`. | `masque_h1_server`, `masque_http`, h1 client sessions |
 | §7.6.3 | `Via` records the hops | Chain handlers add their pseudonym to `via` on the upstream request, with the received-protocol of the request they got (`3`, `2` or `1.1`), and refuse a request that already names them (508, `loop_detected`). | `masque_chain_handler` |
 
-A rejected h1 request is answered with `connection: close` and the connection is closed; the code cites RFC 9931 (updates RFC 9298) for this.
+A rejected h1 request is answered with `connection: close` and the connection is closed (RFC 9931, which updates RFC 9298): h1 closes it after the response, draining what the client sent past the request first, so the client reads the whole response.
 
 ## RFC 8441 and RFC 9220: Extended CONNECT
 

@@ -899,8 +899,11 @@ quiet(Fun) ->
         exit:_ -> ok
     end.
 
+%% The stream ends when the test closes the edge, possibly during a send
+%% call: `send/2' then exits with the session's reason, which ends the
+%% flood like an error does.
 flood(S, Chunk) ->
-    case masque:send(S, Chunk) of
+    try masque:send(S, Chunk) of
         ok ->
             flood(S, Chunk);
         {error, Full} when Full =:= send_queue_full; Full =:= send_buffer_full ->
@@ -908,6 +911,8 @@ flood(S, Chunk) ->
             flood(S, Chunk);
         _ ->
             ok
+    catch
+        exit:_ -> ok
     end.
 
 %%====================================================================
