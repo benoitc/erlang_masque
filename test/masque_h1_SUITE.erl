@@ -32,6 +32,7 @@
     handshake_rejected_no_host_header/1,
     handshake_rejected_without_connection_upgrade/1,
     handshake_rejected_http_1_0_upgrade/1,
+    rejection_survives_trailing_bytes/1,
     init_handler_stop_produces_502_not_101/1,
     idle_timeout_closes_tunnel/1,
     drain_flag_rejects_new_tunnels/1,
@@ -52,6 +53,7 @@ all() ->
         handshake_rejected_no_host_header,
         handshake_rejected_without_connection_upgrade,
         handshake_rejected_http_1_0_upgrade,
+        rejection_survives_trailing_bytes,
         init_handler_stop_produces_502_not_101,
         idle_timeout_closes_tunnel,
         drain_flag_rejects_new_tunnels,
@@ -312,6 +314,55 @@ handshake_rejected_http_1_0_upgrade(Config) ->
         101,
         direct_request(Port, <<"GET">>, Path, Headers, <<"1.1">>)
     ).
+
+%% RFC 9931: a rejected upgrade closes the connection. Bytes the client
+%% sent past the request (here 2 MB of capsules) must not
+%% turn that close into a reset that destroys the response before the
+%% client reads it: h1 closes after the `connection: close' response
+%% and drains the input first, so the client gets the whole response
+%% and then end of file. Over TLS the client's `ssl' process may read
+%% the response before a reset arrives, so this pins the staged close
+%% rather than proving a reset away.
+rejection_survives_trailing_bytes(Config) ->
+    Port = ?config(port, Config),
+    {ok, Sock} = ssl:connect(
+        "127.0.0.1",
+        Port,
+        [
+            binary,
+            {active, false},
+            {verify, verify_none},
+            {alpn_advertised_protocols, [<<"http/1.1">>]}
+        ],
+        5000
+    ),
+    %% Enough capsules that the proxy cannot have read them all when it
+    %% answers: unread input is what turns a close into a reset. They
+    %% are sent from another process, as the proxy may stop reading.
+    Capsules = iolist_to_binary([
+        masque_capsule:encode(0, <<0, (binary:copy(<<"e">>, 1000))/binary>>)
+     || _ <- lists:seq(1, 2000)
+    ]),
+    Request = [
+        <<"GET /.well-known/masque/udp/127.0.0.1/0/ HTTP/1.1\r\n">>,
+        <<"host: localhost\r\nconnection: Upgrade\r\nupgrade: connect-udp\r\n">>,
+        <<"capsule-protocol: ?1\r\n\r\n">>
+    ],
+    ok = ssl:send(Sock, Request),
+    _ = spawn(fun() -> ssl:send(Sock, Capsules) end),
+    timer:sleep(500),
+    Resp = recv_until_closed(Sock, <<>>),
+    _ = ssl:close(Sock),
+    ?assertMatch(<<"HTTP/1.1 400", _/binary>>, Resp),
+    [_Head, Body] = binary:split(Resp, <<"\r\n\r\n">>),
+    ?assertEqual(<<"target_port out of range\n">>, Body).
+
+recv_until_closed(Sock, Acc) ->
+    case ssl:recv(Sock, 0, 3000) of
+        {ok, Bin} -> recv_until_closed(Sock, <<Acc/binary, Bin/binary>>);
+        {error, closed} -> Acc;
+        {error, Reason} -> ct:fail({recv, Reason, Acc})
+    end.
 
 init_handler_stop_produces_502_not_101(Config) ->
     %% A handler that refuses in `init/2' must reach the client as a

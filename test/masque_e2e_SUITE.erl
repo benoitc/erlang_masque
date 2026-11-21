@@ -20,6 +20,7 @@
     tcp_quiet_tunnel/1,
     h3_client_vanishes/1,
     h1_udp_stalled_client/1,
+    h1_classic_connect_optimistic_data/1,
     tcp_first_bytes_survive_handover/1,
     capsule_abort_resets_target/1,
     capsule_listener_without_header/1,
@@ -266,7 +267,8 @@ groups() ->
                     udp_unknown_capsule_skipped,
                     h1_duplicate_host_refused,
                     client_h1_transfer_encoding_refused,
-                    h1_udp_stalled_client
+                    h1_udp_stalled_client,
+                    h1_classic_connect_optimistic_data
                     | Fallback
                 ]},
         %% CONNECT-TCP in capsules (draft-ietf-httpbis-connect-tcp-18),
@@ -1799,6 +1801,42 @@ raw_close(h2, Conn) -> h2:close(Conn).
 
 %% Capsule writes on h1 ignore errors, so a client that stops reading
 %% must still end the session once the write timeout closes the socket.
+%% Classic CONNECT with the first tunnel bytes in the same write as the
+%% request: h1 0.13 returns them with the socket instead of reading them
+%% as HTTP (and answering 400), and the session hands them to the target.
+h1_classic_connect_optimistic_data(Config) ->
+    #{port := Port} = ?config(server, Config),
+    Host = iolist_to_binary(["127.0.0.1:", integer_to_list(?config(target_port, Config))]),
+    {ok, Sock} = ssl:connect(
+        "127.0.0.1",
+        Port,
+        [
+            binary,
+            {active, false},
+            {verify, verify_none},
+            {alpn_advertised_protocols, [<<"http/1.1">>]}
+        ],
+        5000
+    ),
+    ok = ssl:send(Sock, [
+        <<"CONNECT ">>, Host, <<" HTTP/1.1\r\nHost: ">>, Host, <<"\r\n\r\n">>, <<"echoping">>
+    ]),
+    Got = recv_past_head(Sock, <<>>),
+    ?assertMatch(<<"HTTP/1.1 200", _/binary>>, Got),
+    [_Head, Echoed] = binary:split(Got, <<"\r\n\r\n">>),
+    ?assertEqual(<<"ping">>, Echoed),
+    ssl:close(Sock).
+
+%% Read until the response head and four bytes after it have arrived.
+recv_past_head(Sock, Acc) ->
+    case binary:split(Acc, <<"\r\n\r\n">>) of
+        [_, Rest] when byte_size(Rest) >= 4 ->
+            Acc;
+        _ ->
+            {ok, Bin} = ssl:recv(Sock, 0, 5000),
+            recv_past_head(Sock, <<Acc/binary, Bin/binary>>)
+    end.
+
 h1_udp_stalled_client(Config) ->
     {Flood, FloodPort} = start_udp_flood(),
     #{port := Port} = ?config(server, Config),

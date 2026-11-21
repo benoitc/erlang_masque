@@ -200,7 +200,9 @@ h3_client_certificate(Config) ->
     masque:close(Sess).
 
 %% A listener that requires client certificates refuses a client without
-%% one, and the handler never runs.
+%% one, and the handler never runs. Since quic 3.3.0 the client gets the
+%% server's reason at once: TLS alert 116, certificate_required, as QUIC
+%% error 0x174.
 h3_client_without_certificate_refused(Config) ->
     #{cert := Cert} = ?config(certs, Config),
     Port = start_h3(Config, #{
@@ -209,12 +211,13 @@ h3_client_without_certificate_refused(Config) ->
         quic_opts => #{require_client_cert => true, cacerts => [Cert]}
     }),
     Uri = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
-    ?assertMatch(
-        {error, _},
-        masque:connect(Uri, {<<"127.0.0.1">>, ?config(echo_port, Config)}, #{
-            protocol => tcp, transports => [h3], verify => verify_none, timeout => 5000
-        })
-    ),
+    T0 = erlang:monotonic_time(millisecond),
+    R = masque:connect(Uri, {<<"127.0.0.1">>, ?config(echo_port, Config)}, #{
+        protocol => tcp, transports => [h3], verify => verify_none, timeout => 5000
+    }),
+    Elapsed = erlang:monotonic_time(millisecond) - T0,
+    ?assertMatch({error, {connect, {peer_closed, transport, 16#174, _, _}}}, R),
+    ?assert(Elapsed < 2000),
     receive
         {peer_cert, _} -> ct:fail(handler_ran)
     after 0 -> ok
