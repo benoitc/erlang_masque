@@ -8,6 +8,7 @@
 -include_lib("stdlib/include/assert.hrl").
 
 -export([suite/0, all/0, init_per_suite/1, end_per_suite/1]).
+-export([log/2]).
 -export([init_per_testcase/2, end_per_testcase/2]).
 -export([
     h3_sni_callback_without_cert/1,
@@ -200,9 +201,10 @@ h3_client_certificate(Config) ->
     masque:close(Sess).
 
 %% A listener that requires client certificates refuses a client without
-%% one, and the handler never runs. Since quic 3.3.0 the client gets the
-%% server's reason at once: TLS alert 116, certificate_required, as QUIC
-%% error 0x174.
+%% one, and the handler never runs. The client gets the server's reason
+%% at once (quic 3.3.0): TLS alert 116, certificate_required, as QUIC
+%% error 0x174. A refusal is not an error of the proxy, and any client
+%% can cause one, so nothing is logged at error level (quic 3.3.2).
 h3_client_without_certificate_refused(Config) ->
     #{cert := Cert} = ?config(certs, Config),
     Port = start_h3(Config, #{
@@ -211,6 +213,7 @@ h3_client_without_certificate_refused(Config) ->
         quic_opts => #{require_client_cert => true, cacerts => [Cert]}
     }),
     Uri = iolist_to_binary(["https://127.0.0.1:", integer_to_list(Port)]),
+    Reports = count_error_reports(),
     T0 = erlang:monotonic_time(millisecond),
     R = masque:connect(Uri, {<<"127.0.0.1">>, ?config(echo_port, Config)}, #{
         protocol => tcp, transports => [h3], verify => verify_none, timeout => 5000
@@ -218,10 +221,30 @@ h3_client_without_certificate_refused(Config) ->
     Elapsed = erlang:monotonic_time(millisecond) - T0,
     ?assertMatch({error, {connect, {peer_closed, transport, 16#174, _, _}}}, R),
     ?assert(Elapsed < 2000),
+    timer:sleep(200),
+    ?assertEqual(0, stop_counting(Reports)),
     receive
         {peer_cert, _} -> ct:fail(handler_ran)
     after 0 -> ok
     end.
+
+count_error_reports() ->
+    Counter = counters:new(1, []),
+    Id = list_to_atom("options_reports_" ++ integer_to_list(erlang:unique_integer([positive]))),
+    ok = logger:add_handler(Id, ?MODULE, #{level => error, config => #{counter => Counter}}),
+    {Id, Counter}.
+
+stop_counting({Id, Counter}) ->
+    ok = logger:remove_handler(Id),
+    counters:get(Counter, 1).
+
+%% logger handler: one count per error-level event.
+log(#{level := Level}, #{config := #{counter := Counter}}) when
+    Level =:= error; Level =:= critical; Level =:= alert; Level =:= emergency
+->
+    counters:add(Counter, 1, 1);
+log(_Event, _Config) ->
+    ok.
 
 %% Connections with different QUIC options are never shared.
 h3_pool_keeps_quic_opts_apart(Config) ->
