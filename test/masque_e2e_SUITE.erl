@@ -2752,8 +2752,13 @@ target_accept(Listen) ->
             target_accept(Listen);
         {error, closed} ->
             ok;
-        %% A connection aborted (reset) before it was accepted; macOS
-        %% reports it as `einval'.
+        %% A connection reset before it was accepted (macOS reports it as
+        %% `einval', Linux as `econnaborted'): a tunnel that aborts right
+        %% after dialing, as one that gets invalid data queued during its
+        %% start does. To the case it is a reset like any other.
+        {error, Reason} when Reason =:= einval; Reason =:= econnaborted ->
+            probe({target, closed, econnreset}),
+            target_accept(Listen);
         {error, Reason} ->
             ct:pal("target accept: ~p", [Reason]),
             timer:sleep(10),
