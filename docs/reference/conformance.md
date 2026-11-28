@@ -6,6 +6,8 @@ Section numbers in the RFC 9484 table were checked against the RFC's table of co
 
 ## RFC 9298: Proxying UDP in HTTP
 
+Interop: tested against quic-go's `masque-go` (with quic-go 0.66) over HTTP/3, its client through masque's proxy and masque's client through its proxy, in `masque_interop_SUITE`.
+
 | Section | Requirement | Behaviour in masque | Module |
 | --- | --- | --- | --- |
 | §2 | URI template with `target_host` and `target_port` | Default `/.well-known/masque/udp/{target_host}/{target_port}/`; client expands, server matches `:path`. Parsing is strict: dotted-quad IPv4 only, no zone ids, digit-only ports, no double decoding. | `masque_uri`, `masque_uri_template`, `include/masque.hrl` |
@@ -46,6 +48,8 @@ Deviations:
 ## RFC 9484: Proxying IP in HTTP
 
 This table replaces the compliance map from the former `docs/connect_ip.md`. Each row was checked against the code.
+
+Interop: tested against quic-go's `connect-ip-go` 0.8 over HTTP/3, its client through masque's proxy and masque's client through its proxy, in `masque_interop_SUITE`. connect-ip-go also sends the DNS configuration and PREF64 capsules of draft-ietf-masque-connect-ip-dns, which masque does not implement: they are skipped as unknown capsules (RFC 9297 section 3.2) and the tunnel goes on. connect-ip-go does not expand URI templates, so its request carries the URL as configured; the suite uses a bare `*` for the target and protocol, which masque accepts (see the deviations), and connect-ip-go's proxy accepts masque's `%2A`.
 
 | Section | Requirement | Behaviour in masque | Module |
 | --- | --- | --- | --- |
