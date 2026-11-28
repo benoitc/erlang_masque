@@ -87,7 +87,7 @@ End-to-end behaviour pinned to a spec. Add a case here when you implement or fix
 | `masque_upstream_pool_SUITE` | pooled upstream shared by several chain tunnels |
 | `masque_reverse_tunnel_example_SUITE` | smoke test of `examples/reverse_tunnel.erl` on h3, h2 and h1 |
 | `masque_two_hop_example_SUITE` | smoke test of `examples/two_hop_relay.erl` (the test profile compiles `examples/`) |
-| `masque_interop_SUITE` | quic-go's `masque-go` and `connect-ip-go` over h3, in both roles; skipped unless `MASQUE_GO_BIN` is set |
+| `masque_interop_SUITE` | every feature of quic-go's `masque-go` and `connect-ip-go` clients against our proxy, and our clients against their proxies, over h3; skipped unless `MASQUE_GO_BIN` is set |
 | `masque_curl_SUITE` | real `curl` through the h1 CONNECT-TCP proxy; skipped if curl is missing |
 | `masque_load_SUITE` | busy UDP tunnels, many short tunnels, and many short reverse connect streams on one control channel; every case fails if anything logs an error report. Skipped unless `MASQUE_LOAD=1` |
 | `masque_soak_SUITE` | on h3, h2 and h1: rounds of short UDP and TCP tunnels where processes, ports, ETS rows and memory may not grow, owners killed with tunnels open, peers that hang up mid-handshake or send junk, and no process busy once idle. Fails on any error report. Skipped unless `MASQUE_LOAD=1` |
@@ -131,7 +131,14 @@ CT logs go to `_build/test/logs/`. Open `_build/test/logs/index.html` and follow
 
 ### The interop suite
 
-`masque_interop_SUITE` runs a Go helper (`test/interop`) built on quic-go's `masque-go` and `connect-ip-go`: its CONNECT-UDP and CONNECT-IP clients through our proxy, and our client through its proxy. Without `MASQUE_GO_BIN` every case is skipped. CI builds the helper and runs the suite.
+`masque_interop_SUITE` runs a Go helper (`test/interop`) built on quic-go 0.66, `masque-go` and `connect-ip-go` 0.8, over HTTP/3, the only transport the Go libraries speak. Without `MASQUE_GO_BIN` every case is skipped. CI builds the helper and runs the suite.
+
+- **Go clients through our proxy** (group `peer_clients`):
+  - CONNECT-UDP: payloads from 1 byte to a full datagram, several tunnels on one connection, IPv6 and host-name targets, a refusal with its status and Proxy-Status, and a tunnel ended by either side.
+  - CONNECT-IP: IPv4 and IPv6 addresses and pings, the routes we advertise, addresses and routes the client assigns to the proxy, an address request from the proxy that the client answers, DNS configuration and PREF64 capsules skipped, ICMP for a packet above the proxy's MTU, two tunnels on one connection, and a tunnel ended by either side.
+- **Our clients through Go proxies** (group `our_clients`): CONNECT-UDP alone and pooled (two tunnels on one connection), and CONNECT-IP (address, route, ping).
+
+masque-go is pinned to the commit of its pull request #151, which moves it to quic-go 0.66; the released masque-go does not build against it. Move back to a tagged masque-go once it releases.
 
 ```bash
 (cd test/interop && go build -o ../../_build/masque_interop .)
