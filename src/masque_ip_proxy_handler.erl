@@ -341,9 +341,24 @@ iter_pool(
 ) ->
     Max = max_prefix(V),
     Stride = 1 bsl (Max - Pfx),
-    StartInt = align_up(addr_to_int(V, StartAddr), Stride),
-    EndInt = addr_to_int(V, EndAddr),
-    iter_range_strided(V, StartInt, EndInt, Stride, Assigned, Claim, ?MAX_PROBES).
+    {First, Last} = host_range(V, Pfx, addr_to_int(V, StartAddr), addr_to_int(V, EndAddr)),
+    StartInt = align_up(First, Stride),
+    iter_range_strided(V, StartInt, Last, Stride, Assigned, Claim, ?MAX_PROBES).
+
+%% When the pool is a whole subnet of more than two addresses, a single
+%% address (/32, /128) is never its first address: in IPv6 that is the
+%% subnet-router anycast address (RFC 4291 section 2.6.1), in IPv4 the
+%% network address. Nor, in IPv4, its last, the broadcast address. An
+%% explicit range that is not a subnet is used as given, and so is any
+%% pool when whole prefixes are handed out.
+host_range(V, Pfx, First, Last) ->
+    Size = Last - First + 1,
+    Subnet = Size > 2 andalso Size band (Size - 1) =:= 0 andalso First band (Size - 1) =:= 0,
+    case Pfx =:= max_prefix(V) andalso Subnet of
+        true when V =:= 4 -> {First + 1, Last - 1};
+        true -> {First + 1, Last};
+        false -> {First, Last}
+    end.
 
 iter_range_strided(_V, _Cur, _End, _Stride, _Assigned, _Claim, 0) ->
     exhausted;
