@@ -238,12 +238,12 @@ peer_udp_proxy_ends_tunnel(Config) ->
 peer_ip_client_through_our_proxy(Config) ->
     Out = ip_client(Config, ["-gateway", "10.201.0.254"]),
     ?assertMatch(
-        {match, _}, re:run(Out, "assigned:10\\.201\\.0\\.[0-9]+ reply-from:10\\.201\\.0\\.254")
+        {match, _}, re:run(Out, "assigned:10\\.201\\.0\\.1 reply-from:10\\.201\\.0\\.254")
     ).
 
 peer_ip_ipv6(Config) ->
     Out = ip_client(Config, ["-family", "6", "-gateway", "fd00:201::fe"]),
-    ?assertMatch({match, _}, re:run(Out, "assigned:fd00:201::[0-9a-f:]* reply-from:fd00:201::fe")).
+    ?assertMatch({match, _}, re:run(Out, "assigned:fd00:201::1 reply-from:fd00:201::fe")).
 
 %% The Go client reads the routes we advertise, in both families.
 peer_ip_routes(Config) ->

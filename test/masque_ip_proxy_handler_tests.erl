@@ -222,7 +222,7 @@ address_assigned_emits_lifecycle_test() ->
     ),
     ?assertEqual(Before + 1, masque_metrics:ip_assigned_count()),
     receive
-        {hook, address_assigned, #{version := 4, prefix_len := 32, address := {10, 0, 0, 0}}} -> ok
+        {hook, address_assigned, #{version := 4, prefix_len := 32, address := {10, 0, 0, 1}}} -> ok
     after 100 ->
         ct:fail("lifecycle_fun was not invoked for address_assigned")
     end.
@@ -321,7 +321,60 @@ allocate_default_is_host_route_test() ->
     {ok, _, [{assign, [A]}]} =
         masque_ip_proxy_handler:handle_address_request(Reqs, S0),
     ?assertEqual(32, A#ip_assignment.prefix_len),
+    ?assertEqual({10, 0, 0, 1}, A#ip_assignment.address).
+
+%% A host address never takes the IPv6 subnet-router anycast address.
+allocate_v6_skips_anycast_test() ->
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    {ok, S0} = masque_ip_proxy_handler:init(Req, #{
+        address_pool => {6, {16#fd00, 0, 0, 0, 0, 0, 0, 0}, 64}
+    }),
+    {ok, _, [{assign, [A]}]} =
+        masque_ip_proxy_handler:handle_address_request([host_request(1, 6)], S0),
+    ?assertEqual({16#fd00, 0, 0, 0, 0, 0, 0, 1}, A#ip_assignment.address).
+
+%% In IPv4 neither the network nor the broadcast address is handed out.
+allocate_v4_skips_network_and_broadcast_test() ->
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    {ok, S0} = masque_ip_proxy_handler:init(Req, #{
+        address_pool => {4, {10, 0, 0, 0}, 30}, max_assignments => 4
+    }),
+    {ok, S1, _} = masque_ip_proxy_handler:handle_address_request([host_request(1, 4)], S0),
+    {ok, S2, _} = masque_ip_proxy_handler:handle_address_request([host_request(2, 4)], S1),
+    %% The pool is exhausted: the third request is refused, and the full
+    %% set sent back holds only the two host addresses.
+    {ok, _, [{assign, Set}]} =
+        masque_ip_proxy_handler:handle_address_request([host_request(3, 4)], S2),
+    ?assertEqual(
+        [{0, 0, 0, 0}, {10, 0, 0, 1}, {10, 0, 0, 2}],
+        lists:sort([A#ip_assignment.address || A <- Set])
+    ).
+
+%% An explicit range that is not a subnet is used as given.
+allocate_explicit_range_used_as_given_test() ->
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    Range = #ip_route{
+        version = 4, start_addr = {10, 0, 0, 0}, end_addr = {10, 0, 0, 2}, ip_protocol = 0
+    },
+    {ok, S0} = masque_ip_proxy_handler:init(Req, #{address_pool => Range}),
+    {ok, _, [{assign, [A]}]} =
+        masque_ip_proxy_handler:handle_address_request([host_request(1, 4)], S0),
     ?assertEqual({10, 0, 0, 0}, A#ip_assignment.address).
+
+%% A two-address pool has no reserved address to skip.
+allocate_v4_pool_of_two_test() ->
+    Req = #{ip_target => '*', ip_ipproto => '*'},
+    {ok, S0} = masque_ip_proxy_handler:init(Req, #{address_pool => {4, {10, 0, 0, 0}, 31}}),
+    {ok, _, [{assign, [A]}]} =
+        masque_ip_proxy_handler:handle_address_request([host_request(1, 4)], S0),
+    ?assertEqual({10, 0, 0, 0}, A#ip_assignment.address).
+
+host_request(Id, 4) ->
+    #ip_prefix_request{request_id = Id, version = 4, address = {0, 0, 0, 0}, prefix_len = 32};
+host_request(Id, 6) ->
+    #ip_prefix_request{
+        request_id = Id, version = 6, address = {0, 0, 0, 0, 0, 0, 0, 0}, prefix_len = 128
+    }.
 
 %%====================================================================
 %% forward_fun {actions, _, _} shape
@@ -389,7 +442,7 @@ terminate_releases_assignments_test() ->
     Before = masque_metrics:ip_released_count(),
     ok = masque_ip_proxy_handler:terminate(normal, S1),
     receive
-        {hook, address_released, #{version := 4, address := {10, 0, 0, 0}, prefix_len := 32}} -> ok
+        {hook, address_released, #{version := 4, address := {10, 0, 0, 1}, prefix_len := 32}} -> ok
     after 100 ->
         ct:fail("lifecycle_fun was not invoked for address_released")
     end,

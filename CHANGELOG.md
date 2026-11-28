@@ -117,6 +117,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The built-in CONNECT-IP handler no longer gives a client a reserved
+  address of a subnet pool: the first one, which is the subnet-router anycast
+  address in IPv6 and the network address in IPv4, nor the IPv4 broadcast
+  address. The first client of a pool now gets the `.1` or `::1` address.
 - HTTP/1.1 clients now refuse a 101 that does not carry `Connection: Upgrade`
   and a single `Upgrade` naming the protocol they asked for, as RFC 9298,
   RFC 9484 and the CONNECT-TCP draft require.

@@ -116,7 +116,7 @@ Host name targets are resolved by the listener before `accept/1`, with the liste
 
 ### Address pools
 
-On ADDRESS_REQUEST the handler walks the pool for the requested version and hands out the first free block. A request for a prefix length shorter than `min_assignable_prefix` gets the minimum; by default every client gets a single address (/32 or /128). To delegate IPv6 /64s while keeping IPv4 host routes:
+On ADDRESS_REQUEST the handler walks the pool for the requested version and hands out the first free block. When the pool is a subnet, single addresses skip its reserved ones: the first address (the IPv6 subnet-router anycast address, the IPv4 network address) and, in IPv4, the last (broadcast), so a /24 gives `.1` to `.254` and an IPv6 /64 starts at `::1`. An `#ip_route{}` range that is not a whole subnet, a subnet of one or two addresses, and blocks shorter than a host route use the whole range. A request for a prefix length shorter than `min_assignable_prefix` gets the minimum; by default every client gets a single address (/32 or /128). To delegate IPv6 /64s while keeping IPv4 host routes:
 
 ```erlang
 handler_opts => #{address_pool => [{4, {10,200,0,0}, 16}, {6, {16#2001,16#db8,0,0,0,0,0,0}, 48}],
